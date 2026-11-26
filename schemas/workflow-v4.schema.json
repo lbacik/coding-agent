@@ -930,6 +930,26 @@
                   "additionalProperties": false,
                   "description": "An `agent` executor block (\u00a79). See docs/ops/workflow-configuration.md.",
                   "properties": {
+                    "advisor": {
+                      "additionalProperties": false,
+                      "description": "The step's Advisor declaration (\u00a79). Required exactly where the `advisor` tool group is declared. See docs/ops/workflow-configuration.md.",
+                      "properties": {
+                        "model": {
+                          "description": "A `models` id answering the Advisor (else the Pinned Model).",
+                          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                          "type": "string"
+                        },
+                        "prompt": {
+                          "description": "One operator prompt file (\u00a72.8).",
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "prompt"
+                      ],
+                      "type": "object"
+                    },
                     "inputs": {
                       "description": "Step data references (`<step>.<result>.<field>`, `<step>.facts`, or `{optional: <ref>}`). The schema checks the shape only. See docs/ops/workflow-configuration.md.",
                       "items": {
@@ -1066,9 +1086,10 @@
                       "type": "object"
                     },
                     "tools": {
-                      "description": "Granted tool groups (workspace-read, workspace-write, shell, tests, subagents). Always-present tools (report, report-result, activate-skill, read-result) are not declared. See docs/ops/workflow-configuration.md.",
+                      "description": "Granted tool groups (workspace-read, workspace-write, shell, tests, subagents, advisor). Always-present tools (report, report-result, activate-skill, read-result) are not declared. See docs/ops/workflow-configuration.md.",
                       "items": {
                         "enum": [
+                          "advisor",
                           "shell",
                           "subagents",
                           "tests",

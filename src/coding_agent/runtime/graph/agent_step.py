@@ -23,13 +23,14 @@ rolled back.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.messages import (
     AIMessage,
@@ -68,6 +69,7 @@ from coding_agent.runtime.conversation_context import (
 )
 from coding_agent.runtime.graph.agent_model_request import (
     ModelRequestEnding,
+    RequestPin,
     _flush_attempt_usage,
     _hard_usable_for,
     _is_gateway_for,
@@ -84,15 +86,36 @@ from coding_agent.runtime.step_limits import (
     LimitFact,
 )
 from coding_agent.profile.schema import ProjectProfile
+from coding_agent.runtime.graph.advisor import (
+    ADVISOR_ENDED_KIND,
+    ADVISOR_STARTED_KIND,
+    ADVISOR_TOOL_NAMES,
+    ASK_ADVISOR_TOOL,
+    REPORT_ADVICE_TOOL,
+    AdvisorCallTally,
+    AdvisorConsultation,
+    AdvisorEnding,
+    advisor_question_preview,
+    advisor_tool_result_text,
+    build_advisor_tools,
+    build_ask_advisor_tool,
+    compose_advisor_opening,
+    estimate_advisor_admission,
+    validate_advisor_args,
+)
+from coding_agent.provider.config import policy_for_pin
 from coding_agent.runtime.graph.subagent import (
     SUBAGENT_ENDED_KIND,
     SUBAGENT_QUEUED_KIND,
     SUBAGENT_STARTED_KIND,
+    SUBAGENT_TOOL_NAMES,
     SubagentEnding,
     SubagentRecord,
+    SubagentResult,
     build_read_change_tool as build_subagent_read_change_tool,
     build_subagent_tools,
     estimate_spawn_admission,
+    run_subagent,
     subagent_tool_result_text,
     validate_spawn_args,
 )
@@ -102,6 +125,7 @@ from coding_agent.runtime.redaction import (
     registry_from,
 )
 from coding_agent.runtime.transcript import (
+    fork_advisor_conversation,
     fork_conversation,
     fork_subagent_conversation,
     work_conversation,
@@ -255,12 +279,16 @@ TESTS_TOOLS = ("test_targeted", "run_check")
 SUBAGENTS_TOOLS = (SPAWN_TOOL_NAME,)
 """``subagents`` group: Sub-agents with their fixed read-only tools (§9.8)."""
 
+ADVISOR_TOOLS = (ASK_ADVISOR_TOOL,)
+"""``advisor`` group: the Advisor question tool (§9)."""
+
 GROUP_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "workspace-read": WORKSPACE_READ_TOOLS,
     "workspace-write": WORKSPACE_WRITE_TOOLS,
     "shell": SHELL_TOOLS,
     "tests": TESTS_TOOLS,
     "subagents": SUBAGENTS_TOOLS,
+    "advisor": ADVISOR_TOOLS,
 }
 """Declared tool groups to the concrete tool names they bind (§9.4)."""
 
@@ -438,6 +466,8 @@ class ExecutionTally:
     model_calls: int = 0
     tool_calls: int = 0
     subagent_reports: int = 0
+    advisor_consultations: list[AdvisorConsultation] = field(default_factory=list)
+    """Every ended ``ask_advisor`` call, in call order, for the summary (§9)."""
     corrections: int = 0
     events: list[dict[str, object]] = field(default_factory=list)
     history_units: list[ExchangeUnit] = field(default_factory=list)
@@ -519,6 +549,7 @@ class ExecutionTally:
             spend=spend,
             redactions=self.deps.redactions,
             provider_failure=provider_failure,
+            advisor_consultations=list(self.advisor_consultations),
         )
 
     def limit(self, fact: LimitFact, detail: str) -> AgentStepOutcome:
@@ -980,6 +1011,35 @@ class AgentStepDeps:
     :class:`ShutdownRequested` once this reports the signal, and the spawn
     group passes it to :func:`run_subagent` as its ``is_stopped``.
     """
+    pins: Mapping[str, PinnedModel] = field(default_factory=dict)
+    """Every referenced pin, by pin id, in assertion order (§9.1).
+
+    The Workflow's own pin plus each step's Advisor pin: an Advisor
+    conversation is asserted against (and priced at) its own pin.
+    Empty where the Workflow names no Advisor pin (tests only).
+    """
+    pin_prices: Mapping[str, TokenPrices] = field(default_factory=dict)
+    """Every referenced pin's per-bucket prices, by pin id (§11.4)."""
+    pin_models: Mapping[str, Any] = field(default_factory=dict)
+    """Every referenced pin's built chat model, by pin id (§9.1).
+
+    The Advisor runner forks the entry for its pin under the Advisor
+    conversation label; a missing entry falls back to the step's own
+    model (tests only).
+    """
+    model_id: str = ""
+    """The Workflow's configured `models` id, for the ledger pin id (§13.2).
+
+    Carried because :class:`PinnedModel` holds no config id: an Advisor
+    running on the Pinned Model records the Workflow's own id.
+    """
+    advisor_tally: AdvisorCallTally = field(default_factory=AdvisorCallTally)
+    """Attempt-wide counter assigning call ids to Advisor calls (§9).
+
+    Owned by the Attempt's deps (built once per Attempt run), so the
+    ``advisor_started`` / ``advisor_ended`` ledger events pair across Step
+    Executions and never collide with a Sub-agent's call ids.
+    """
 
 
 def compose_attempt_header(attempt: StepAttemptFacts) -> str:
@@ -1406,6 +1466,8 @@ def build_agent_step_tools(step: WorkflowStep, deps: AgentStepDeps) -> tuple[Bas
             by_name["run_check"] = run_check
     if "subagents" in declared:
         by_name[SPAWN_TOOL_NAME] = _build_spawn_tool()
+    if "advisor" in declared:
+        by_name[ASK_ADVISOR_TOOL] = build_ask_advisor_tool()
     by_name[REPORT_TOOL_NAME] = _build_report_tool()
     by_name[ACTIVATION_TOOL_NAME] = _build_activation_tool(deps)
     by_name[SLICE_TOOL_NAME] = build_read_result_slice_tool(deps.artifact_store)
@@ -1635,6 +1697,7 @@ def compose_execution_summary(
     spend: Mapping[str, object],
     redactions: Redactable = None,
     provider_failure: Mapping[str, object] | None = None,
+    advisor_consultations: Sequence[AdvisorConsultation] = (),
 ) -> dict[str, object]:
     """The runtime-composed Execution Summary (`<step>.facts`, §9.7).
 
@@ -1644,8 +1707,12 @@ def compose_execution_summary(
     Execution that ended ``error`` on a provider failure (§9.6) also carries
     the ``provider_failure`` marker — the error class, the HTTP status where
     there is one, and whether it was a context overflow — composed before
-    the redaction and the cap like every other field. It never
-    includes the Transcript or model message content.
+    the redaction and the cap like every other field. Where the Step
+    Execution consulted an Advisor, it also lists each consultation in call
+    order — the first 120 characters of its question, its ending and its
+    pin (§9). The key rides only on executions that consulted one:
+    executions without an Advisor record byte-identical bytes without it.
+    It never includes the Transcript or model message content.
     """
     registry = registry_from(redactions)
     summary: dict[str, object] = {
@@ -1657,6 +1724,15 @@ def compose_execution_summary(
     }
     if provider_failure is not None:
         summary["provider_failure"] = dict(provider_failure)
+    if advisor_consultations:
+        summary["advisor_consultations"] = [
+            {
+                "question_preview": item.question_preview,
+                "ending": item.ending,
+                "pin_id": item.pin_id,
+            }
+            for item in advisor_consultations
+        ]
     redacted = registry.redact_json(summary)
     assert isinstance(redacted, dict)
     encoded = json.dumps(redacted, sort_keys=True, separators=(",", ":"))
@@ -2077,6 +2153,7 @@ def _run_agent_step_inner(
         report_errors: list[str] = []
         index = 0
         pending_spawns: list[tuple[int, str, object, object]] = []
+        advisor_billable_total = 0
         while index < len(calls):
             call = calls[index]
             name = str(call.get("name"))
@@ -2099,6 +2176,63 @@ def _run_agent_step_inner(
                     )
                 group_ordinal += 1
                 index = end
+                continue
+            if name == ASK_ADVISOR_TOOL:
+                # One question, one fresh Advisor conversation, run to its
+                # end before the next call starts: calls in one turn are a
+                # barrier — sequential in call order, results in call order
+                # (§9). Never a spawn group, never concurrent.
+                question = args.get("question")
+                invalid = validate_advisor_args(question)
+                if invalid is not None:
+                    results.append(ToolMessage(content=invalid, tool_call_id=call_id))
+                else:
+                    assert isinstance(question, str)
+                    advisor_call_id = deps.advisor_tally.next_call_id()
+                    (
+                        advisor_text,
+                        advisor_consultation,
+                        advisor_member_billable,
+                        advisor_member_fact,
+                    ) = _run_advisor_call(
+                        deps,
+                        step,
+                        seq,
+                        opening,
+                        advisor_call_id,
+                        question,
+                        tally.record_event,
+                    )
+                    results.append(
+                        ToolMessage(content=advisor_text, tool_call_id=call_id)
+                    )
+                    advisor_billable_total += advisor_member_billable
+                    tally.advisor_consultations.append(advisor_consultation)
+                    if advisor_member_fact is not None:
+                        # The member's tool-call batch crossed a limit: like
+                        # the spawn group's crossing fact, the calling Step
+                        # Execution ends ``limit-exceeded`` with it (§11.7).
+                        # The post-loop count is skipped on this early return,
+                        # so the caller's own calls up to this one count here.
+                        messages.extend(results)
+                        if isinstance(response, AIMessage):
+                            tally.history_units.append(
+                                ExchangeUnit(response, tuple(results))
+                            )
+                        tally.tool_calls += len(
+                            [
+                                call
+                                for call in calls[: index + 1]
+                                if str(call.get("name")) != SPAWN_TOOL_NAME
+                            ]
+                        )
+                        tally.tool_calls += advisor_billable_total
+                        return tally.limit(
+                            advisor_member_fact,
+                            "the tool-call limit is crossed: "
+                            f"{advisor_member_fact.scope}",
+                        )
+                index += 1
                 continue
             if name == REPORT_TOOL_NAME:
                 raw_result = args.get("result")
@@ -2175,6 +2309,7 @@ def _run_agent_step_inner(
                 raise ShutdownRequested(step_id=step.id, seq=seq)
             tally.tool_calls += len(ordered)
             tally.tool_calls += group_billable
+            tally.tool_calls += advisor_billable_total
             tally.tool_calls += len(
                 [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
             )
@@ -2192,6 +2327,7 @@ def _run_agent_step_inner(
                     f"the tool-call limit is crossed: {group_fact.scope}",
                 )
         else:
+            tally.tool_calls += advisor_billable_total
             tally.tool_calls += len(
                 [call for call in calls if str(call.get("name")) != SPAWN_TOOL_NAME]
             )
@@ -2244,6 +2380,344 @@ def _primary_tool_fact(facts: list[LimitFact]) -> LimitFact | None:
         key=lambda item: (precedence.get(item[1].scope, 99), item[0]),
     )
     return ordered[0][1]
+
+
+def _advisor_opening_text(
+    deps: AgentStepDeps,
+    step: WorkflowStep,
+    opening: Sequence[BaseMessage],
+    prompt_text: str,
+    question: str,
+) -> str:
+    """One Advisor's opening text: framing, caller data, prompt, question (§9).
+
+    Items 1–3 of the caller's Pinned Prefix — the Attempt Header facts, the
+    input framed as data, and the caller's declared inputs — but never the
+    caller's Step Result contract: the Advisor answers under the operator's
+    ``advisor.prompt`` role, not the caller's contract. The question travels
+    verbatim last, so the Advisor works only from the question, the
+    operator's role and the Attempt data below.
+    """
+
+    def _text(message: BaseMessage) -> str:
+        content = message.content
+        return content if isinstance(content, str) else str(content)
+
+    header = _text(opening[0]) if opening else ""
+    workflow_input = _text(opening[1]) if len(opening) > 1 else ""
+    declared_inputs: str | None = None
+    for message in opening[2:]:
+        text = _text(message)
+        if text.startswith("# Declared inputs"):
+            declared_inputs = text
+            break
+    return compose_advisor_opening(
+        attempt_header=header,
+        workflow_input=workflow_input,
+        comments=comments_block_for(step, deps.attempt),
+        declared_inputs=declared_inputs,
+        prompt_text=prompt_text,
+        question=question,
+    )
+
+
+def _run_advisor_call(
+    deps: AgentStepDeps,
+    step: WorkflowStep,
+    seq: int,
+    opening: Sequence[BaseMessage],
+    call_id: str,
+    question: str,
+    record_event: Callable[[str, str, dict[str, object]], None],
+) -> tuple[str, AdvisorConsultation, int, LimitFact | None]:
+    """Run one ``ask_advisor`` call's fresh Advisor conversation (§9).
+
+    One question, one fresh read-only conversation on the step's Advisor pin
+    — the Pinned Model where ``agent.advisor`` names no ``model`` — with no
+    caller history. The Advisor binds exactly the Sub-agent read-only set
+    plus its own ``report_advice`` exit, runs the same bounded read-only
+    loop as a Sub-agent, and returns its report (or its ending) as the
+    caller's tool result; the caller continues in the same conversation.
+
+    Every Advisor request is admitted individually on the Advisor pin and
+    settles at the Advisor pin's prices against the calling Step Execution,
+    its Step Allowance, the Work Pool or reserve, and the Attempt Ceiling —
+    origin ``subagent``, so non-Advisor records never change shape (§11).
+    A model failure or Context Overflow ends the Advisor and never the
+    caller, and a pin violation on the Advisor pin propagates — halting the
+    Worker — after its ``advisor_ended`` event is recorded.
+
+    Returns the caller-facing tool result, the consultation for the
+    Execution Summary, the member's billable tool-call total for the step
+    tally, and the member's tool-call crossing fact (or ``None``): a
+    crossing batch ends the calling Step Execution ``limit-exceeded`` like
+    the spawn group's crossing fact.
+    """
+    assert step.agent is not None
+    advisor_decl = step.agent.advisor
+    assert advisor_decl is not None
+    preview = advisor_question_preview(question)
+    question_bytes = question.encode("utf-8")
+    question_sha = hashlib.sha256(question_bytes).hexdigest()
+    if advisor_decl.model is None:
+        request_pin = RequestPin.from_deps(deps)
+        pin_id = deps.model_id
+        base_model = deps.model
+    else:
+        pin_id = advisor_decl.model
+        advisor_pin = deps.pins[pin_id]
+        advisor_policy = policy_for_pin(advisor_pin)
+        assert advisor_policy.output_cap is not None
+        assert advisor_policy.context_window is not None
+        request_pin = RequestPin.from_pin(
+            advisor_pin,
+            deps.pin_prices[pin_id],
+            advisor_policy.output_cap,
+            advisor_policy.context_window,
+        )
+        base_model = deps.pin_models.get(pin_id, deps.model)
+    record_event(
+        ADVISOR_STARTED_KIND,
+        f"advisor started {call_id!r}",
+        {
+            "attempt_id": deps.attempt.attempt_id,
+            "step_id": step.id,
+            "seq": seq,
+            "call_id": call_id,
+            "pin_id": pin_id,
+            "question_bytes": len(question_bytes),
+            "question_sha256": question_sha,
+        },
+    )
+    record = SubagentRecord(description=preview)
+    tools = build_advisor_tools(
+        deps.workspace,
+        record,
+        artifact_store=deps.artifact_store,
+        base_revision=deps.attempt.base_revision,
+        change_artifact_id=f"read-change-{call_id}",
+        base_tip=deps.attempt.base_tip,
+    )
+    assert {tool.name for tool in tools} == set(ADVISOR_TOOL_NAMES)
+    opening_text = _advisor_opening_text(
+        deps, step, opening, _prompt_text(advisor_decl.prompt, deps), question
+    )
+    before_cell = deps.budgets.step_by_origin(step.id)["subagent"]
+    member_state = ConversationContextState()
+    estimate = estimate_advisor_admission(opening_text, list(tools))
+    fact, hold_id = deps.budgets.admit_request(
+        step.id,
+        estimate,
+        output_cap=request_pin.output_cap,
+        prices=request_pin.prices,
+        is_gateway=request_pin.is_gateway,
+        origin="subagent",
+    )
+    if fact is not None:
+        # The Advisor pin refused the first request: the Advisor never runs
+        # and ends ``ceiling`` — never ``refused`` — while the caller
+        # continues with the ending as its tool result (§9, §11.4).
+        member_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
+        refused = SubagentResult(
+            call_id=call_id,
+            description=preview,
+            status="no-report",
+            reason="ceiling",
+            report=None,
+            messages=[],
+        )
+        record_event(
+            ADVISOR_ENDED_KIND,
+            f"advisor ended {call_id!r}",
+            {
+                "attempt_id": deps.attempt.attempt_id,
+                "step_id": step.id,
+                "seq": seq,
+                "call_id": call_id,
+                "pin_id": pin_id,
+                "reported": False,
+                "answering_model": None,
+                "response_models": [],
+                "ending": "ceiling",
+                "duration_seconds": 0.0,
+                "usage": member_cell.as_readable(),
+            },
+        )
+        consultation = AdvisorConsultation(
+            question_preview=preview, ending="ceiling", pin_id=pin_id
+        )
+        return advisor_tool_result_text(refused, preview), consultation, 0, None
+    assert hold_id is not None
+    _ledger_hold(deps, step.id, seq, hold_id)
+    witness = PinWitness(
+        record_event=record_event,
+        attempt_id=deps.attempt.attempt_id,
+        pin=request_pin.pin,
+        step_id=step.id,
+        seq=seq,
+        call_id=call_id,
+    )
+    response_models: list[str | None] = []
+
+    def _note_response(response: BaseMessage) -> None:
+        # The shared lifecycle already asserted the response against the
+        # Advisor pin and recorded its identity: only the observed model is
+        # collected here, for the ``advisor_ended`` answering model (§13).
+        if request_pin.pin.is_gateway:
+            response_models.append(gateway_identity_of(response).model_group)
+        else:
+            response_models.append(observed_response_model(response))
+        return None
+
+    first_hold: str | None = hold_id
+
+    def _request_model(
+        bound_model: object,
+        request_messages: list[BaseMessage],
+        request_tools: list[BaseTool],
+    ) -> BaseMessage | ModelRequestEnding:
+        nonlocal first_hold
+        this_hold = first_hold
+        first_hold = None
+        return run_model_request(
+            deps,
+            witness,
+            step.id,
+            seq,
+            bound_model,
+            request_messages,
+            request_tools,
+            first_hold_id=this_hold,
+            record_main_context=False,
+            origin="subagent",
+            context_state=member_state,
+            request_pin=request_pin,
+        )
+
+    def _charge_tool_calls(count: int) -> LimitFact | None:
+        member_fact = deps.budgets.note_tool_calls(step.id, count, origin="subagent")
+        _flush_attempt_usage(deps)
+        return member_fact
+
+    try:
+        result = run_subagent(
+            fork_advisor_conversation(base_model, call_id, question_sha),
+            description=preview,
+            instructions=question,
+            call_id=call_id,
+            workspace=deps.workspace,
+            artifact_store=deps.artifact_store,
+            redactions=deps.redactions,
+            base_revision=deps.attempt.base_revision,
+            base_tip=deps.attempt.base_tip,
+            price=request_pin.prices,
+            is_gateway=request_pin.is_gateway,
+            on_response=_note_response,
+            is_stopped=deps.is_stopped,
+            request_model=_request_model,
+            context_window=request_pin.context_window,
+            charge_tool_calls=_charge_tool_calls,
+            context_state=member_state,
+            report_tool_name=REPORT_ADVICE_TOOL,
+            opening_text=opening_text,
+            tool_set=tools,
+            shared_record=record,
+        )
+    except PinViolation as exc:
+        # A pin-violating Advisor ends with no report (§9.1, §12): its own
+        # spend already settled from the carried response — or, where the
+        # violation was observed on a failed request, charged at its hold's
+        # worst case (§11.4) — and the violation propagates, halting the
+        # Worker as on the Pinned Model.
+        if first_hold is not None and first_hold in deps.budgets.open_hold_ids():
+            if exc.response is None:
+                deps.budgets.charge_hold(first_hold, origin="subagent")
+                _ledger_settle(deps, first_hold, charged=True)
+            else:
+                deps.budgets.settle_hold(
+                    first_hold,
+                    step.id,
+                    response_usage(
+                        exc.response,
+                        request_pin.prices,
+                        is_gateway=request_pin.is_gateway,
+                    ),
+                    origin="subagent",
+                    responses=1,
+                )
+                _ledger_settle(deps, first_hold)
+            _flush_attempt_usage(deps)
+        pin_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
+        pin_payload: dict[str, object] = {
+            "attempt_id": deps.attempt.attempt_id,
+            "step_id": step.id,
+            "seq": seq,
+            "call_id": call_id,
+            "pin_id": pin_id,
+            "reported": False,
+            "answering_model": exc.observed,
+            "response_models": [exc.observed],
+            "ending": "pin-violation",
+            "duration_seconds": 0.0,
+            "usage": pin_cell.as_readable(),
+        }
+        if member_state.peak is not None:
+            pin_payload["conversation_context_peak"] = member_state.peak.to_record()
+        record_event(
+            ADVISOR_ENDED_KIND,
+            f"advisor ended {call_id!r}",
+            pin_payload,
+        )
+        raise
+    # The context guard can end the member before its first request: no
+    # request ran, so the spawn-time hold is still open. Settle it empty —
+    # the member spent nothing — so the ended cell reads all zero.
+    if first_hold is not None and first_hold in deps.budgets.open_hold_ids():
+        deps.budgets.settle_hold(first_hold, step.id, UsageTotals(), origin="subagent")
+        _ledger_settle(deps, first_hold)
+        _flush_attempt_usage(deps)
+    ending: AdvisorEnding = result.reason
+    member_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
+    ended_payload: dict[str, object] = {
+        "attempt_id": deps.attempt.attempt_id,
+        "step_id": step.id,
+        "seq": seq,
+        "call_id": call_id,
+        "pin_id": pin_id,
+        "reported": result.status == "reported",
+        "answering_model": last_reported_model(response_models),
+        "response_models": list(response_models),
+        "ending": ending,
+        "duration_seconds": result.duration_seconds,
+        "usage": member_cell.as_readable(),
+    }
+    if result.peak_context is not None:
+        ended_payload["conversation_context_peak"] = result.peak_context.to_record()
+    if result.provider_error is not None:
+        ended_payload["provider_error"] = result.provider_error
+    if result.end_context is not None:
+        ended_payload["conversation_context"] = result.end_context.to_record()
+        if request_pin.context_window is not None:
+            ended_payload["usable_threshold"] = request_pin.context_window.usable_threshold
+    if ending == "context-window":
+        if result.context_cause is not None:
+            ended_payload["context_cause"] = result.context_cause
+        if result.overflow_signal is not None:
+            ended_payload["overflow_signal"] = result.overflow_signal
+    record_event(
+        ADVISOR_ENDED_KIND,
+        f"advisor ended {call_id!r}",
+        ended_payload,
+    )
+    consultation = AdvisorConsultation(
+        question_preview=preview, ending=ending, pin_id=pin_id
+    )
+    return (
+        advisor_tool_result_text(result, preview),
+        consultation,
+        result.billable_tool_calls,
+        result.limit_fact,
+    )
 
 
 def _run_spawn_group(

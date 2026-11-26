@@ -152,13 +152,26 @@ def build_agent_step_deps(
     archive_dir: Path | None,
     on_activity: Callable[[], None] | None = None,
     handoff_note: str | None = None,
+    pins: Mapping[str, PinnedModel] | None = None,
+    pin_prices: Mapping[str, TokenPrices] | None = None,
+    pin_models: Mapping[str, Any] | None = None,
+    model_id: str = "",
 ) -> AgentStepDeps:
     """Build every agent Step Execution's deps exactly as the Attempt run does.
 
     The one production wiring for :class:`AgentStepDeps`: the Attempt's one
     Pinned Model under the live Transcript, the redaction registry, and the
-    step's Pinned Model context policy (contract §9.9).
+    step's Pinned Model context policy (contract §9.9). Every referenced pin
+    rides along too — each Advisor conversation is forked from its own pin's
+    model under the live Transcript — with the Workflow's `models` id for
+    the ledger pin id where an Advisor uses the Pinned Model (§9).
     """
+    wrapped_pin_models: dict[str, Any] = {}
+    for pin_key, pin_model in (pin_models or {}).items():
+        if isinstance(pin_model, TranscriptModel):
+            wrapped_pin_models[pin_key] = pin_model
+        else:
+            wrapped_pin_models[pin_key] = TranscriptModel(pin_model, transcript)
     deps = AgentStepDeps(
         attempt=attempt,
         model=TranscriptModel(model, transcript),
@@ -179,6 +192,10 @@ def build_agent_step_deps(
         runner=command_runner,
         evidence_dir=evidence_dir,
         on_activity=on_activity,
+        pins=dict(pins) if pins is not None else {},
+        pin_prices=dict(pin_prices) if pin_prices is not None else {},
+        pin_models=wrapped_pin_models,
+        model_id=model_id,
     )
     deps.archive_dir = archive_dir
     deps.handoff_note = handoff_note
@@ -432,6 +449,10 @@ def run_attempt(
             archive_dir=archive_dir,
             on_activity=(live.touch if live is not None else None),
             handoff_note=continuation_note,
+            pins=ready.pins,
+            pin_prices=ready.pin_prices,
+            pin_models=ready.pin_models,
+            model_id=ready.model_decl.id,
         )
         # The provenance footer carries the Attempt's own Effective
         # Configuration digest, stored in the Run Ledger at Claim

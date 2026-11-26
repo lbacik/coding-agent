@@ -75,6 +75,11 @@ def subagent_conversation(call_id: str) -> str:
     return f"subagent:{call_id}"
 
 
+def advisor_conversation(call_id: str) -> str:
+    """The conversation label for one Advisor's conversation (contract §9)."""
+    return f"advisor:{call_id}"
+
+
 _WRITER_GUARD = threading.Lock()
 _WRITER_LOCKS: dict[str, threading.Lock] = {}
 _WRITER_SEQUENCES: dict[str, int] = {}
@@ -454,5 +459,24 @@ def fork_subagent_conversation(
         return model.with_conversation(
             subagent_conversation(call_id),
             first_request_extra={"description": description},
+        )
+    return model
+
+
+def fork_advisor_conversation(
+    model: InvokableToolModel, call_id: str, question_sha256: str
+) -> InvokableToolModel:
+    """Fork ``model`` under ``advisor:<call id>`` carrying the question digest.
+
+    The fork records under the Advisor's conversation label (§9), and its
+    first request record carries the question's SHA-256 (the question itself
+    travels in the Advisor opening, recorded as the conversation's first
+    message). Any other model is returned unchanged: unit-test doubles
+    record nothing either way.
+    """
+    if isinstance(model, TranscriptModel):
+        return model.with_conversation(
+            advisor_conversation(call_id),
+            first_request_extra={"question_sha256": question_sha256},
         )
     return model

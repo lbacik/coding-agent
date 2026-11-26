@@ -241,6 +241,11 @@ def _prompt_locators(cfg: WorkflowConfiguration) -> list[str]:
                 if locator not in seen_set:
                     seen_set.add(locator)
                     seen.append(locator)
+            advisor = getattr(agent, "advisor", None)
+            advisor_locator = getattr(advisor, "prompt", None)
+            if advisor_locator is not None and advisor_locator not in seen_set:
+                seen_set.add(advisor_locator)
+                seen.append(advisor_locator)
     return seen
 
 

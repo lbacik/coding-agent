@@ -77,6 +77,7 @@ from coding_agent.workflow.schema import (
     TOOL_GROUPS,
     YAML_ENDS,
     normalize_skill_source,
+    Advisor,
     Agent,
     AttemptCeiling,
     ContextThresholds,
@@ -162,7 +163,9 @@ kind.
 STEP_THRESHOLD_FIELDS = frozenset({"hard-tokens", "soft-tokens"})
 """Allowed `context-thresholds` keys: the required hard bound plus the
 optional soft bound (§3)."""
-AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results"})
+AGENT_FIELDS = frozenset({"instructions", "tools", "inputs", "results", "advisor"})
+ADVISOR_FIELDS = frozenset({"prompt", "model"})
+"""Allowed `agent.advisor` keys: the Advisor's prompt file and its pin (§9)."""
 WITH_FIELDS = frozenset({"body", "draft", "requires"})
 
 UNSUPPORTED_STEP_KEYS = {
@@ -220,6 +223,13 @@ class WorkflowFacts:
     """Valid per-step soft bounds: step id -> soft tokens, where configured (§3)."""
     subagent_steps: set[str] = field(default_factory=set)
     """Agent steps declaring the `subagents` tool group (pin-default floor)."""
+    advisor_pins: dict[str, str] = field(default_factory=dict)
+    """Advisor pins by step: step id -> `models` id answering its Advisor (§9).
+
+    Present exactly where the step declares both the `advisor` tool group
+    and a valid `agent.advisor` mapping; absent where the Advisor uses the
+    Pinned Model (no other pin) or the declaration is invalid.
+    """
     agent_steps: set[str] = field(default_factory=set)
     """Every agent step id: the per-step Admission floor maxima cover them."""
     start: str | None = None
@@ -1406,6 +1416,54 @@ def validate_agent_tools(
     return [str(tool) for tool in raw]
 
 
+def validate_advisor(
+    problems: Problems,
+    step_where: str,
+    raw: Any,
+    base: Path,
+    models: Mapping[str, Mapping[str, Any]] | None,
+) -> Advisor | None:
+    """Validate one `agent.advisor` mapping (§9).
+
+    The mapping carries exactly `prompt` (required: one operator prompt
+    file under the §2.8 trust and path rules) and `model` (optional: a
+    `models` id answering the Advisor, else the Pinned Model). Unknown keys,
+    a missing or untrusted prompt file, an unknown model id and an
+    instructions list or skill activation are refused. Returns the Advisor,
+    or `None` where the raw form carries no usable declaration.
+    """
+    advisor_where = f"{step_where}.agent.advisor"
+    if raw is None:
+        return None
+    mapping = check_keys(problems, advisor_where, raw, ADVISOR_FIELDS, frozenset({"prompt"}))
+    if mapping is None:
+        return None
+    prompt = mapping.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        problems.add(f"{advisor_where}.prompt", "'prompt' must be a non-empty string")
+        return None
+    try:
+        read_prompt_text(base, prompt)
+    except PromptFileError as exc:
+        problems.add(f"{advisor_where}.prompt", str(exc))
+        return None
+    model: str | None = None
+    if mapping.get("model") is not None:
+        model_raw = mapping["model"]
+        if not isinstance(model_raw, str) or not model_raw:
+            problems.add(f"{advisor_where}.model", "'model' must be a `models` id")
+            return None
+        if models is not None and model_raw not in models:
+            problems.add(
+                f"{advisor_where}.model",
+                f"unknown model {model_raw!r}: "
+                f"available: {', '.join(sorted(models))}",
+            )
+            return None
+        model = model_raw
+    return Advisor(prompt=prompt, model=model)
+
+
 def validate_agent_inputs(
     problems: Problems,
     step_where: str,
@@ -1610,6 +1668,7 @@ def validate_step(
     facts: WorkflowFacts,
     *,
     undeclared_skill_label: str | None = None,
+    models: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     step_where = f"{workflow_where}.steps.{step_id}"
     mapping = check_keys(problems, step_where, step_raw, STEP_FIELDS, STEP_REQUIRED)
@@ -1675,10 +1734,28 @@ def validate_step(
             agent_mapping.get("results"),
             opted_in=opted_in,
         )
+        advisor = validate_advisor(
+            problems, step_where, agent_mapping.get("advisor"), base, models
+        )
         if instructions is None or tools is None or agent_inputs is None or results is None:
             return
         if "subagents" in tools:
             facts.subagent_steps.add(step_id)
+        if "advisor" in tools and agent_mapping.get("advisor") is None:
+            problems.add(
+                f"{step_where}.agent.advisor",
+                "the `advisor` tool group requires an `agent.advisor` mapping "
+                "with `prompt` (and optional `model`)",
+            )
+            return
+        if "advisor" not in tools and advisor is not None:
+            problems.add(
+                f"{step_where}.agent.tools",
+                "an `agent.advisor` mapping requires the `advisor` tool group",
+            )
+            return
+        if advisor is not None and advisor.model is not None:
+            facts.advisor_pins[step_id] = advisor.model
         required_inputs.extend(agent_inputs)
         if "with" in mapping:
             problems.add(
@@ -2145,6 +2222,7 @@ def validate_workflow(
             bundle_names,
             facts,
             undeclared_skill_label=undeclared_skill_label,
+            models=models,
         )
 
 
@@ -2359,6 +2437,8 @@ def check_admission_floor(
         return
     _, _, safety, overhead, _ = gateway_code_owned()
     floors: dict[str, AdmissionFloor] = {}
+    floors_minima: dict[str, dict[str, float]] = {}
+    floors_bits: dict[str, dict[str, str]] = {}
     for step_id in sorted(facts.agent_steps):
         hard = facts.thresholds.get(step_id)
         soft = facts.soft_thresholds.get(step_id)
@@ -2371,19 +2451,40 @@ def check_admission_floor(
         if step_id in facts.subagent_steps:
             usable = max(usable, pin_floor.usable_threshold)
         floor = admission_floor_with_usable(pin, usable)
-        if floor is not None:
-            floors[step_id] = floor
+        if floor is None:
+            continue
+        floors[step_id] = floor
+        minima = _floor_minima(floor)
+        bits = _floor_bits(floor)
+        advisor_id = facts.advisor_pins.get(step_id)
+        advisor_pin = models.get(advisor_id) if models is not None and advisor_id is not None else None
+        advisor_floor = (
+            admission_floor_for(advisor_pin)
+            if isinstance(advisor_pin, Mapping)
+            else None
+        )
+        if advisor_floor is not None:
+            advisor_minima = _floor_minima(advisor_floor)
+            advisor_bits = _floor_bits(advisor_floor)
+            for meter in FLOOR_METERS:
+                if advisor_minima[meter] > minima[meter]:
+                    minima[meter] = advisor_minima[meter]
+                    bits[meter] = (
+                        f"{advisor_bits[meter]} (Advisor pin {advisor_id!r})"
+                    )
+        floors_minima[step_id] = minima
+        floors_bits[step_id] = bits
     if not floors:
         return
-    ceiling_floor = max(floors.values(), key=lambda item: item.token_minimum)
+    ceiling_id = max(floors, key=lambda item: floors_minima[item]["effective-tokens"])
     pool_ids = [step_id for step_id in floors if step_id not in facts.reserved_allow]
-    pool_floor = (
-        max((floors[step_id] for step_id in pool_ids), key=lambda item: item.token_minimum)
+    pool_id = (
+        max(pool_ids, key=lambda item: floors_minima[item]["effective-tokens"])
         if pool_ids
         else None
     )
-    ceiling_bits = _floor_bits(ceiling_floor)
-    ceiling_minima = _floor_minima(ceiling_floor)
+    ceiling_bits = floors_bits[ceiling_id]
+    ceiling_minima = floors_minima[ceiling_id]
     for meter in FLOOR_METERS:
         value = facts.ceiling.get(meter)
         if value is not None and value < ceiling_minima[meter]:
@@ -2398,9 +2499,9 @@ def check_admission_floor(
         - sum(allow.get(meter, 0.0) for allow in facts.reserved_allow.values())
         for meter in METERS
     }
-    if pool_floor is not None:
-        pool_bits = _floor_bits(pool_floor)
-        pool_minima = _floor_minima(pool_floor)
+    if pool_id is not None:
+        pool_bits = floors_bits[pool_id]
+        pool_minima = floors_minima[pool_id]
         for meter in FLOOR_METERS:
             if 0 < pool[meter] < pool_minima[meter]:
                 problems.add(
@@ -2411,9 +2512,8 @@ def check_admission_floor(
                 )
     for step_id in sorted(facts.reserved_allow):
         allow = facts.reserved_allow[step_id]
-        step_floor = floors.get(step_id, ceiling_floor)
-        step_bits = _floor_bits(step_floor)
-        step_minima = _floor_minima(step_floor)
+        step_bits = floors_bits.get(step_id, ceiling_bits)
+        step_minima = floors_minima.get(step_id, ceiling_minima)
         for meter in FLOOR_METERS:
             if meter in allow and allow[meter] < step_minima[meter]:
                 problems.add(
@@ -2424,9 +2524,8 @@ def check_admission_floor(
                 )
     for step_id in sorted(facts.plain_allow):
         allow = facts.plain_allow[step_id]
-        step_floor = floors.get(step_id, ceiling_floor)
-        step_bits = _floor_bits(step_floor)
-        step_minima = _floor_minima(step_floor)
+        step_bits = floors_bits.get(step_id, ceiling_bits)
+        step_minima = floors_minima.get(step_id, ceiling_minima)
         for meter in FLOOR_METERS:
             if meter in allow and allow[meter] < step_minima[meter]:
                 problems.add(
@@ -3029,11 +3128,20 @@ def build_config(
                     for field_name, field_raw in (fields_raw or {}).items():
                         fields[str(field_name)] = build_field_type(field_raw)
                     results[str(result_name)] = fields
+                advisor_raw = agent_raw.get("advisor")
+                advisor: Advisor | None = None
+                if isinstance(advisor_raw, dict):
+                    advisor_model = advisor_raw.get("model")
+                    advisor = Advisor(
+                        prompt=str(advisor_raw.get("prompt", "")),
+                        model=str(advisor_model) if advisor_model is not None else None,
+                    )
                 agent = Agent(
                     instructions=tuple(instructions),
                     tools=tuple(str(tool) for tool in agent_raw.get("tools") or []),
                     inputs=tuple(inputs),
                     results=results,
+                    advisor=advisor,
                 )
             with_raw = step_raw.get("with") or {}
             assert isinstance(with_raw, dict)

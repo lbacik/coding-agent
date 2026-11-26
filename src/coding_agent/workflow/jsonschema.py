@@ -420,6 +420,31 @@ def _agent_schema() -> dict[str, Any]:
                     ]
                 },
             },
+            "advisor": {
+                "type": "object",
+                "description": (
+                    "The step's Advisor declaration (§9). Required exactly "
+                    "where the `advisor` tool group is declared. See "
+                    f"{GUIDE}."
+                ),
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "One operator prompt file (§2.8).",
+                    },
+                    "model": {
+                        "type": "string",
+                        "pattern": ID_PATTERN,
+                        "description": (
+                            "A `models` id answering the Advisor "
+                            "(else the Pinned Model)."
+                        ),
+                    },
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
             "results": {
                 "type": "object",
                 "description": (
