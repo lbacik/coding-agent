@@ -815,6 +815,34 @@ def test_connection_error_on_a_safe_request_retries_like_a_5xx(
     assert clock.sleeps == [1.0]
 
 
+def test_builtin_network_error_on_a_safe_request_retries_like_a_5xx(
+    client: GitHubClient, requests_mock: Any
+) -> None:
+    """§14.4: a builtin connection error or timeout that escapes the transport
+    unwrapped retries in place just like a 5xx."""
+    clock = FakeClock()
+    requests_mock.get(
+        ISSUE_URL,
+        [
+            {"exc": ConnectionError("connection reset by peer")},
+            {"exc": TimeoutError("timed out")},
+            {"status_code": 200, "json": _ok_body()},
+        ],
+    )
+
+    response = request_with_retry(
+        client,
+        "GET",
+        ISSUE_PATH,
+        now=clock.now,
+        sleep=clock.sleep,
+    )
+
+    assert response.status_code == 200
+    assert requests_mock.call_count == 3
+    assert clock.sleeps == [1.0, 2.0]
+
+
 def test_timeout_on_an_object_creating_request_propagates_to_the_driver(
     client: GitHubClient, requests_mock: Any
 ) -> None:

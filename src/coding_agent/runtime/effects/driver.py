@@ -28,7 +28,6 @@ and the sleep are injectable so tests script them instead of sleeping.
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -95,10 +94,6 @@ EffectOutcome = Landed | Performed | NotPerformed | Failed
 """What one driven effect did: landed, performed, not-performed, or failed."""
 
 
-_TRANSIENT_STATUS_MESSAGE = re.compile(r"\breturned 5\d{2}\b")
-"""A tracker failure message reporting a 5xx status (§14.4)."""
-
-
 def _is_transient_perform_error(exc: BaseException) -> bool:
     """Whether a failed write may be repeated after a marker lookup (§14.4).
 
@@ -106,8 +101,8 @@ def _is_transient_perform_error(exc: BaseException) -> bool:
     its own 5xx write failures; an infrastructure-class ``github`` failure
     carrying a 5xx status counts too, while an exhausted bound
     (:class:`RateLimitExhausted`), a refusal and a credential failure never
-    retry. A tracker message in the ``"<method> <path> returned <status>"``
-    shape reporting a 5xx counts as transient even where the flag is absent.
+    retry. Classification never reads message text: only the error's own
+    flags and identity decide.
     """
     if isinstance(
         exc, (requests.ConnectionError, requests.Timeout, ConnectionError, TimeoutError)
@@ -118,9 +113,7 @@ def _is_transient_perform_error(exc: BaseException) -> bool:
     if isinstance(exc, GitHubFailure):
         return exc.failure_class == "github" and 500 <= exc.status_code <= 599
     if isinstance(exc, StepTrackerError):
-        if exc.transient:
-            return True
-        return _TRANSIENT_STATUS_MESSAGE.search(str(exc)) is not None
+        return exc.transient
     return False
 
 
@@ -132,6 +125,8 @@ def _transient_exhaustion_error(
     Exhaustion reports ``infrastructure-failure`` / ``github`` like an
     exhausted rate limit, carrying the failed call's method, path and status
     where the failure names them (``0`` where no response ever arrived).
+    Where the failure names no call, the operation and target identity
+    stand in for the method and path.
     """
     if isinstance(last, GitHubFailure):
         return GitHubFailure(
@@ -145,8 +140,8 @@ def _transient_exhaustion_error(
     path = getattr(last, "path", None)
     status_code = getattr(last, "status_code", None)
     return GitHubFailure(
-        method if isinstance(method, str) else "POST",
-        path if isinstance(path, str) else f"{operation} on {ctx.input_type} {ctx.number}",
+        method if isinstance(method, str) else operation,
+        path if isinstance(path, str) else f"{ctx.input_type} {ctx.number}",
         status_code if isinstance(status_code, int) else 0,
         reason="infrastructure-failure",
         failure_class="github",
