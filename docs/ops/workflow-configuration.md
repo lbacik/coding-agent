@@ -573,7 +573,7 @@ agent:
   authority. Several
   instructions in one step carry no ordering guarantee; a guaranteed
   sequence needs separate steps.
-- **`tools`** are denied by default and granted from five groups:
+- **`tools`** are denied by default and granted from six groups:
 
   | Group | Grants |
   | --- | --- |
@@ -582,6 +582,7 @@ agent:
   | `shell` | A credential-free command runner. Its output is never evidence. |
   | `tests` | Targeted tests that record evidence; diagnostic checks. |
   | `subagents` | Sub-agents with fixed read-only tools; their spend counts to the step and the Attempt. |
+  | `advisor` | Questions to the step's Advisor, answered on the step's Advisor pin; each call's spend counts to the step and the Attempt at the Advisor pin's prices. |
 
   The Step Result report tool, skill activation and the capped-result reader
   are always present and cannot be declared. No group gives the model a
@@ -698,6 +699,44 @@ steps:
   exhausted, keeping the deadline, the full output cap and cumulative
   charging; its own floor uses its hard bound like any other step, while
   the soft source's floor uses its Soft Usable Threshold.
+
+- **`advisor`** (agent steps only) declares the step's Advisor: the pin
+  that answers its questions and the operator prompt the Advisor opens
+  with. It is valid exactly with the `advisor` tool group — each without
+  the other is refused — and carries `prompt` (required, one operator
+  prompt file) and `model` (optional, a `models` id; without it the
+  Advisor uses the Workflow's Pinned Model):
+
+```yaml
+models:
+  sonnet: {provider: anthropic, model: claude-sonnet-5, ...}   # cheap, does the long work
+  sage: {provider: anthropic, model: sage-model, ...}          # stronger, answers questions
+
+workflows:
+  implement:
+    model: sonnet
+    steps:
+      triage:
+        agent:
+          tools: [workspace-read, advisor]
+          advisor: {prompt: prompts/triage-advisor.md, model: sage}
+          results:
+            done: {fix: document}
+```
+
+  Each `ask_advisor(question)` call opens one fresh read-only Advisor
+  conversation on the step's Advisor pin — framing, the Attempt facts,
+  the input, the caller's declared inputs, the `advisor.prompt` bytes,
+  then the question — and returns its report (or its ending) as the tool
+  result. The Advisor binds the Sub-agent read-only tools plus its own
+  `report_advice` exit, runs at most 8 rounds, and counts against the
+  calling step's allowance and the Attempt Ceiling at the Advisor pin's
+  prices. The runtime never checks whether the caller follows an answer.
+
+  Ask like a triage round: send a whole round of questions in one call
+  (calls in one turn run one at a time, in order), and quote earlier
+  questions and answers in the next round — an Advisor starts fresh every
+  call and remembers nothing between them.
 
 ## Runtime Operations
 
@@ -959,7 +998,7 @@ The errors operators meet most, grouped:
 | Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label or any Workflow's Pickup Label in the file. |
 | Limits | `limits` on an operation step; a Reserved Step missing a meter; reserves not below the Attempt Ceiling; a Step Allowance larger than the Work Pool; the Attempt Ceiling, the Work Pool, or a Step Allowance below one maximal Admission hold in a meter it declares. |
 | Input type | `publish-review` in an `issue` Workflow; `open-pull-request` in a `pull-request` Workflow. |
-| Tools and data | A tool group outside the five (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`; `input.comments` in a pull-request Workflow or as an operation `with.body` reference; a step id of `input`. |
+| Tools and data | A tool group outside the six (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`; `input.comments` in a pull-request Workflow or as an operation `with.body` reference; a step id of `input`; the `advisor` group without an `agent.advisor` mapping (or the mapping without the group); an `agent.advisor` with an unknown `model` id, a missing or untrusted prompt file, an unknown key or an instructions list; a per-step `model`. |
 
 Each error is a targeted message naming the offending path (for example
 `workflows.implement.steps.process.routes`).

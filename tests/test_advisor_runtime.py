@@ -265,6 +265,7 @@ def _run_with_advisor(
     deps.pin_prices = {"sonnet": make_prices(), ADVISOR_PIN_ID: _advisor_prices()}
     advisor_inner: Any = advisor_model
     if advisor_model_records_transcript:
+        assert deps.archive_dir is not None
         advisor_inner = TranscriptModel(
             advisor_model,
             TranscriptWriter(deps.archive_dir / TRANSCRIPT_FILE_NAME, None),
@@ -289,7 +290,7 @@ def _events(
 
 def _advisor_first_request_text(advisor_model: Any) -> str:
     """The concatenated text of the Advisor's first request messages."""
-    first_call = advisor_model.calls[0]
+    first_call = advisor_model.invocations[0]
     parts: list[str] = []
     for message in first_call:
         content = message.content
@@ -326,7 +327,7 @@ def test_reported_flows_back_to_caller_on_the_advisor_pin(
     assert outcome.status == "reported"
     assert outcome.result_name == "done"
     # The caller continued in the same conversation after the consultation.
-    assert len(main_model.calls) == 2
+    assert len(main_model.invocations) == 2
 
     started = _events(outcome, ADVISOR_STARTED_KIND, "advisor-0")
     assert len(started) == 1
@@ -505,7 +506,7 @@ def test_invalid_question_is_an_error_and_starts_nothing(
     assert outcome.status == "reported"
     assert _events(outcome, ADVISOR_STARTED_KIND) == []
     assert _events(outcome, ADVISOR_ENDED_KIND) == []
-    assert advisor_model.calls == []
+    assert advisor_model.invocations == []
 
 
 def test_silent_ends_the_advisor_and_the_caller_continues(
@@ -607,7 +608,7 @@ def test_admission_refusal_ends_the_advisor_ceiling_and_caller_continues(
         budgets,
     )
     assert outcome.status == "reported"
-    assert advisor_model.calls == []
+    assert advisor_model.invocations == []
     ended = _events(outcome, ADVISOR_ENDED_KIND, "advisor-0")
     assert len(ended) == 1
     assert ended[0]["ending"] == "ceiling"
@@ -630,10 +631,14 @@ def test_context_window_ends_the_advisor_and_the_caller_continues(
     )
     step = _advisor_step()
     budgets = _budgets(step)
+    # A long question guarantees the Advisor opening (framing, caller facts,
+    # prompt, question, tool schemas) exceeds the pin's usable threshold of
+    # 1000 tokens, so the guard ends the Advisor before its first request.
+    long_question = "Explain the crash in detail. " * 500
     outcome, _, advisor_model = _run_with_advisor(
         step,
         [
-            _ai([_ask_call("a question", "c1")], usage=_usage(10, 5)),
+            _ai([_ask_call(long_question, "c1")], usage=_usage(10, 5)),
             _report_ai("done", {}, _usage(10, 5)),
         ],
         [_ai([_report_advice_call("unused")], usage=_usage(10, 5))],
@@ -644,7 +649,7 @@ def test_context_window_ends_the_advisor_and_the_caller_continues(
         advisor_pin=tiny_pin,
     )
     assert outcome.status == "reported"
-    assert advisor_model.calls == []
+    assert advisor_model.invocations == []
     ended = _events(outcome, ADVISOR_ENDED_KIND, "advisor-0")
     assert len(ended) == 1
     assert ended[0]["ending"] == "context-window"
@@ -854,10 +859,14 @@ def test_advisor_spend_is_priced_at_the_advisor_pin(
     assert cell.input_tokens == 100
     assert cell.output_tokens == 10
     expected = 100 / 1_000_000 * 100.0 + 10 / 1_000_000 * 200.0
-    assert cell.cost_usd == pytest.approx(expected)
+    assert cell.total_cost_usd == pytest.approx(expected)
     member_total = budgets.step_by_origin(step.id)["subagent"]
-    assert member_total.cost_usd == pytest.approx(expected)
-    assert member_total.tool_calls >= 1
+    assert member_total.total_cost_usd == pytest.approx(expected)
+    # The report exit is excluded from the member's billable calls, so the
+    # subagent origin carries no tool calls here; the caller's own
+    # ``ask_advisor`` call counts on the calling step instead.
+    assert member_total.tool_calls == 0
+    assert budgets.step_totals(step.id).tool_calls >= 1
 
 
 def test_ask_advisor_counts_as_one_tool_call_of_the_caller(
