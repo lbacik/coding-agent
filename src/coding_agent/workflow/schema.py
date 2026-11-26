@@ -822,6 +822,19 @@ class Workflow:
         factory=dict,
     )
 
+    @property
+    def referenced_pins(self) -> tuple[str, ...]:
+        """The ids of every pin this Workflow references, in assertion order.
+
+        Contract: ``docs/contract/step-workflow-runtime-contract.md`` §4.1
+        (the Provider Capability Assertion runs for every distinct pin the
+        selected Workflow references). The single source the startup
+        sequence and the Advisor slice use: the Workflow's own pin first,
+        then any other referenced pin by id. Today no step can name another
+        pin, so the set is exactly the Workflow's ``model``.
+        """
+        return (self.model,)
+
 
 
 # --- `skills` declaration (`version: 4`) -------------------------------------

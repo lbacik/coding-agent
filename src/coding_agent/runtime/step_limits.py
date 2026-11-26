@@ -705,6 +705,8 @@ class AttemptBudgets:
         estimate_tokens: int,
         *,
         output_cap: int | None = None,
+        prices: TokenPrices | None = None,
+        is_gateway: bool | None = None,
         origin: UsageOrigin = "main",
     ) -> tuple[LimitFact | None, str | None]:
         """Admit one model request, holding its worst case (§11.4, LIM-6).
@@ -715,15 +717,19 @@ class AttemptBudgets:
         not sent and the Step Execution ends ``limit-exceeded``.
 
         ``output_cap`` is this one request's output cap for its bound (the
-        Attempt's cap where omitted). ``origin`` is the request's Usage Origin, always
+        Attempt's cap where omitted). ``prices`` and ``is_gateway`` are the
+        requesting conversation's pin settlement (the Attempt's where
+        omitted): a conversation on another pin holds and settles at that
+        pin's prices, with a gateway pin pricing its context estimate at
+        max(input, cache-write). ``origin`` is the request's Usage Origin, always
         known; provider retries count under the origin of the request they
         retry.
         """
         bound_tokens, bound_cost = worst_case_bound(
             estimate_tokens,
             self.output_cap if output_cap is None else output_cap,
-            self.prices,
-            is_gateway=self.is_gateway,
+            self.prices if prices is None else prices,
+            is_gateway=self.is_gateway if is_gateway is None else is_gateway,
         )
         fact = self._crossed(
             step_id,

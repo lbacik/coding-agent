@@ -44,7 +44,7 @@ from langchain_core.messages import (
 from langchain_core.tools import tool
 
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
-from coding_agent.operator import listener as operator_listener
+import coding_agent.operator.listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.provider.capability import (
     CHECK_EFFORT,
