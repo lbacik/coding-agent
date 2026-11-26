@@ -16,6 +16,7 @@ from support.workflow_config import load_config
 from coding_agent.inputs.comments import (
     MAX_PINNED_COMMENT_CHARS,
     MAX_PINNED_COMMENTS_CHARS,
+    SelectedComment,
     comments_archive_blob,
     comments_set_digest,
     new_trusted_comments,
@@ -109,7 +110,7 @@ def _select(
     comments: list[InputComment],
     *,
     agent_id: int | None = AGENT_ID,
-) -> list:
+) -> list[SelectedComment]:
     return select_trusted_comments(
         comments,
         issue_author_id=ISSUE_AUTHOR_ID,

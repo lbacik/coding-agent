@@ -26,6 +26,10 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from coding_agent.inputs.comments import SelectedComment
 
 from coding_agent.inputs.claim import attempt_finished_in_ledger
 from coding_agent.inputs.port import InputType, StepTrackerPort
@@ -125,6 +129,65 @@ def filter_end_labels(
     return tuple(label for label in end_labels if label != selection_label)
 
 
+def render_comments_disclosure(late: Sequence[SelectedComment]) -> str:
+    """Render the post-Claim Trusted Comments disclosure (§7.4, ADR 0035).
+
+    Counts the Trusted Comments posted after the Claim read-back — the
+    ones the Attempt never saw — with an ``#issuecomment-`` link each,
+    the same way new base commits are disclosed. The caller renders this
+    only where the Attempt pinned a comment set; an empty late list still
+    renders, so the comment shows the Attempt saw everything.
+    """
+    if not late:
+        return "Trusted comments after Claim: none"
+    lines = [
+        "Trusted comments after Claim: "
+        f"{len(late)} (posted after the Claim read-back; "
+        "this Attempt never saw them)"
+    ]
+    for item in late:
+        lines.append(f"- #issuecomment-{item.comment.comment_id}")
+    return "\n".join(lines)
+
+
+def late_trusted_comments(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    *,
+    attempt_id: str,
+    number: int,
+    input_type: InputType,
+) -> list[SelectedComment] | None:
+    """The Trusted Comments posted after the Claim read-back (§7.4).
+
+    Re-selects over the live list and keeps what the pin does not hold, so
+    the terminal comment can disclose late comments the Attempt never saw.
+    ``None`` where the Attempt pinned no comment set — an older Attempt or
+    a Workflow with no ``input.comments`` step — so the terminal comment
+    carries no disclosure section at all. Best-effort: a failed live read
+    discloses nothing rather than failing finalisation.
+    """
+    from coding_agent.inputs.comments import new_trusted_comments
+
+    stored = ledger.get_pinned_comment_set(attempt_id)
+    if stored is None:
+        return None
+    pinned = ledger.get_pinned_comments(attempt_id) or []
+    pinned_ids = {comment.comment_id for comment in pinned}
+    try:
+        live = tracker.list_comments(number, input_type)
+    except Exception:
+        return []
+    return new_trusted_comments(
+        live,
+        pinned_ids,
+        issue_author_id=stored.issue_author_id,
+        owner_id=stored.owner_id,
+        agent_id=stored.agent_id,
+        agent_login=tracker.agent_login,
+    )
+
+
 def render_terminal_comment(
     *,
     attempt_id: str,
@@ -138,6 +201,7 @@ def render_terminal_comment(
     uncommitted_count: int = 0,
     detail: str = "",
     handoff_section: str = "",
+    comments_section: str = "",
 ) -> str:
     """Render the one terminal comment from the fixed template (§15.3).
 
@@ -146,7 +210,8 @@ def render_terminal_comment(
     the landed effects with links; the ``not-performed`` effects; and the
     uncommitted-file count. The optional Round Handoff section (the
     operator-visible offer account with its machine-readable record block,
-    or the no-pickup diagnostic) rides above the Attempt Marker, which stays
+    or the no-pickup diagnostic) and the optional post-Claim Trusted
+    Comments disclosure ride above the Attempt Marker, which stays
     the last line, so the Claim Comment stops being in force (§6.1).
     """
     marker = step_effect_marker(
@@ -194,6 +259,9 @@ def render_terminal_comment(
     if handoff_section:
         lines.append("")
         lines.append(handoff_section)
+    if comments_section:
+        lines.append("")
+        lines.append(comments_section)
     lines.append("")
     lines.append(marker)
     return "\n".join(lines) + "\n"
@@ -1090,6 +1158,19 @@ def finish_attempt(
                         eligibility[0],
                     )
                 )
+    comments_section = ""
+    try:
+        late = late_trusted_comments(
+            tracker,
+            ledger,
+            attempt_id=attempt_id,
+            number=target.number,
+            input_type=target.input_type,
+        )
+    except Exception:
+        late = None
+    if late is not None:
+        comments_section = render_comments_disclosure(late)
     comment = render_terminal_comment(
         attempt_id=attempt_id,
         outcome=resolved.outcome,
@@ -1102,6 +1183,7 @@ def finish_attempt(
         uncommitted_count=uncommitted_count,
         detail=resolved.detail,
         handoff_section=handoff_section,
+        comments_section=comments_section,
     )
     writes = terminal_writes_for_outcome()
     ledger.record_terminal_outcome(

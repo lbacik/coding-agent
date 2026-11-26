@@ -968,6 +968,8 @@ def start(
         uninstall_streams = install_stream_redaction(registry)
         stack.callback(uninstall_streams)
 
+        from coding_agent.inputs.comments import workflow_declares_input_comments
+
         claim_config = ClaimConfig(
             workflow_id=selected.id,
             input_type=cast(InputType, selected.input.type),
@@ -985,6 +987,7 @@ def start(
             activation_deliveries=run_inputs.registry.bodies,
             activation_components=run_inputs.contents,
             profile_text=loaded.profile_text,
+            comments_declared=workflow_declares_input_comments(selected),
         )
         # The Round Handoff pickup lane runs ahead of the Selection
         # Label sweep only for issue Workflows that opt in (§8): the

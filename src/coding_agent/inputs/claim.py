@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from coding_agent.inputs.comments import PinnedComment
     from coding_agent.inputs.pickup import PickupConfig
 
 from coding_agent.inputs.authorisation import (
@@ -191,6 +192,13 @@ class ClaimConfig:
         default_factory=dict
     )
     profile_text: str | None = None
+    comments_declared: bool = False
+    """Whether an agent step of the Workflow declares ``input.comments`` (§7.4).
+
+    Where true, an issue Claim reads the input's comments back, pins the
+    Trusted Comments (ADR 0035) and carries them on the confirmed Claim;
+    where false no comment is read and nothing is archived or recorded.
+    """
 
 
 @dataclass(frozen=True)
@@ -208,6 +216,12 @@ class ConfirmedClaim:
     ``None`` for ordinary selection Claims. A pickup Claim carries the
     live offer so the Continuation opens at the exact published work
     commit with the pinned note as input data.
+    """
+    pinned_comments: tuple[PinnedComment, ...] = ()
+    """The Trusted Comments pinned at Claim, oldest first (§7.4, ADR 0035).
+
+    Empty where the Workflow declares no ``input.comments`` step: the
+    input is always present, and an empty set is present, not absent.
     """
 
 
@@ -549,6 +563,64 @@ def store_claim_content(ledger: RunLedger, attempt: str, config: ClaimConfig) ->
     return sorted(blobs.keys())
 
 
+def pin_claim_comments(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    *,
+    attempt: str,
+    number: int,
+    input_type: InputType,
+    issue_author_id: int | None,
+    agent_login: str,
+    agent_id: int | None,
+) -> tuple[PinnedComment, ...]:
+    """Read back, select, archive and record the Trusted Comments (§7.4).
+
+    Runs only for an issue Claim whose Workflow declares
+    ``input.comments``: the live comments are read back, the Trusted
+    Comments selected by numeric identity (ADR 0035), their full content
+    flushed to the Attempt Archive digest-addressed, and the per-comment
+    records plus the set digest recorded in the Run Ledger — before the
+    ledger transaction the Claim depends on. A declared but empty set
+    still records its set row, so finalisation tells "nothing pinned"
+    from "nothing declared". Raises where the read-back fails, so the
+    caller releases the Claim like any other read-back failure.
+    """
+    from coding_agent.inputs.comments import (
+        comments_archive_blob,
+        pin_trusted_comments,
+        select_trusted_comments,
+    )
+    from coding_agent.operator import archive as attempt_archives
+
+    comments = tracker.list_comments(number, input_type)
+    owner_id = tracker.fetch_repository_owner_id()
+    selected = select_trusted_comments(
+        comments,
+        issue_author_id=issue_author_id,
+        owner_id=owner_id,
+        agent_id=agent_id,
+        agent_login=agent_login,
+    )
+    pinned = pin_trusted_comments(selected)
+    try:
+        archive_dir = ledger.archive_dir_for(attempt)
+    except Exception:
+        archive_dir = None
+    if archive_dir is not None:
+        attempt_archives.store_content_blobs(
+            archive_dir, comments_archive_blob(pinned)
+        )
+    ledger.record_pinned_comments(
+        attempt,
+        pinned,
+        issue_author_id=issue_author_id,
+        owner_id=owner_id,
+        agent_id=agent_id,
+    )
+    return tuple(pinned)
+
+
 def attempt_claim(
     tracker: StepTrackerPort,
     ledger: RunLedger,
@@ -703,6 +775,33 @@ def attempt_claim(
         selection_actor_at=event.created_at if event is not None else None,
         identity_mode=identity_mode,
     )
+    pinned_comments: tuple[PinnedComment, ...] = ()
+    if config.comments_declared and candidate.input_type == "issue":
+        try:
+            pinned_comments = pin_claim_comments(
+                tracker,
+                ledger,
+                attempt=attempt,
+                number=candidate.number,
+                input_type=candidate.input_type,
+                issue_author_id=readback.author_id,
+                agent_login=config.agent_login,
+                agent_id=(
+                    config.agent_id
+                    if config.agent_id is not None
+                    else tracker.agent_id
+                ),
+            )
+        except Exception:
+            return _settle_failed_claim(
+                tracker,
+                ledger,
+                candidate,
+                attempt,
+                posted.comment_id,
+                reason="comments-unreadable",
+                priority_request_id=priority_request_id,
+            )
     ledger.record_attempt_pin(
         AttemptPin(
             attempt_id=attempt,
@@ -739,6 +838,7 @@ def attempt_claim(
         input_number=candidate.number,
         n=n,
         pin=pin,
+        pinned_comments=pinned_comments,
     )
 
 

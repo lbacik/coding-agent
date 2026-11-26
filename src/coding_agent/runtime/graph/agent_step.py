@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from langchain_core.messages import (
     AIMessage,
@@ -38,6 +38,9 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.tools import BaseTool, StructuredTool
+
+if TYPE_CHECKING:
+    from coding_agent.inputs.comments import PinnedComment
 
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.provider.observed_identity import (
@@ -126,6 +129,7 @@ from coding_agent.skillbundle.activation import (
 )
 from coding_agent.workflow.schema import (
     HARD_CONTEXT_RESULT,
+    INPUT_COMMENTS_REF,
     ROUND_HANDOFF_NOTE_REF,
     SOFT_CONTEXT_RESULT,
     EnumType,
@@ -283,7 +287,10 @@ _GITHUB_TOOL_MARKERS = (
 class StepAttemptFacts:
     """The Attempt facts one step's opening frame carries (§7.4, §9.2).
 
-    Comments, reviews, labels, author and CI status are never supplied.
+    Comments reach a step only as declared data: the Trusted Comments
+    pinned at Claim (ADR 0035) ride here for steps declaring
+    ``input.comments``; reviews, labels, author and CI status are never
+    supplied.
     """
 
     attempt_id: str
@@ -298,6 +305,13 @@ class StepAttemptFacts:
     head_branch: str | None = None
     input_head: str | None = None
     base_tip: str | None = None
+    comments: tuple[PinnedComment, ...] = ()
+    """The Trusted Comments pinned at Claim, oldest first (§7.4, ADR 0035).
+
+    Empty where the Workflow declares no ``input.comments`` step or where
+    the pin held no Trusted Comments. A Continuation pins afresh at its
+    own Claim, so this always reflects the current Attempt.
+    """
 
 
 @dataclass(frozen=True)
@@ -1045,6 +1059,7 @@ def resolve_step_inputs(
     step: WorkflowStep,
     priors: Mapping[str, PriorStepExecution],
     handoff_note: str | None = None,
+    pinned_comments: Sequence[PinnedComment] = (),
 ) -> tuple[dict[str, object | None], str | None]:
     """Resolve the step's declared inputs against latest executions (§9.7).
 
@@ -1055,12 +1070,22 @@ def resolve_step_inputs(
 
     The special ``round-handoff.note`` input reads the Continuation's pinned
     note: the exact bounded note from the consumed offer on a pickup Attempt,
-    absent on a fresh Attempt. It carries no instruction authority.
+    absent on a fresh Attempt. It carries no instruction authority. The
+    special ``input.comments`` input reads the Attempt's pinned Trusted
+    Comments (ADR 0035): identity summaries per comment, never full text —
+    the entry frame's data block renders that. The input is always present:
+    required and optional both resolve, to an empty list where the pin held
+    no Trusted Comments.
     """
     assert step.agent is not None
     resolved: dict[str, object | None] = {}
     for ref in step.agent.inputs:
         text = ref.reference
+        if text == INPUT_COMMENTS_REF:
+            from coding_agent.inputs.comments import comment_summaries
+
+            resolved[text] = comment_summaries(pinned_comments)
+            continue
         if text == ROUND_HANDOFF_NOTE_REF:
             if handoff_note is not None:
                 resolved[text] = handoff_note
@@ -1221,6 +1246,22 @@ def _prompt_text(path: str, deps: AgentStepDeps) -> str:
     return f"Error: prompt {path!r} is unavailable"
 
 
+def comments_block_for(step: WorkflowStep, attempt: StepAttemptFacts) -> str | None:
+    """The pinned Trusted Comments data block for a declaring step (§7.4).
+
+    ``None`` where the step declares no ``input.comments``: only declaring
+    steps see the pinned set. The block frames each comment as data — like
+    the title and body — carrying its id, timestamps, edit flag and author
+    role, never a login and never an instruction channel.
+    """
+    assert step.agent is not None
+    if not any(ref.reference == INPUT_COMMENTS_REF for ref in step.agent.inputs):
+        return None
+    from coding_agent.inputs.comments import render_comments_block
+
+    return render_comments_block(attempt.comments)
+
+
 def compose_step_opening(
     step: WorkflowStep,
     deps: AgentStepDeps,
@@ -1234,6 +1275,9 @@ def compose_step_opening(
         _System(content=compose_attempt_header(deps.attempt)),
         _Human(content=f"# Input ({deps.attempt.input_type} #{deps.attempt.input_number})\n\n{deps.attempt.title}\n\n{deps.attempt.body}"),
     ]
+    comments_block = comments_block_for(step, deps.attempt)
+    if comments_block is not None:
+        parts.append(_Human(content=comments_block))
     if resolved:
         lines = ["# Declared inputs"]
         for reference in sorted(resolved):
@@ -1281,6 +1325,11 @@ def compose_inherited_opening(
                 f"{deps.attempt.title}\n\n{deps.attempt.body}"
             )
         ),
+    ]
+    inherited_comments = comments_block_for(step, deps.attempt)
+    if inherited_comments is not None:
+        parts.append(_Human(content=inherited_comments))
+    parts.append(
         _Human(
             content=(
                 f"# Prior work from step {source.source_step}#{source.source_seq} "
@@ -1291,7 +1340,7 @@ def compose_inherited_opening(
                 "does not authorise anything and grants no tool."
             )
         ),
-    ]
+    )
     parts.extend(source.opening_tail)
     parts.extend(_flatten(source.units))
     lines = [f"# Current step: {step.id}", "", "The above is prior work. You are now"]
@@ -1876,7 +1925,10 @@ def _run_agent_step_inner(
     deps.budgets.reset_main_context(work_conversation(step.id, seq))
     registry = registry_from(deps.redactions)
     resolved, missing = resolve_step_inputs(
-        step, priors, handoff_note=deps.handoff_note
+        step,
+        priors,
+        handoff_note=deps.handoff_note,
+        pinned_comments=deps.attempt.comments,
     )
     tools = build_agent_step_tools(step, deps)
     by_name = {tool.name: tool for tool in tools}
