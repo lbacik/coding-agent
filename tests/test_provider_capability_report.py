@@ -1,10 +1,11 @@
 """The Provider Capability Report: persisted at startup, served by status (#474).
 
 Contract: step-workflow contract §4.1 step 7 and §9.1. Each run of the
-Provider Capability Assertion produces one report — the pin key, when the
-assertion ran, and one entry per check in the order they ran. The Worker
-persists the latest report in the operator store on success and on refusal;
-``agentctl status`` returns it as ``status.provider_capability`` (``None``
+Provider Capability Assertion produces one report per referenced pin — the
+pin key, when the assertion ran, and one entry per check in the order they
+ran. The Worker persists every referenced pin's latest report in the
+operator store on success and on refusal; ``agentctl status`` returns them
+as ``status.provider_capability`` (a map from pin id to report, ``None``
 where no assertion has run yet) from both the live and the offline source.
 """
 
@@ -29,7 +30,7 @@ from coding_agent.operator.snapshots import fresh_offline_status
 from coding_agent.operator.store import (
     OperatorStore,
     open_read_connection,
-    read_provider_capability_report,
+    read_provider_capability_reports,
 )
 from coding_agent.provider.capability import (
     CHECK_EFFORT,
@@ -57,6 +58,8 @@ from coding_agent.runtime.redaction import SecretRegistry
 from support.scripted_model import ScriptedModel
 
 PIN_KEY = "anthropic:claude-sonnet-5@messages"
+PIN_ID = "sonnet"
+"""The configured pin id the reports in this module are recorded under."""
 
 
 def _sample_report(pin_key: str = PIN_KEY) -> ProviderCapabilityReport:
@@ -120,8 +123,8 @@ def test_no_report_before_any_assertion_has_run(tmp_path: Path) -> None:
     """The store, the read side and fresh offline status all read absent."""
     store = _store(tmp_path)
     try:
-        assert store.get_provider_capability_report() is None
-        assert read_provider_capability_report(store._connection) is None
+        assert store.get_provider_capability_reports() is None
+        assert read_provider_capability_reports(store._connection) is None
     finally:
         store.close()
     assert fresh_offline_status("2026-11-18T12:00:00Z")["provider_capability"] is None
@@ -132,10 +135,12 @@ def test_record_and_read_round_trip(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
         stored = store.record_provider_capability_report(
-            _sample_report().to_dict()
+            PIN_ID, _sample_report().to_dict()
         )
         assert stored is not None
-        assert store.get_provider_capability_report() == _sample_report().to_dict()
+        assert store.get_provider_capability_reports() == {
+            PIN_ID: _sample_report().to_dict()
+        }
     finally:
         store.close()
 
@@ -144,7 +149,9 @@ def test_only_the_latest_report_is_kept(tmp_path: Path) -> None:
     """A second assertion replaces the first: one row, never a history."""
     store = _store(tmp_path)
     try:
-        store.record_provider_capability_report(_sample_report().to_dict())
+        store.record_provider_capability_report(
+            PIN_ID, _sample_report().to_dict()
+        )
         newer = ProviderCapabilityReport(
             pin_key=PIN_KEY,
             ran_at="2026-11-18T13:00:00Z",
@@ -187,8 +194,10 @@ def test_only_the_latest_report_is_kept(tmp_path: Path) -> None:
                 ),
             ),
         )
-        store.record_provider_capability_report(newer.to_dict())
-        assert store.get_provider_capability_report() == newer.to_dict()
+        store.record_provider_capability_report(PIN_ID, newer.to_dict())
+        assert store.get_provider_capability_reports() == {
+            PIN_ID: newer.to_dict()
+        }
     finally:
         store.close()
 
@@ -198,12 +207,16 @@ def test_report_survives_reopening_the_store(tmp_path: Path) -> None:
     path = tmp_path / "run-ledger.sqlite3"
     first = _store(tmp_path)
     try:
-        first.record_provider_capability_report(_sample_report().to_dict())
+        first.record_provider_capability_report(
+            PIN_ID, _sample_report().to_dict()
+        )
     finally:
         first.close()
     second = OperatorStore(path)
     try:
-        assert second.get_provider_capability_report() == _sample_report().to_dict()
+        assert second.get_provider_capability_reports() == {
+            PIN_ID: _sample_report().to_dict()
+        }
     finally:
         second.close()
 
@@ -226,12 +239,15 @@ def test_report_is_redacted_and_capped_at_write(tmp_path: Path) -> None:
     store = _store(tmp_path)
     try:
         stored = store.record_provider_capability_report(
-            report.to_dict(), registry=SecretRegistry({"ANTHROPIC_API_KEY": secret})
+            PIN_ID,
+            report.to_dict(),
+            registry=SecretRegistry({"ANTHROPIC_API_KEY": secret}),
         )
         assert stored is not None
-        read_back = store.get_provider_capability_report()
+        read_back = store.get_provider_capability_reports()
         assert read_back is not None
-        evidence = str(read_back["checks"][0]["evidence"])
+        assert set(read_back) == {PIN_ID}
+        evidence = str(read_back[PIN_ID]["checks"][0]["evidence"])
         assert secret not in evidence
         assert secret not in json.dumps(read_back)
         assert secret not in json.dumps(stored)
@@ -245,7 +261,7 @@ def test_missing_table_reads_as_absent(tmp_path: Path) -> None:
     path = tmp_path / "bare.sqlite3"
     connection = sqlite3.connect(path)
     try:
-        assert read_provider_capability_report(connection) is None
+        assert read_provider_capability_reports(connection) is None
     finally:
         connection.close()
 
@@ -256,11 +272,20 @@ def test_report_without_pin_key_or_timestamp_stores_nothing(
     """A report missing its identity refuses nothing and stores nothing."""
     store = _store(tmp_path)
     try:
-        assert store.record_provider_capability_report({}) is None
-        assert store.record_provider_capability_report(
-            {"pin_key": "", "ran_at": "", "checks": []}
-        ) is None
-        assert store.get_provider_capability_report() is None
+        assert store.record_provider_capability_report(PIN_ID, {}) is None
+        assert (
+            store.record_provider_capability_report(
+                PIN_ID, {"pin_key": "", "ran_at": "", "checks": []}
+            )
+            is None
+        )
+        assert (
+            store.record_provider_capability_report(
+                "", _sample_report().to_dict()
+            )
+            is None
+        )
+        assert store.get_provider_capability_reports() is None
     finally:
         store.close()
 
@@ -351,13 +376,17 @@ def test_live_status_carries_null_before_any_assertion(
 def test_live_status_carries_the_report_after_a_record(
     tmp_path: Path,
 ) -> None:
-    """The live source serves the recorded report through the shared builder."""
+    """The live source serves the recorded reports through the shared builder."""
     ledger = _ledger(tmp_path)
     store = OperatorStore(ledger.path)
     try:
-        store.record_provider_capability_report(_sample_report().to_dict())
+        store.record_provider_capability_report(
+            PIN_ID, _sample_report().to_dict()
+        )
         result = operator_listener.build_status_result(ledger.path, _live_ready())
-        assert result["provider_capability"] == _sample_report().to_dict()
+        assert result["provider_capability"] == {
+            PIN_ID: _sample_report().to_dict()
+        }
     finally:
         store.close()
         ledger.close()
@@ -366,11 +395,13 @@ def test_live_status_carries_the_report_after_a_record(
 def test_offline_status_carries_the_report_after_a_record(
     tmp_path: Path,
 ) -> None:
-    """The offline source serves the same report: the refused check stays visible."""
+    """The offline source serves the same reports: the refused check stays visible."""
     ledger = _ledger(tmp_path)
     store = OperatorStore(ledger.path)
     try:
-        store.record_provider_capability_report(_sample_report().to_dict())
+        store.record_provider_capability_report(
+            PIN_ID, _sample_report().to_dict()
+        )
     finally:
         store.close()
         ledger.close()
@@ -378,7 +409,9 @@ def test_offline_status_carries_the_report_after_a_record(
         tmp_path / "run-ledger.sqlite3", tmp_path
     )
     assert result["instance"]["state"] == "stopped"
-    assert result["provider_capability"] == _sample_report().to_dict()
+    assert result["provider_capability"] == {
+        PIN_ID: _sample_report().to_dict()
+    }
 
 
 def test_offline_source_serves_the_report_without_a_worker(
@@ -392,7 +425,9 @@ def test_offline_source_serves_the_report_without_a_worker(
     ledger = _ledger(tmp_path)
     store = OperatorStore(ledger.path)
     try:
-        store.record_provider_capability_report(_sample_report().to_dict())
+        store.record_provider_capability_report(
+            PIN_ID, _sample_report().to_dict()
+        )
     finally:
         store.close()
         ledger.close()
@@ -402,7 +437,9 @@ def test_offline_source_serves_the_report_without_a_worker(
     captured = capsys.readouterr()
     envelope = json.loads(captured.out)
     assert envelope["ok"] is True
-    assert envelope["result"]["provider_capability"] == _sample_report().to_dict()
+    assert envelope["result"]["provider_capability"] == {
+        PIN_ID: _sample_report().to_dict()
+    }
 
 
 # --- startup persistence -----------------------------------------------------
@@ -509,12 +546,14 @@ def test_successful_startup_persists_the_report(
     assert model.tool_choices == [None, "capability_probe"]
     connection = open_read_connection(state_dir / "run-ledger.sqlite3")
     try:
-        stored = read_provider_capability_report(connection)
+        stored = read_provider_capability_reports(connection)
     finally:
         connection.close()
     assert stored is not None
-    assert stored["pin_key"] == PINNED_MODELS["anthropic"].key
-    assert [entry["check"] for entry in stored["checks"]] == [
+    assert set(stored) == {"sonnet"}
+    report = stored["sonnet"]
+    assert report["pin_key"] == PINNED_MODELS["anthropic"].key
+    assert [entry["check"] for entry in report["checks"]] == [
         CHECK_PRICE,
         CHECK_TOOL_CALL_AUTO,
         CHECK_TOOL_CALL_FORCED,
@@ -522,7 +561,7 @@ def test_successful_startup_persists_the_report(
         CHECK_IDENTITY,
         CHECK_EFFORT,
     ]
-    assert all(entry["gating"] for entry in stored["checks"]
+    assert all(entry["gating"] for entry in report["checks"]
                if entry["check"] != CHECK_TOOL_CALL_FORCED)
 
 
@@ -541,7 +580,7 @@ def test_refused_startup_persists_the_report_before_the_halt(
     result = offline_reader.load_offline_status(
         state_dir / "run-ledger.sqlite3", state_dir
     )
-    assert result["provider_capability"] == _sample_report().to_dict()
+    assert result["provider_capability"] == {"sonnet": _sample_report().to_dict()}
     assert result["instance"]["last_halt"] is not None
     assert result["instance"]["last_halt"]["reason"] == "startup-check-refused"
 

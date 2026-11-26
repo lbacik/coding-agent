@@ -86,20 +86,41 @@ class RequestPin:
     """The per-request output cap carried into the model call (§11)."""
     context_window: ContextWindowConfig | None
     """The pin's context policy (contract §9.9); ``None`` disables the guard."""
+    is_gateway: bool
+    """Whether the requesting pin reaches its model through a Model Gateway."""
 
-    @property
-    def is_gateway(self) -> bool:
-        """Whether the request's pin reaches its model through a Model Gateway."""
-        return self.pin.is_gateway
+    @classmethod
+    def from_pin(
+        cls,
+        pin: PinnedModel,
+        prices: TokenPrices,
+        output_cap: int,
+        context_window: ContextWindowConfig | None,
+    ) -> RequestPin:
+        """A referenced pin as the requesting pin (Advisor and later slices)."""
+        return cls(
+            pin=pin,
+            prices=prices,
+            output_cap=output_cap,
+            context_window=context_window,
+            is_gateway=pin.is_gateway,
+        )
 
     @classmethod
     def from_deps(cls, deps: AgentStepDeps) -> RequestPin:
-        """The Attempt's own pin as the requesting pin (main, Sub-agent)."""
+        """The Attempt's own pin as the requesting pin (main, Sub-agent).
+
+        The gateway kind is the Attempt's effective one — either Attempt
+        flag agrees with the Supervisor's pin-derived build, and the pin
+        itself agrees in production — so a caller threading only one flag
+        still settles gateway responses at the max rate.
+        """
         return cls(
             pin=deps.pin,
             prices=deps.prices,
             output_cap=deps.output_cap,
             context_window=deps.context_window,
+            is_gateway=_is_gateway_for(deps) or deps.pin.is_gateway,
         )
 
 
@@ -119,23 +140,32 @@ def _measure(
     return measure_conversation_context(list(messages), list(tools), state)
 
 
-def _usable_threshold_for(deps: AgentStepDeps) -> int | None:
-    """The Usable Threshold in force for this Step Execution, if configured."""
-    window = deps.context_window
+def _usable_threshold_for(
+    deps: AgentStepDeps, request_pin: RequestPin | None = None
+) -> int | None:
+    """The Usable Threshold in force for this Step Execution, if configured.
+
+    The requesting conversation's pin default: ``request_pin``'s context
+    window where one is passed, else the Attempt's.
+    """
+    window = request_pin.context_window if request_pin is not None else deps.context_window
     return window.usable_threshold if window is not None else None
 
 
-def _hard_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
+def _hard_usable_for(
+    step: WorkflowStep, deps: AgentStepDeps, request_pin: RequestPin | None = None
+) -> int | None:
     """The step's own Hard Usable Threshold, where the step opts in (§3).
 
-    The policy's ``hard-tokens`` less the Pinned Model's code-owned safety
-    margin and request overhead, read off the Attempt's context-window
-    config. ``None`` where the step carries no ``context-thresholds`` policy
+    The policy's ``hard-tokens`` less the requesting pin's code-owned safety
+    margin and request overhead, read off the requesting conversation's
+    context-window config (``request_pin`` where passed, else the Attempt's).
+    ``None`` where the step carries no ``context-thresholds`` policy
     or no context-window config is bound (tests only): such a step keeps the
-    Pinned Model's Context Threshold guard and its existing outcomes.
+    requesting pin's Context Threshold guard and its existing outcomes.
     """
     policy = step.context_thresholds
-    window = deps.context_window
+    window = request_pin.context_window if request_pin is not None else deps.context_window
     if policy is None or window is None:
         return None
     return (
@@ -145,19 +175,22 @@ def _hard_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
     )
 
 
-def _soft_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
+def _soft_usable_for(
+    step: WorkflowStep, deps: AgentStepDeps, request_pin: RequestPin | None = None
+) -> int | None:
     """The step's own Soft Usable Threshold, where the step configures it (§3).
 
-    The policy's ``soft-tokens`` less the Pinned Model's code-owned safety
-    margin and request overhead, read off the Attempt's context-window
-    config. ``None`` where the step carries no soft policy (hard-only
+    The policy's ``soft-tokens`` less the requesting pin's code-owned safety
+    margin and request overhead, read off the requesting conversation's
+    context-window config (``request_pin`` where passed, else the Attempt's).
+    ``None`` where the step carries no soft policy (hard-only
     opted-in steps and legacy steps alike) or no context-window config is
     bound (tests only): such a step keeps the hard-or-pin guard and its
     existing outcomes. Where configured the soft bound sits strictly below
     the hard one, so this is the tighter of the two step guards.
     """
     policy = step.context_thresholds
-    window = deps.context_window
+    window = request_pin.context_window if request_pin is not None else deps.context_window
     if policy is None or window is None:
         return None
     if policy.soft_tokens is None:
@@ -169,11 +202,19 @@ def _soft_usable_for(step: WorkflowStep, deps: AgentStepDeps) -> int | None:
     )
 
 
-def _prices_for(deps: AgentStepDeps) -> TokenPrices:
+def _prices_for(
+    deps: AgentStepDeps, request_pin: RequestPin | None = None
+) -> TokenPrices:
+    if request_pin is not None:
+        return request_pin.prices
     return deps.prices
 
 
-def _output_cap_for(deps: AgentStepDeps) -> int:
+def _output_cap_for(
+    deps: AgentStepDeps, request_pin: RequestPin | None = None
+) -> int:
+    if request_pin is not None:
+        return request_pin.output_cap
     return deps.output_cap
 
 
@@ -239,14 +280,19 @@ def _flush_attempt_usage(deps: AgentStepDeps) -> None:
         pass
 
 
-def _is_gateway_for(deps: AgentStepDeps) -> bool:
+def _is_gateway_for(
+    deps: AgentStepDeps, request_pin: RequestPin | None = None
+) -> bool:
     """Whether this Step Execution runs behind a Model Gateway (§11.4).
 
-    The deps flag carries the pin kind; the budgets flag agrees — the
-    Supervisor builds both from the same pin. Either flag suffices, so a
-    caller that threads only one still settles gateway responses at the
-    max rate.
+    The requesting conversation's pin kind: ``request_pin``'s pin where one
+    is passed, else the deps flag (which carries the Attempt's pin kind; the
+    budgets flag agrees — the Supervisor builds both from the same pin).
+    Either deps flag suffices, so a caller that threads only one still
+    settles gateway responses at the max rate.
     """
+    if request_pin is not None:
+        return request_pin.is_gateway
     if deps.is_gateway:
         return True
     if deps.budgets.is_gateway:
@@ -306,6 +352,7 @@ def _settle_response_spend(
     response: BaseMessage,
     *,
     origin: UsageOrigin = "main",
+    request_pin: RequestPin | None = None,
 ) -> None:
     """Settle one responded request's admission hold with its actual spend.
 
@@ -315,10 +362,12 @@ def _settle_response_spend(
     usage metadata settles no spend but still counts one response — one
     without usage — under the request's origin, so the origin response
     count stays equal to the tally's ``model_calls`` (§11.1). Only a
-    failed request is charged its worst case (§11.4).
+    failed request is charged its worst case (§11.4). The requesting
+    conversation's pin prices the settlement (``request_pin`` where passed,
+    else the Attempt's).
     """
     if isinstance(getattr(response, "usage_metadata", None), dict):
-        delta = response_usage(response, _prices_for(deps))
+        delta = response_usage(response, _prices_for(deps, request_pin))
         deps.budgets.settle_hold(
             hold_id, step_id, replace(delta, tool_calls=0), origin=origin, responses=1
         )
@@ -468,9 +517,15 @@ def provider_failure_label(exc: BaseException) -> str:
     return f"{type(exc).__name__} (status {status})"
 
 
-def _model_window_for(deps: AgentStepDeps) -> int | None:
-    """The declared Model Context Window in force, if configured (§9.6)."""
-    window = deps.context_window
+def _model_window_for(
+    deps: AgentStepDeps, request_pin: RequestPin | None = None
+) -> int | None:
+    """The declared Model Context Window in force, if configured (§9.6).
+
+    The requesting conversation's pin window: ``request_pin``'s where one
+    is passed, else the Attempt's.
+    """
+    window = request_pin.context_window if request_pin is not None else deps.context_window
     if window is None:
         return None
     return window.threshold_tokens
@@ -634,6 +689,7 @@ def run_model_request(
     context_state: ConversationContextState | None = None,
     premeasured: ConversationContext | None = None,
     usable_threshold: int | None = None,
+    request_pin: RequestPin | None = None,
 ) -> BaseMessage | ModelRequestEnding:
     """Run one model request to its accepted response or its ending.
 
@@ -662,9 +718,18 @@ def run_model_request(
     they did from the loop. ``usable_threshold`` is the recorded Usable
     Threshold: the caller passes the step's Hard Usable Threshold where the
     step opts in, and leaves it ``None`` elsewhere (Sub-agents included) to
-    record the pin default.
+    record the requesting pin's default. ``request_pin`` is the pin of the
+    conversation sending the request — the Attempt's own pin on the main
+    conversation and every Sub-agent, another referenced pin on an Advisor
+    conversation — and supplies the Admission bound and settlement prices,
+    the output cap, the identity and effort assertions, the gateway
+    suppression fields and the pin-default Usable Threshold. The witness
+    must be built with the same pin. Where omitted, every pin-bound check
+    reads the Attempt's Pinned Model directly, as before.
     """
-    request_cap = _output_cap_for(deps)
+    if request_pin is None:
+        request_pin = RequestPin.from_deps(deps)
+    request_cap = _output_cap_for(deps, request_pin)
     hold_id: str | None = first_hold_id
     # The Conversation Context this request is compared with: the caller
     # threads the value its guard already decided on (``premeasured``), so the
@@ -677,9 +742,10 @@ def run_model_request(
     )
     # The recorded Usable Threshold is the step's Hard Usable Threshold where
     # the caller proves the step opts in (§3); otherwise — including every
-    # Sub-agent request, which keeps the pin guard — the pin default.
+    # Sub-agent request, which keeps the pin guard — the requesting pin's
+    # default.
     if usable_threshold is None:
-        usable_threshold = _usable_threshold_for(deps)
+        usable_threshold = _usable_threshold_for(deps, request_pin)
     anchor_count = len(messages)
     if deps.budgets.remaining_wall_seconds(step_id) <= 0:
         if hold_id is not None:
@@ -695,7 +761,12 @@ def run_model_request(
         )
     if hold_id is None:
         admit_fact, hold_id = deps.budgets.admit_request(
-            step_id, compared.value, output_cap=request_cap, origin=origin
+            step_id,
+            compared.value,
+            output_cap=request_cap,
+            prices=request_pin.prices,
+            is_gateway=request_pin.is_gateway,
+            origin=origin,
         )
         if admit_fact is not None:
             return ModelRequestEnding(
@@ -727,7 +798,7 @@ def run_model_request(
                 _ledger_settle(deps, pending_charge, charged=True)
                 _flush_attempt_usage(deps)
                 pending_charge = None
-            if deps.pin.is_gateway:
+            if request_pin.pin.is_gateway:
                 # A failed gateway request carrying retry or fallback
                 # evidence above 0 fails closed (§9.1): the hold is
                 # already charged at worst case above, the evidence
@@ -735,7 +806,7 @@ def run_model_request(
                 # finalisation — never retried, never classified by
                 # status. An error without such evidence is not a
                 # violation and is classified by its status as today.
-                if check_gateway_error_exc(deps.pin, exc).violated:
+                if check_gateway_error_exc(request_pin.pin, exc).violated:
                     raise witness.violation_from_error(
                         exc, context=compared, usable_threshold=usable_threshold
                     ) from exc
@@ -747,7 +818,7 @@ def run_model_request(
                 if isinstance(exc, _Overflow):
                     setattr(exc, "_overflow_context", compared)
                     setattr(exc, "_overflow_usable", usable_threshold)
-                    setattr(exc, "_overflow_window", _model_window_for(deps))
+                    setattr(exc, "_overflow_window", _model_window_for(deps, request_pin))
                     # A refused request settles at its hold's worst case and
                     # records the Context Overflow fact with the hold it
                     # charged (§11.4, §13.2). The hold settlement above is
@@ -758,7 +829,7 @@ def run_model_request(
                             context=compared,
                             usable_threshold=usable_threshold,
                             hold_id=failed_hold,
-                            model_context_window=_model_window_for(deps),
+                            model_context_window=_model_window_for(deps, request_pin),
                         )
                     except Exception:
                         pass
@@ -767,7 +838,12 @@ def run_model_request(
             # appended and no response anchored the state, so a re-measure
             # would read the same value.
             retry_fact, retry_hold = deps.budgets.admit_request(
-                step_id, compared.value, output_cap=request_cap, origin=origin
+                step_id,
+                compared.value,
+                output_cap=request_cap,
+                prices=request_pin.prices,
+                is_gateway=request_pin.is_gateway,
+                origin=origin,
             )
             if retry_fact is not None:
                 return ModelRequestEnding(
@@ -803,12 +879,13 @@ def run_model_request(
     # identity and the violation are recorded, and the Attempt
     # ends through §12 finalisation — never retried, never
     # carried back to the model (§9.1).
-    if check_direct_pin(deps.pin, response).violated:
+    if check_direct_pin(request_pin.pin, response).violated:
         if pending_charge is not None:
             _settle_response_spend(
-                deps, step_id, pending_charge, response, origin=origin
+                deps, step_id, pending_charge, response, origin=origin,
+                request_pin=request_pin,
             )
-        if deps.pin.is_gateway and response_has_unreported_gateway_cache_write(
+        if request_pin.pin.is_gateway and response_has_unreported_gateway_cache_write(
             response, is_gateway=True
         ):
             _record_unreported_cache_write(deps)
@@ -820,10 +897,11 @@ def run_model_request(
     # response is discarded, its usage charged, and the
     # Attempt ends through §12 finalisation — never retried,
     # never carried back to the model.
-    if check_reported_effort(deps.pin, response).violated:
+    if check_reported_effort(request_pin.pin, response).violated:
         if pending_charge is not None:
             _settle_response_spend(
-                deps, step_id, pending_charge, response, origin=origin
+                deps, step_id, pending_charge, response, origin=origin,
+                request_pin=request_pin,
             )
         raise witness.violation_from_response(
             response, context=compared, usable_threshold=usable_threshold
@@ -848,9 +926,9 @@ def run_model_request(
                     f"#response-{witness.response_index}",
                 )
         if response_has_complete_usage(response):
-            gateway = _is_gateway_for(deps)
+            gateway = _is_gateway_for(deps, request_pin)
             delta = response_usage(
-                response, _prices_for(deps), is_gateway=gateway
+                response, _prices_for(deps, request_pin), is_gateway=gateway
             )
             if gateway and response_has_unreported_gateway_cache_write(
                 response, is_gateway=True
@@ -891,7 +969,7 @@ def run_model_request(
                 usable_threshold=usable_threshold,
                 cut_short="context-window",
             )
-            window = _model_window_for(deps)
+            window = _model_window_for(deps, request_pin)
             raise ResponseCutShortByContext(
                 "the response was cut short by the context window",
                 response=response,
@@ -924,7 +1002,7 @@ def run_model_request(
             usable_threshold=usable_threshold,
             cut_short="context-window",
         )
-        window = _model_window_for(deps)
+        window = _model_window_for(deps, request_pin)
         raise ResponseCutShortByContext(
             "the response was cut short by the context window",
             response=response,
@@ -955,6 +1033,7 @@ def request_model_response(
     tools: Sequence[BaseTool],
     *,
     premeasured: ConversationContext | None = None,
+    request_pin: RequestPin | None = None,
 ) -> BaseMessage | AgentStepOutcome:
     """Run one Step Execution model request to its response or its outcome.
 
@@ -965,14 +1044,17 @@ def request_model_response(
     compared value for the guard and the Admission hold. The recorded Usable
     Threshold is the step's own Soft Usable Threshold where the step
     configures soft, else its Hard Usable Threshold where it opts in (§3),
-    else the pin default. A non-retryable
-    ``ModelError``, or a retryable one whose three tries are exhausted, ends
-    the Step Execution ``error`` through the tally's ``provider_error``
-    (§9.6) — the shared lifecycle already charged the failed request's hold
-    at its worst case (§11.4) before raising. A ``PinViolation`` propagates
-    untouched: it is raised before this classification and never becomes
-    ``error`` (§12). ``messages`` is appended to by the shared lifecycle,
-    exactly as the loop appended to it.
+    else the requesting pin's default. ``request_pin`` is the pin of the
+    conversation sending the request (see :func:`run_model_request`); the
+    witness must be built with the same pin. Where omitted, every pin-bound
+    check reads the Attempt's Pinned Model directly, as before. A
+    non-retryable ``ModelError``, or a retryable one whose three tries are
+    exhausted, ends the Step Execution ``error`` through the tally's
+    ``provider_error`` (§9.6) — the shared lifecycle already charged the
+    failed request's hold at its worst case (§11.4) before raising. A
+    ``PinViolation`` propagates untouched: it is raised before this
+    classification and never becomes ``error`` (§12). ``messages`` is
+    appended to by the shared lifecycle, exactly as the loop appended to it.
     """
     from langchain_core.exceptions import ModelError as _ModelError
 
@@ -980,7 +1062,7 @@ def request_model_response(
         tally.model_calls += 1
 
     try:
-        soft_usable = _soft_usable_for(tally.step, deps)
+        soft_usable = _soft_usable_for(tally.step, deps, request_pin)
         result = run_model_request(
             deps,
             witness,
@@ -995,16 +1077,17 @@ def request_model_response(
             premeasured=premeasured,
             # The step's own Soft Usable Threshold where the step configures
             # soft, else its Hard Usable Threshold where it opts in (§3),
-            # else the pin default: the recorded Usable Threshold in the
-            # `model_response` event and every Context Overflow and
-            # pin-violation record matches the tightest guard that admitted
-            # the request — including the threshold outcome the loop
-            # reports.
+            # else the requesting pin's default: the recorded Usable
+            # Threshold in the `model_response` event and every Context
+            # Overflow and pin-violation record matches the tightest guard
+            # that admitted the request — including the threshold outcome
+            # the loop reports.
             usable_threshold=(
                 soft_usable
                 if soft_usable is not None
-                else _hard_usable_for(tally.step, deps)
+                else _hard_usable_for(tally.step, deps, request_pin)
             ),
+            request_pin=request_pin,
         )
     except _ModelError as exc:
         return tally.provider_error(
