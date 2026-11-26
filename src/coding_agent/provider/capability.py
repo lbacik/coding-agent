@@ -11,6 +11,7 @@ MVP row ids: L1-4, L1-4a. Step-workflow row id: L1-4b.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -72,6 +73,27 @@ the way to the wire is otherwise invisible — the run looks correct and is
 not the run the Attempt recorded. It runs only where the probe response
 reports no effort: where the response reports the effort it ran at, that
 own evidence is the reach proof instead.
+"""
+
+AUTO_PROBE_MAX_TRIES = 3
+"""Total tries for the gating auto probe where arguments do not match.
+
+Model output is non-deterministic, so a capable pin can be refused by a
+single bad sample: only a call to the probe tool whose arguments do not
+match its schema is retried, up to this many tries in total. A constant
+owned by the code, not a configuration key: an operator must not be able
+to pass an incapable model by raising it.
+
+Every other gating failure — a text answer, a call to another tool, a
+provider or transport error, a response that is not an ``AIMessage`` —
+still refuses immediately, as decided in #474.
+"""
+
+_ARGS_EVIDENCE_CAP = 60
+"""Per-try cap on recorded probe-call arguments (JSON, truncated).
+
+Three truncated tries plus framing stay well under
+:data:`REPORT_EVIDENCE_CAP`, so the refused entry needs no further cap.
 """
 
 REPORT_EVIDENCE_CAP = 300
@@ -313,13 +335,14 @@ def assert_provider_capability(
       exposes a rate through any API, so this is checked first and costs no
       call;
     - **a call of the named probe tool under ``auto``**, proven against an
-      asking prompt — one live call under the pinned effort binds the probe
-      tool with no forced ``tool_choice`` and sends a prompt asking for a
+      asking prompt — live calls under the pinned effort bind the probe
+      tool with no forced ``tool_choice`` and send a prompt asking for a
       call; only a call to the probe tool whose arguments match its schema
       passes, and that same response must report non-zero usage. A text
-      answer, a call to another tool, or arguments that do not match refuse
-      the pin, with no retry: the existing retry policy for retryable
-      provider errors is unchanged;
+      answer or a call to another tool refuses the pin with no retry, while
+      arguments that do not match get a bounded number of tries
+      (:data:`AUTO_PROBE_MAX_TRIES` in total): the existing retry policy
+      for retryable provider errors is unchanged;
     - **the diagnostic forced probe** — today's forced ``tool_choice``
       probe, kept as a recorded diagnostic that never refuses startup by
       itself: ``passed`` on a call to the probe tool, ``text-answer`` where
@@ -402,17 +425,49 @@ def assert_provider_capability(
     )
 
     # Both tool probes run once the price check passes; both results are
-    # recorded before startup is refused for a tool-calling reason.
-    auto_response, auto_error = _run_auto_probe(pin, model, max_tokens=max_tokens)
+    # recorded before startup is refused for a tool-calling reason. The
+    # gating auto probe gets a bounded number of tries, but only where the
+    # probe tool is called with arguments that do not match its schema —
+    # every other gating failure refuses immediately, as decided in #474.
+    # Every try carries the same pinned effort and output cap, and gateway
+    # identity is checked on every try, including a failed one.
+    failed_tries: list[str] = []
+    passing_response: AIMessage | None = None
+    auto_error: BaseException | None = None
+    fatal_failure: str | None = None
+    fatal_response: BaseMessage | None = None
+    failed_try_identity: str | None = None
+    for attempt in range(1, AUTO_PROBE_MAX_TRIES + 1):
+        auto_response, auto_error = _run_auto_probe(pin, model, max_tokens=max_tokens)
+        if auto_error is not None:
+            break
+        assert auto_response is not None
+        if not isinstance(auto_response, AIMessage):
+            fatal_response = auto_response
+            break
+        failure = _auto_probe_failure(auto_response)
+        if failure is None:
+            passing_response = auto_response
+            break
+        if not _is_schema_mismatch(auto_response):
+            fatal_failure = failure
+            break
+        failed_tries.append(_mismatched_probe_args_text(auto_response))
+        failed_try_identity = _auto_identity_failure(pin, auto_response)
+        if failed_try_identity is not None:
+            break
+        if attempt == AUTO_PROBE_MAX_TRIES:
+            break
     forced_response, forced_error = _run_forced_probe(pin, model, max_tokens=max_tokens)
 
     if auto_error is not None:
+        error_evidence = _auto_error_evidence(failed_tries, auto_error)
         finished.append(
             CapabilityCheck(
                 check=CHECK_TOOL_CALL_AUTO,
                 gating=True,
                 outcome=OUTCOME_REFUSED,
-                evidence=_short_error(auto_error),
+                evidence=error_evidence,
             )
         )
         finished.append(_forced_entry(pin, forced_response, forced_error))
@@ -441,53 +496,105 @@ def assert_provider_capability(
             ) from auto_error
         raise _refuse_after(
             [CHECK_USAGE, CHECK_IDENTITY, CHECK_EFFORT],
-            f"pinned model {pin.key!r} refused the capability probe: {auto_error}",
+            f"pinned model {pin.key!r} refused the capability probe: {error_evidence}",
         ) from auto_error
 
-    assert auto_response is not None
-    if not isinstance(auto_response, AIMessage):
+    if fatal_response is not None:
         finished.append(
             CapabilityCheck(
                 check=CHECK_TOOL_CALL_AUTO,
                 gating=True,
                 outcome=OUTCOME_REFUSED,
-                evidence=f"returned {type(auto_response).__name__}, not an AIMessage",
+                evidence=f"returned {type(fatal_response).__name__}, not an AIMessage",
             )
         )
         finished.append(_forced_entry(pin, forced_response, forced_error))
         raise _refuse_after(
             [CHECK_USAGE, CHECK_IDENTITY, CHECK_EFFORT],
-            f"pinned model {pin.key!r} returned {type(auto_response).__name__}, "
+            f"pinned model {pin.key!r} returned {type(fatal_response).__name__}, "
             f"not an AIMessage",
         )
 
-    auto_failure = _auto_probe_failure(auto_response)
-    if auto_failure is not None:
+    if fatal_failure is not None:
         finished.append(
             CapabilityCheck(
                 check=CHECK_TOOL_CALL_AUTO,
                 gating=True,
                 outcome=OUTCOME_REFUSED,
-                evidence=auto_failure,
+                evidence=fatal_failure,
             )
         )
         finished.append(_forced_entry(pin, forced_response, forced_error))
         raise _refuse_after(
             [CHECK_USAGE, CHECK_IDENTITY, CHECK_EFFORT],
             f"pinned model {pin.key!r} did not call the {capability_probe.name!r} "
-            f"tool under the pinned {pin.effort!r} effort ({auto_failure})",
+            f"tool under the pinned {pin.effort!r} effort ({fatal_failure})",
         )
-    finished.append(
-        CapabilityCheck(
-            check=CHECK_TOOL_CALL_AUTO,
-            gating=True,
-            outcome=OUTCOME_PASSED,
-            evidence=f"called {capability_probe.name!r} under auto",
+
+    if failed_try_identity is not None:
+        finished.append(
+            CapabilityCheck(
+                check=CHECK_TOOL_CALL_AUTO,
+                gating=True,
+                outcome=OUTCOME_REFUSED,
+                evidence=_mismatch_evidence(failed_tries),
+            )
         )
-    )
+        finished.append(_forced_entry(pin, forced_response, forced_error))
+        finished.append(_not_run(CHECK_USAGE))
+        finished.append(
+            CapabilityCheck(
+                check=CHECK_IDENTITY,
+                gating=True,
+                outcome=OUTCOME_REFUSED,
+                evidence=failed_try_identity,
+            )
+        )
+        finished.append(_not_run(CHECK_EFFORT))
+        raise ProviderCapabilityRefused(
+            failed_try_identity,
+            report=ProviderCapabilityReport(
+                pin_key=pin.key, ran_at=ran_at, checks=tuple(finished)
+            ),
+        )
+
+    if passing_response is None:
+        mismatch_evidence = _mismatch_evidence(failed_tries)
+        finished.append(
+            CapabilityCheck(
+                check=CHECK_TOOL_CALL_AUTO,
+                gating=True,
+                outcome=OUTCOME_REFUSED,
+                evidence=mismatch_evidence,
+            )
+        )
+        finished.append(_forced_entry(pin, forced_response, forced_error))
+        raise _refuse_after(
+            [CHECK_USAGE, CHECK_IDENTITY, CHECK_EFFORT],
+            f"pinned model {pin.key!r} did not call the {capability_probe.name!r} "
+            f"tool under the pinned {pin.effort!r} effort ({mismatch_evidence})",
+        )
+    if failed_tries:
+        finished.append(
+            CapabilityCheck(
+                check=CHECK_TOOL_CALL_AUTO,
+                gating=True,
+                outcome=OUTCOME_PASSED,
+                evidence=_retry_pass_evidence(failed_tries),
+            )
+        )
+    else:
+        finished.append(
+            CapabilityCheck(
+                check=CHECK_TOOL_CALL_AUTO,
+                gating=True,
+                outcome=OUTCOME_PASSED,
+                evidence=f"called {capability_probe.name!r} under auto",
+            )
+        )
     finished.append(_forced_entry(pin, forced_response, forced_error))
 
-    usage = auto_response.usage_metadata
+    usage = passing_response.usage_metadata
     if not usage or not usage.get("total_tokens"):
         finished.append(
             CapabilityCheck(
@@ -510,7 +617,9 @@ def assert_provider_capability(
         )
     )
 
-    identity_failure = _identity_failure(pin, auto_response, forced_response, forced_error)
+    identity_failure = _identity_failure(
+        pin, passing_response, forced_response, forced_error
+    )
     if identity_failure is not None:
         finished.append(
             CapabilityCheck(
@@ -529,12 +638,12 @@ def assert_provider_capability(
             check=CHECK_IDENTITY,
             gating=True,
             outcome=OUTCOME_PASSED,
-            evidence=_identity_evidence(pin, auto_response),
+            evidence=_identity_evidence(pin, passing_response),
         )
     )
 
     effort_entry, effort_refusal = _assert_effort_reaches_provider(
-        pin, model, auto_response, max_tokens=max_tokens
+        pin, model, passing_response, max_tokens=max_tokens
     )
     finished.append(effort_entry)
     if effort_refusal is not None:
@@ -542,7 +651,7 @@ def assert_provider_capability(
 
     return CapabilityAssertionResult(
         pin=pin,
-        response=auto_response,
+        response=passing_response,
         report=ProviderCapabilityReport(
             pin_key=pin.key, ran_at=ran_at, checks=tuple(finished)
         ),
@@ -647,7 +756,9 @@ def _auto_probe_failure(response: AIMessage) -> str | None:
 
     Only a call to the probe tool whose arguments match its schema passes:
     a text answer, a call to another tool, or arguments that do not match
-    refuse startup, with no retry.
+    refuse startup. Only the arguments-mismatch failure is retried, up to
+    :data:`AUTO_PROBE_MAX_TRIES` tries in total; every other failure
+    refuses with no retry.
     """
     if not response.tool_calls:
         return "answered with text instead of calling the probe tool"
@@ -657,6 +768,90 @@ def _auto_probe_failure(response: AIMessage) -> str | None:
     if _probe_tool_call(response) is None:
         return "the probe tool call's arguments did not match its schema"
     return None
+
+
+def _is_schema_mismatch(response: AIMessage) -> bool:
+    """Whether the gating failure is the retried kind: the probe tool was
+    called, but its arguments did not match the tool schema.
+
+    A text answer or a call to another tool is never a schema mismatch and
+    refuses immediately, as decided in #474.
+    """
+    if not response.tool_calls:
+        return False
+    names = {str(call.get("name")) for call in response.tool_calls}
+    if all(name != capability_probe.name for name in names):
+        return False
+    return _probe_tool_call(response) is None
+
+
+def _format_probe_args(args: Any) -> str:
+    """Received tool-call arguments as JSON, truncated for evidence.
+
+    One try's arguments are capped at :data:`_ARGS_EVIDENCE_CAP`
+    characters, so every try is recorded yet the entry stays well under
+    :data:`REPORT_EVIDENCE_CAP`.
+    """
+    try:
+        text = json.dumps(args, sort_keys=True)
+    except (TypeError, ValueError):
+        text = str(args)
+    if len(text) > _ARGS_EVIDENCE_CAP:
+        text = text[:_ARGS_EVIDENCE_CAP]
+    return text
+
+
+def _mismatched_probe_args_text(response: AIMessage) -> str:
+    """The received arguments of a schema-mismatching probe call."""
+    for call in response.tool_calls:
+        if call.get("name") != capability_probe.name:
+            continue
+        return _format_probe_args(call.get("args"))
+    return _format_probe_args(None)
+
+
+def _prior_tries_text(failed_tries: Sequence[str]) -> str:
+    """One ``try N: ...`` fragment per failed try, in try order."""
+    return "; ".join(
+        f"try {number}: arguments did not match its schema, got {received}"
+        for number, received in enumerate(failed_tries, start=1)
+    )
+
+
+def _mismatch_evidence(failed_tries: Sequence[str]) -> str:
+    """The refused ``tool-call-auto`` evidence after every try failed."""
+    tried = "; ".join(failed_tries)
+    return (
+        "the probe tool call's arguments did not match its schema "
+        f"on {len(failed_tries)} of {AUTO_PROBE_MAX_TRIES} tries (got {tried})"
+    )
+
+
+def _retry_pass_evidence(failed_tries: Sequence[str]) -> str:
+    """The passed ``tool-call-auto`` evidence after a retry.
+
+    A pass on the first try keeps today's evidence unchanged; only a pass
+    after a retry names the try and the earlier tries' arguments.
+    """
+    return (
+        f"called {capability_probe.name!r} under auto "
+        f"on try {len(failed_tries) + 1} of {AUTO_PROBE_MAX_TRIES} "
+        f"({_prior_tries_text(failed_tries)})"
+    )
+
+
+def _auto_error_evidence(failed_tries: Sequence[str], error: BaseException) -> str:
+    """The refused ``tool-call-auto`` evidence for a probe error.
+
+    Where earlier tries failed with mismatched arguments, their failures
+    are listed before the error that refused startup.
+    """
+    if not failed_tries:
+        return _short_error(error)
+    evidence = f"{_prior_tries_text(failed_tries)}; probe request failed: {_short_error(error)}"
+    if len(evidence) > REPORT_EVIDENCE_CAP:
+        evidence = evidence[:REPORT_EVIDENCE_CAP]
+    return evidence
 
 
 def _usage_evidence(usage: Any) -> str:
@@ -669,17 +864,13 @@ def _usage_evidence(usage: Any) -> str:
     return "usage reported"
 
 
-def _identity_failure(
-    pin: PinnedModel,
-    auto_response: AIMessage,
-    forced_response: BaseMessage | None,
-    forced_error: BaseException | None,
-) -> str | None:
-    """Why the probe identity evidence refuses the pin, or ``None``.
+def _auto_identity_failure(pin: PinnedModel, auto_response: AIMessage) -> str | None:
+    """Why one gating probe response's own identity refuses the pin, or ``None``.
 
-    Gateway identity gates on every probe, including the diagnostic forced
-    one: retry or fallback evidence above 0, or a model group other than
-    the pin, refuses startup, on a response and on an error alike.
+    Gateway identity is checked on every auto try, including a failed one:
+    retry or fallback evidence above 0, or a model group other than the
+    pin, refuses startup — as does a direct pin's response reporting
+    another model id.
     """
     check = check_direct_pin(pin, auto_response)
     if check.violated:
@@ -695,6 +886,24 @@ def _identity_failure(
             f"pin's probe response must report the pinned model id "
             f"{pin.model!r} exactly — pin the model the vendor reports"
         )
+    return None
+
+
+def _identity_failure(
+    pin: PinnedModel,
+    auto_response: AIMessage,
+    forced_response: BaseMessage | None,
+    forced_error: BaseException | None,
+) -> str | None:
+    """Why the probe identity evidence refuses the pin, or ``None``.
+
+    Gateway identity gates on every probe, including the diagnostic forced
+    one: retry or fallback evidence above 0, or a model group other than
+    the pin, refuses startup, on a response and on an error alike.
+    """
+    auto_failure = _auto_identity_failure(pin, auto_response)
+    if auto_failure is not None:
+        return auto_failure
     if pin.is_gateway:
         if forced_response is not None:
             forced_check = check_direct_pin(pin, forced_response)
