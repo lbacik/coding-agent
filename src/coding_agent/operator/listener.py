@@ -570,7 +570,6 @@ def _handle_one(
             ledger_path=ledger_path,
             kind="resume",
             request=request,
-            live=live,
             registry=registry,
         )
     if op == "next":
