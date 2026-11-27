@@ -744,14 +744,14 @@ def test_pin_path_empty_settle_still_counts_response(tmp_path: Path) -> None:
         tmp_path=tmp_path,
     )
     deps.ledger.open_attempt(deps.attempt.attempt_id, effective_configuration={})
-    fact, hold_id = deps.budgets.admit_request(STEP_ID, 100, origin="main")
+    fact, hold = deps.budgets.admit_hold(STEP_ID, 100, seq=1, origin="main")
     assert fact is None
-    assert hold_id is not None
+    assert hold is not None
 
     _settle_response_spend(
         deps,
         STEP_ID,
-        hold_id,
+        hold,
         AIMessage(content="", usage_metadata=None),
         origin="main",
     )

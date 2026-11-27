@@ -73,8 +73,6 @@ from coding_agent.runtime.graph.agent_model_request import (
     _flush_attempt_usage,
     _hard_usable_for,
     _is_gateway_for,
-    _ledger_hold,
-    _ledger_settle,
     _prices_for,
     _soft_usable_for,
     request_model_response,
@@ -82,6 +80,7 @@ from coding_agent.runtime.graph.agent_model_request import (
 )
 from coding_agent.runtime.step_limits import (
     DEADLINE_MOMENT,
+    AdmissionHold,
     AttemptBudgets,
     LimitFact,
 )
@@ -2498,9 +2497,10 @@ def _run_advisor_call(
     before_cell = deps.budgets.step_by_origin(step.id)["subagent"]
     member_state = ConversationContextState()
     estimate = estimate_advisor_admission(opening_text, list(tools))
-    fact, hold_id = deps.budgets.admit_request(
+    fact, hold = deps.budgets.admit_hold(
         step.id,
         estimate,
+        seq=seq,
         output_cap=request_pin.output_cap,
         prices=request_pin.prices,
         is_gateway=request_pin.is_gateway,
@@ -2540,8 +2540,7 @@ def _run_advisor_call(
             question_preview=preview, ending="ceiling", pin_id=pin_id
         )
         return advisor_tool_result_text(refused, preview), consultation, 0, None
-    assert hold_id is not None
-    _ledger_hold(deps, step.id, seq, hold_id)
+    assert hold is not None
     witness = PinWitness(
         record_event=record_event,
         attempt_id=deps.attempt.attempt_id,
@@ -2562,7 +2561,7 @@ def _run_advisor_call(
             response_models.append(observed_response_model(response))
         return None
 
-    first_hold: str | None = hold_id
+    first_hold: AdmissionHold | None = hold
 
     def _request_model(
         bound_model: object,
@@ -2580,7 +2579,7 @@ def _run_advisor_call(
             bound_model,
             request_messages,
             request_tools,
-            first_hold_id=this_hold,
+            first_hold=this_hold,
             record_main_context=False,
             origin="subagent",
             context_state=member_state,
@@ -2622,24 +2621,20 @@ def _run_advisor_call(
         # violation was observed on a failed request, charged at its hold's
         # worst case (§11.4) — and the violation propagates, halting the
         # Worker as on the Pinned Model.
-        if first_hold is not None and first_hold in deps.budgets.open_hold_ids():
+        if first_hold is not None:
             if exc.response is None:
-                deps.budgets.charge_hold(first_hold, origin="subagent")
-                _ledger_settle(deps, first_hold, charged=True)
+                first_hold.charge(origin="subagent")
             else:
-                deps.budgets.settle_hold(
-                    first_hold,
-                    step.id,
+                first_hold.settle(
                     response_usage(
                         exc.response,
                         request_pin.prices,
                         is_gateway=request_pin.is_gateway,
                     ),
+                    step.id,
                     origin="subagent",
                     responses=1,
                 )
-                _ledger_settle(deps, first_hold)
-            _flush_attempt_usage(deps)
         pin_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
         pin_payload: dict[str, object] = {
             "attempt_id": deps.attempt.attempt_id,
@@ -2665,10 +2660,8 @@ def _run_advisor_call(
     # The context guard can end the member before its first request: no
     # request ran, so the spawn-time hold is still open. Settle it empty —
     # the member spent nothing — so the ended cell reads all zero.
-    if first_hold is not None and first_hold in deps.budgets.open_hold_ids():
-        deps.budgets.settle_hold(first_hold, step.id, UsageTotals(), origin="subagent")
-        _ledger_settle(deps, first_hold)
-        _flush_attempt_usage(deps)
+    if first_hold is not None:
+        first_hold.close()
     ending: AdvisorEnding = result.reason
     member_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
     ended_payload: dict[str, object] = {

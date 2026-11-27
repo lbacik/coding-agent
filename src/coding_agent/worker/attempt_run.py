@@ -205,6 +205,9 @@ def build_agent_step_deps(
     )
     deps.archive_dir = archive_dir
     deps.handoff_note = handoff_note
+    from coding_agent.runtime.graph.agent_model_request import wire_meter_to_ledger
+
+    wire_meter_to_ledger(budgets, ledger, attempt_id=attempt.attempt_id)
     return deps
 
 

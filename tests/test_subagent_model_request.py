@@ -632,7 +632,7 @@ def test_shared_lifecycle_settles_subagent_spend_without_main_notes(
     messages: list[BaseMessage] = [HumanMessage(content="hello")]
     tools = _subagent_tools(workspace)
     estimate = estimate_spawn_admission("hello", tools)
-    fact, first_hold = budgets.admit_request(step.id, estimate)
+    fact, first_hold = budgets.admit_hold(step.id, estimate, seq=1)
     assert fact is None and first_hold is not None
 
     result = run_model_request(
@@ -643,7 +643,7 @@ def test_shared_lifecycle_settles_subagent_spend_without_main_notes(
         model.bind_tools([]),
         messages,
         [],
-        first_hold_id=first_hold,
+        first_hold=first_hold,
         record_main_context=False,
     )
 

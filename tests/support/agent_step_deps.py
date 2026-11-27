@@ -265,4 +265,9 @@ def make_agent_step_deps(
     )
     if is_stopped is not None:
         deps.is_stopped = is_stopped
+    from coding_agent.runtime.graph.agent_model_request import wire_meter_to_ledger
+
+    wire_meter_to_ledger(
+        resolved_budgets, resolved_ledger, attempt_id=resolved_attempt.attempt_id
+    )
     return deps

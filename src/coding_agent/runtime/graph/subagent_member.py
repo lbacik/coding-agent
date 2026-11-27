@@ -45,14 +45,12 @@ from coding_agent.provider.observed_identity import (
     observed_response_model,
 )
 from coding_agent.provider.pin_witness import PinWitness
-from coding_agent.runtime.ceilings import OriginCell, UsageTotals, response_usage
+from coding_agent.runtime.ceilings import OriginCell, response_usage
 from coding_agent.runtime.conversation_context import ConversationContextState
 from coding_agent.runtime.graph.agent_model_request import (
     ModelRequestEnding,
     _flush_attempt_usage,
     _is_gateway_for,
-    _ledger_hold,
-    _ledger_settle,
     _prices_for,
     run_model_request,
 )
@@ -72,7 +70,7 @@ from coding_agent.runtime.transcript import fork_subagent_conversation
 
 if TYPE_CHECKING:
     from coding_agent.runtime.graph.agent_step import AgentStepDeps
-    from coding_agent.runtime.step_limits import LimitFact
+    from coding_agent.runtime.step_limits import AdmissionHold, LimitFact
     from coding_agent.workflow.schema import WorkflowStep
 
 
@@ -118,8 +116,13 @@ class SubagentMember:
     """The member's toolset, built once at admission and reused for the run."""
     record: SubagentRecord | None = None
     """The ``report_subagent`` exit record shared with the built toolset."""
-    hold_id: str | None = None
+    hold: AdmissionHold | None = None
     """The spawn-time first hold, open until the first request or discard."""
+
+    @property
+    def hold_id(self) -> str | None:
+        """This member's spawn-time hold id, if one is held."""
+        return self.hold.hold_id if self.hold is not None else None
     member_state: ConversationContextState = field(
         default_factory=ConversationContextState
     )
@@ -172,8 +175,12 @@ class SubagentMember:
             base_tip=deps.attempt.base_tip,
         )
         estimate = estimate_spawn_admission(instructions, tools)
-        fact, hold_id = deps.budgets.admit_request(
-            step.id, estimate, output_cap=deps.output_cap, origin="subagent"
+        fact, hold = deps.budgets.admit_hold(
+            step.id,
+            estimate,
+            seq=seq,
+            output_cap=deps.output_cap,
+            origin="subagent",
         )
         if fact is not None:
             record_event(
@@ -214,8 +221,7 @@ class SubagentMember:
                     limit_fact=None,
                 ),
             )
-        assert hold_id is not None
-        _ledger_hold(deps, step.id, seq, hold_id)
+        assert hold is not None
         return cls(
             call_id=call_id,
             description=description,
@@ -224,7 +230,7 @@ class SubagentMember:
             seq=seq,
             tools=tools,
             record=record,
-            hold_id=hold_id,
+            hold=hold,
         )
 
     def discard_before_start(self, deps: AgentStepDeps) -> None:
@@ -234,13 +240,9 @@ class SubagentMember:
         no queued/started/ended event is recorded. No-op where there is no
         open hold (invalid, refused, or already run members).
         """
-        if self.hold_id is not None and self.hold_id in deps.budgets.open_hold_ids():
-            deps.budgets.settle_hold(
-                self.hold_id, self.step_id, UsageTotals(), origin="subagent"
-            )
-            _ledger_settle(deps, self.hold_id)
-            _flush_attempt_usage(deps)
-        self.hold_id = None
+        if self.hold is not None:
+            self.hold.close()
+        self.hold = None
 
     def run(
         self,
@@ -268,7 +270,7 @@ class SubagentMember:
         if self.early_outcome is not None:
             return self.early_outcome
         assert self.tools is not None and self.record is not None
-        assert self.hold_id is not None
+        assert self.hold is not None
         record_event(
             SUBAGENT_QUEUED_KIND,
             f"sub-agent queued {self.call_id!r}",
@@ -293,8 +295,8 @@ class SubagentMember:
         )
         before_cell = deps.budgets.step_by_origin(self.step_id)["subagent"]
         member_started = time.monotonic()
-        first_hold: str | None = self.hold_id
-        self.hold_id = None
+        first_hold: AdmissionHold | None = self.hold
+        self.hold = None
         witness = PinWitness(
             record_event=record_event,
             attempt_id=deps.attempt.attempt_id,
@@ -330,7 +332,7 @@ class SubagentMember:
                 bound_model,
                 request_messages,
                 request_tools,
-                first_hold_id=this_hold,
+                first_hold=this_hold,
                 record_main_context=False,
                 origin="subagent",
                 context_state=self.member_state,
@@ -374,24 +376,20 @@ class SubagentMember:
             # hold's worst case — by the shared lifecycle before raising.
             # The leftover hold settles here only where it somehow stayed
             # open; the violation propagates, halting the Worker.
-            if first_hold is not None and first_hold in deps.budgets.open_hold_ids():
+            if first_hold is not None:
                 if exc.response is None:
-                    deps.budgets.charge_hold(first_hold, origin="subagent")
-                    _ledger_settle(deps, first_hold, charged=True)
+                    first_hold.charge(origin="subagent")
                 else:
-                    deps.budgets.settle_hold(
-                        first_hold,
-                        self.step_id,
+                    first_hold.settle(
                         response_usage(
                             exc.response,
                             _prices_for(deps),
                             is_gateway=_is_gateway_for(deps),
                         ),
+                        self.step_id,
                         origin="subagent",
                         responses=1,
                     )
-                    _ledger_settle(deps, first_hold)
-                _flush_attempt_usage(deps)
             first_hold = None
             member_cell = (
                 deps.budgets.step_by_origin(self.step_id)["subagent"] - before_cell
@@ -416,12 +414,8 @@ class SubagentMember:
         # — the member spent nothing — so the ended cell reads all zero. The
         # same settle covers the injected request-model seam, which never
         # touches holds.
-        if first_hold is not None and first_hold in deps.budgets.open_hold_ids():
-            deps.budgets.settle_hold(
-                first_hold, self.step_id, UsageTotals(), origin="subagent"
-            )
-            _ledger_settle(deps, first_hold)
-            _flush_attempt_usage(deps)
+        if first_hold is not None:
+            first_hold.close()
         member_cell = deps.budgets.step_by_origin(self.step_id)["subagent"] - before_cell
         record_event(
             SUBAGENT_ENDED_KIND,
