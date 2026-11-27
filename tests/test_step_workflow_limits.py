@@ -42,6 +42,7 @@ from coding_agent.runtime.graph.agent_step import (
     tool_loop_backstop,
 )
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
+from coding_agent.runtime.graph.subagent_member import SubagentMember
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.runtime.step_operations import OperationExecution
 from coding_agent.runtime.step_limits import (
@@ -674,27 +675,41 @@ def test_lim7_spawn_group_holds_each_member(
                 # and the tight allowance below refuses even the first spawn.
                 usage_metadata=_usage(10, 5),
             ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _call(
+                        "report_subagent",
+                        {"report": "first findings"},
+                        "subrep-1",
+                    )
+                ],
+                usage_metadata=_usage(100, 10),
+            ),
             _report_ai("done", {}, _usage(10, 5)),
         ]
     )
-    calls: list[tuple[str, str, str]] = []
-
-    def _runner(call_id: str, description: str, instructions: str) -> str:
-        calls.append((call_id, description, instructions))
-        return "subagent text"
-
-    deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets, subagent_runner=_runner
-    )
+    deps = _deps(_facts(), model, workspace, tmp_path, budgets)
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     # Only the first spawn ran: the second was refused while the first hold
     # was in force. The refused spawn's tool result names the fact.
-    assert [call[0] for call in calls] == ["spawn-1"]
+    started = [event for event in outcome.events if event["kind"] == "subagent_started"]
+    assert [event["payload"]["call_id"] for event in started] == ["spawn-1"]
+    ended = {
+        event["payload"]["call_id"]: event["payload"]
+        for event in outcome.events
+        if event["kind"] == "subagent_ended"
+    }
+    assert ended["spawn-1"]["ending"] == "reported"
+    assert ended["spawn-2"]["ending"] == "refused"
     lines = (tmp_path / "archive" / "transcript.jsonl").read_text(
         encoding="utf-8"
     ).splitlines()
     records = [json.loads(line) for line in lines]
-    assert {record["conversation"] for record in records} == {"step/process/1"}
+    assert {record["conversation"] for record in records} == {
+        "step/process/1",
+        "subagent:spawn-1",
+    }
     seqs = [record["seq"] for record in records]
     assert all(isinstance(seq, int) for seq in seqs)
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
@@ -728,37 +743,63 @@ def test_lim7_spawn_admissions_are_recorded_durably(
         _ceiling(),
     )
     budgets = _budgets(workflow, clock, attempt_id="implement#7/1")
-    spawns = _call(
-        "spawn_subagent", {"description": "s", "instructions": "read"}, "spawn-1"
-    )
-    model = ScriptedModel(
-        [
-            AIMessage(content="spawning", tool_calls=[spawns]),
-            _report_ai("done", {}, _usage(10, 5)),
-        ]
-    )
-    seen: list[str] = []
-
-    def _runner(call_id: str, description: str, instructions: str) -> str:
-        seen.append(call_id)
-        open_holds = ledger.list_open_admission_holds("implement#7/1")
-        assert len(open_holds) == 1
-        assert open_holds[0].step_id == "process"
-        return "subagent text"
-
     deps = _deps(
         _facts(),
-        model,
+        ScriptedModel([]),
         workspace,
         tmp_path,
         budgets,
         ledger=ledger,
-        subagent_runner=_runner,
     )
-    outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
-    assert outcome.status == "reported"
-    assert seen == ["spawn-1"]
+    events: list[dict[str, object]] = []
+
+    def record_event(kind: str, detail: str, payload: dict[str, object]) -> None:
+        events.append({"kind": kind, "detail": detail, "payload": payload})
+
+    member = SubagentMember.admit(
+        deps,
+        workflow.steps["process"],
+        1,
+        "spawn-1",
+        "s",
+        "read",
+        record_event,
+    )
+    assert member.early_outcome is None
+    assert member.hold_id is not None
+    admitted_hold = member.hold_id
+    seen: list[str] = []
+
+    def _request(
+        bound_model: object,
+        request_messages: list[BaseMessage],
+        request_tools: list[Any],
+    ) -> BaseMessage:
+        assert member.hold_id is not None
+        seen.append(member.hold_id)
+        open_holds = ledger.list_open_admission_holds("implement#7/1")
+        assert len(open_holds) == 1
+        assert open_holds[0].step_id == "process"
+        return AIMessage(
+            content="",
+            tool_calls=[
+                _call("report_subagent", {"report": "findings"}, "sub-1")
+            ],
+            usage_metadata=_usage(100, 10),
+        )
+
+    outcome = member.run(
+        deps, workflow.steps["process"], record_event, request_model=_request
+    )
+    assert outcome.ok is True
+    assert outcome.report == "findings"
+    assert seen == [admitted_hold]
     assert ledger.list_open_admission_holds("implement#7/1") == ()
+    assert [event["kind"] for event in events] == [
+        "subagent_queued",
+        "subagent_started",
+        "subagent_ended",
+    ]
 
 
 # --- LIM-8: charging the worst case ----------------------------------------------
@@ -1248,16 +1289,32 @@ def test_lim13_spawn_tool_calls_count_against_step_and_attempt(
                 tool_calls=spawns,
                 usage_metadata=_usage(50, 10),
             ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _call(
+                        "report_subagent",
+                        {"report": "one findings"},
+                        "subrep-1",
+                    )
+                ],
+                usage_metadata=_usage(50, 10),
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    _call(
+                        "report_subagent",
+                        {"report": "two findings"},
+                        "subrep-2",
+                    )
+                ],
+                usage_metadata=_usage(50, 10),
+            ),
             _report_ai("done", {}, _usage(50, 10)),
         ]
     )
-
-    def _runner(call_id: str, description: str, instructions: str) -> str:
-        return "subagent text"
-
-    deps = _deps(
-        _facts(), model, workspace, tmp_path, budgets, subagent_runner=_runner
-    )
+    deps = _deps(_facts(), model, workspace, tmp_path, budgets)
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     assert outcome.status == "reported"
     assert budgets.step_totals("process").tool_calls == 2

@@ -486,7 +486,6 @@ def test_context_window_before_first_request_is_all_zero_and_unavailable(
     workspace: Path, tmp_path: Path, ledger: RunLedger
 ) -> None:
     """A member stopped before its first request spends nothing, peak unknown."""
-    from coding_agent.runtime.graph.agent_step import _run_spawn_group
     from coding_agent.runtime.graph.subagent import (
         SUBAGENT_QUEUED_KIND,
         SUBAGENT_STARTED_KIND,
@@ -494,6 +493,7 @@ def test_context_window_before_first_request_is_all_zero_and_unavailable(
         build_subagent_tools,
         estimate_spawn_admission,
     )
+    from coding_agent.runtime.graph.subagent_member import SubagentMember
     from coding_agent.runtime.result_capping import InMemoryArtifactStore
 
     step = _agent_step("s", tools=("workspace-read", "subagents"))
@@ -550,15 +550,17 @@ def test_context_window_before_first_request_is_all_zero_and_unavailable(
     def record_event(kind: str, detail: str, payload: dict[str, object]) -> None:
         events.append({"kind": kind, "detail": detail, "payload": payload})
 
-    results, fact, billable = _run_spawn_group(
-        deps, step, 1, [(0, "s1", "look", instructions)], record_event
+    member = SubagentMember.admit(
+        deps, step, 1, "s1", "look", instructions, record_event
     )
+    assert member.early_outcome is None
+    outcome = member.run(deps, step, record_event)
 
-    assert fact is None
-    assert billable == 0
-    assert "context-window" in results[0][0]
-    assert results[0][1] is None
-    assert results[0][2] is False
+    assert outcome.limit_fact is None
+    assert outcome.billable_tool_calls == 0
+    assert "context-window" in outcome.text
+    assert outcome.report is None
+    assert outcome.ok is False
     kinds = [event["kind"] for event in events]
     assert kinds == [SUBAGENT_QUEUED_KIND, SUBAGENT_STARTED_KIND, SUBAGENT_ENDED_KIND]
     payload = events[-1]["payload"]

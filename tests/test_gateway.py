@@ -878,9 +878,9 @@ def _run_gateway_spawn_step(
 ) -> tuple[AgentStepOutcome, AttemptBudgets]:
     """Run one spawn step: the main turn spawns, the member reports, main reports.
 
-    The production spawn path (``run_agent_step`` through ``_run_default_subagent``):
-    the shared ``ScriptedModel`` serves the spawning turn, the Sub-agent's
-    report turn and the main report turn in order.
+    The production spawn path (``run_agent_step`` through the spawn-group
+    member): the shared ``ScriptedModel`` serves the spawning turn, the
+    Sub-agent's report turn and the main report turn in order.
     """
     clock = _FakeClock()
     workflow = _gateway_spawn_workflow()

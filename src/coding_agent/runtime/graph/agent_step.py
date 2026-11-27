@@ -105,21 +105,13 @@ from coding_agent.runtime.graph.advisor import (
 )
 from coding_agent.provider.config import policy_for_pin
 from coding_agent.runtime.graph.subagent import (
-    SUBAGENT_ENDED_KIND,
-    SUBAGENT_QUEUED_KIND,
-    SUBAGENT_STARTED_KIND,
-    SUBAGENT_TOOL_NAMES,
-    SubagentEnding,
     SubagentRecord,
     SubagentResult,
     build_read_change_tool as build_subagent_read_change_tool,
-    build_subagent_tools,
-    estimate_spawn_admission,
-    run_subagent,
-    subagent_tool_result_text,
     validate_spawn_args,
 )
 from coding_agent.runtime.graph.tool_call_turn import execute_tool_call
+from coding_agent.runtime.graph.subagent_member import SubagentMember
 from coding_agent.runtime.redaction import (
     Redactable,
     registry_from,
@@ -127,7 +119,6 @@ from coding_agent.runtime.redaction import (
 from coding_agent.runtime.transcript import (
     fork_advisor_conversation,
     fork_conversation,
-    fork_subagent_conversation,
     work_conversation,
 )
 from coding_agent.runtime.result_capping import (
@@ -899,15 +890,6 @@ class ExecutionTally:
         )
 
 
-SubagentRunner = Callable[[str, str, str], str]
-"""Run one validated spawn call: ``(call_id, description, instructions)``.
-
-Returns the caller-facing result text joining the caller's Exchange Unit in
-call order. The default runs a real read-only Sub-agent conversation on the
-Attempt's one Pinned Model (§9.8).
-"""
-
-
 class ShutdownRequested(Exception):
     """SIGTERM observed at a step-loop stop point: the Attempt ends here (§12).
 
@@ -979,7 +961,6 @@ class AgentStepDeps:
     the raw ``threshold_tokens``, which the Effective Configuration and the
     Status Snapshot keep reporting. ``None`` disables the guard (tests only).
     """
-    subagent_runner: SubagentRunner | None = None
     max_parallel_subagents: int = 2
     redactions: Redactable = None
     changed_files: tuple[str, ...] = ()
@@ -1015,8 +996,8 @@ class AgentStepDeps:
     Defaults to the process-wide SIGTERM flag, so production observes a live
     SIGTERM at every stop point without further wiring; tests inject a scripted
     flag instead of touching global state. The loop raises
-    :class:`ShutdownRequested` once this reports the signal, and the spawn
-    group passes it to :func:`run_subagent` as its ``is_stopped``.
+    :class:`ShutdownRequested` once this reports the signal, and each
+    spawn-group member polls it as its single stop predicate.
     """
     pins: Mapping[str, PinnedModel] = field(default_factory=dict)
     """Every referenced pin, by pin id, in assertion order (§9.1).
@@ -1987,22 +1968,6 @@ def _spend_dict(
     return spend
 
 
-def _violating_response_usage(deps: AgentStepDeps, exc: PinViolation) -> UsageTotals:
-    """The spend a pin-violating Sub-agent response charges (§9.1, §11.4).
-
-    The carried response's actual meter spend — the same accounting a
-    reported Sub-agent would settle — never the worst case: only a failed
-    request is charged that, and a violation observed on a failed request
-    carries no response and charges nothing here (the step loop and the
-    spawn group charge its hold's worst case where the failure is seen).
-    """
-    if exc.response is None:
-        return UsageTotals()
-    return response_usage(
-        exc.response, _prices_for(deps), is_gateway=_is_gateway_for(deps)
-    )
-
-
 def run_agent_step(
     step: WorkflowStep,
     seq: int,
@@ -2756,493 +2721,65 @@ def _run_spawn_group(
 ) -> tuple[list[tuple[str, str | None, bool]], LimitFact | None, int]:
     """Run one consecutive spawn group in call order (§9.8, ADR 0020).
 
-    The group runs sequentially: one at a time is within any
-    ``max_parallel_subagents >= 1`` bound, and call order is preserved.
+    The group admits in call order and members must tolerate concurrent
+    execution (ADR 0020): the loop runs admitted members in call order —
+    serially for now, ordered by slot index — while each member owns its
+    admission, run, stop/ceiling observation and ending through its single
+    entry point.
 
     Where budgets are bound every member is admitted up front, in call
     order, so the second of two concurrent-fitting-alone requests sees the
     first's hold in force (LIM-7, §11.4). A refused member never runs; its
-    tool result carries the ``limit-exceeded`` fact. Each admitted member's
-    hold becomes its first request's hold — every later round and every
-    provider retry is admitted again under its own hold through the shared
-    model-request lifecycle, and each hold settles with its own response's
-    actual spend (or its worst case), which counts against the calling step
-    and the Attempt (LIM-13, §11.2, ADR 0029).
-
-    Every billable tool call a member requests — each batch except its
-    ``report_subagent`` exit — is charged against the calling step before it
-    runs (§11.5); a batch crossing a tool-call limit is not executed, ends
-    that member ``no-report`` / ``ceiling``, and, once the group has settled,
-    ends the calling Step Execution ``limit-exceeded`` with the primary
-    crossing fact (moment ``tool-call``). Returns the per-call results in
-    order, the primary crossing fact (or ``None``), and the members'
-    billable tool-call total for the step tally.
+    tool result carries the ``limit-exceeded`` fact. Queued members never
+    start once the stop signal is observed (§12): the admitted members that
+    never ran settle their spawn-time holds empty — they spent nothing —
+    and record no queued/started/ended events. Every billable tool call a
+    member requests — each batch except its ``report_subagent`` exit — is
+    charged against the calling step before it runs (§11.5); a batch
+    crossing a tool-call limit is not executed, ends that member
+    ``no-report`` / ``ceiling``, and, once the group has settled, ends the
+    calling Step Execution ``limit-exceeded`` with the primary crossing
+    fact (moment ``tool-call``). Returns the per-call results in order, the
+    primary crossing fact (or ``None``), and the members' billable
+    tool-call total for the step tally.
     """
+    members = [
+        SubagentMember.admit(
+            deps, step, seq, call_id, description, instructions, record_event
+        )
+        for _, call_id, description, instructions in ordered
+    ]
     outcomes: list[tuple[str, str | None, bool]] = []
-    holds: dict[str, str] = {}
-    # Phase 1 (§11.4, LIM-7): admit every member up front, in call order, so
-    # a later member sees every earlier member's hold still in force. No
-    # member runs — and no hold settles — before all admissions are decided.
-    admitted: list[tuple[str, str, str]] = []
-    slots: dict[str, int] = {}
-    for _, call_id, description, instructions in ordered:
-        error = validate_spawn_args(description, instructions)
-        if error is not None:
-            outcomes.append((error, None, False))
-            continue
-        assert isinstance(description, str) and isinstance(instructions, str)
-        admission_tools = build_subagent_tools(
-            deps.workspace,
-            SubagentRecord(description=description),
-            artifact_store=deps.artifact_store,
-            base_revision=deps.attempt.base_revision,
-            change_artifact_id=f"read-change-{call_id}",
-            base_tip=deps.attempt.base_tip,
-        )
-        estimate = estimate_spawn_admission(instructions, admission_tools)
-        fact, hold_id = deps.budgets.admit_request(
-            step.id, estimate, output_cap=deps.output_cap, origin="subagent"
-        )
-        if fact is not None:
-            record_event(
-                SUBAGENT_QUEUED_KIND,
-                f"sub-agent refused {call_id!r}",
-                {
-                    "attempt_id": deps.attempt.attempt_id,
-                    "step_id": step.id,
-                    "seq": seq,
-                    "call_id": call_id,
-                    "description": description,
-                },
-            )
-            record_event(
-                SUBAGENT_ENDED_KIND,
-                f"sub-agent ended {call_id!r}",
-                {
-                    "attempt_id": deps.attempt.attempt_id,
-                    "step_id": step.id,
-                    "seq": seq,
-                    "call_id": call_id,
-                    "reported": False,
-                    "answering_model": None,
-                    "response_models": [],
-                    "ending": "refused",
-                    "duration_seconds": 0.0,
-                    "usage": OriginCell().as_readable(),
-                },
-            )
-            outcomes.append(
-                (
-                    f"Sub-agent {description!r}: limit-exceeded "
-                    f"({fact.scope}). The request was not sent.",
-                    None,
-                    False,
-                )
-            )
-            continue
-        assert hold_id is not None
-        holds[call_id] = hold_id
-        _ledger_hold(deps, step.id, seq, hold_id)
-        slots[call_id] = len(outcomes)
-        admitted.append((call_id, description, instructions))
-        outcomes.append(("", None, False))
-    # Phase 2: run the admitted members sequentially, in call order (§9.8).
     tool_facts: list[LimitFact] = []
     group_billable = 0
-    for call_id, description, instructions in admitted:
+    for index, member in enumerate(members):
+        early = member.early_outcome
+        if early is not None:
+            outcomes.append((early.text, early.report, early.ok))
+            continue
         # Queued members never start once the signal is observed (§12): the
         # members still queued settle their spawn-time holds empty — they
         # spent nothing — and the group ends here. The running member already
         # ended ``stopped`` at its own stop point; members that never started
         # record no queued/started/ended events.
         if deps.is_stopped():
-            for queued_hold in holds.values():
-                deps.budgets.settle_hold(
-                    queued_hold, step.id, UsageTotals(), origin="subagent"
-                )
-                _ledger_settle(deps, queued_hold)
-            if holds:
-                _flush_attempt_usage(deps)
-            holds.clear()
+            for queued in members[index:]:
+                queued.discard_before_start(deps)
             raise ShutdownRequested(step_id=step.id, seq=seq)
-        slot = slots[call_id]
-        # Each event carries the Attempt id, the Step Execution and the call
-        # id (§9.8); the ledger envelope already carries the Attempt id too.
-        record_event(
-            SUBAGENT_QUEUED_KIND,
-            f"sub-agent queued {call_id!r}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "call_id": call_id,
-                "description": description,
-            },
-        )
-        record_event(
-            SUBAGENT_STARTED_KIND,
-            f"sub-agent started {call_id!r}",
-            {
-                "attempt_id": deps.attempt.attempt_id,
-                "step_id": step.id,
-                "seq": seq,
-                "call_id": call_id,
-                "description": description,
-            },
-        )
-        first_hold = holds.pop(call_id, None)
-        assert first_hold is not None
-        member_billable = 0
-        member_fact: LimitFact | None = None
-        provider_error: str | None = None
-        end_context: ConversationContext | None = None
-        peak_context: ConversationContext | None = None
-        ending: SubagentEnding = "silent"
-        duration_seconds = 0.0
-        context_cause: str | None = None
-        overflow_signal: str | None = None
-        before_cell = deps.budgets.step_by_origin(step.id)["subagent"]
-        if deps.subagent_runner is not None:
-            member_started = time.monotonic()
-            text = deps.subagent_runner(call_id, description, instructions)
-            report: str | None = text
-            ok = True
-            response_models: list[str | None] = []
-            ending = "reported"
-            duration_seconds = time.monotonic() - member_started
-            deps.budgets.settle_hold(
-                first_hold, step.id, UsageTotals(), origin="subagent"
-            )
-            _ledger_settle(deps, first_hold)
-            _flush_attempt_usage(deps)
-        else:
-            member_state = ConversationContextState()
-            member_started = time.monotonic()
-            try:
-                (
-                    text,
-                    report,
-                    ok,
-                    response_models,
-                    member_billable,
-                    member_fact,
-                    provider_error,
-                    end_context,
-                    peak_context,
-                    duration_seconds,
-                    ending,
-                    context_cause,
-                    overflow_signal,
-                ) = _run_default_subagent(
-                    deps,
-                    call_id,
-                    description,
-                    instructions,
-                    record_event,
-                    step.id,
-                    seq,
-                    first_hold,
-                    member_state,
-                )
-                # The context guard can end the member before its first
-                # request: no request ran, so the spawn-time hold is still
-                # open. Settle it empty — the member spent nothing — so the
-                # ended cell reads all zero and the step meter stays exact.
-                if first_hold in deps.budgets.open_hold_ids():
-                    deps.budgets.settle_hold(
-                        first_hold, step.id, UsageTotals(), origin="subagent"
-                    )
-                    _ledger_settle(deps, first_hold)
-                    _flush_attempt_usage(deps)
-            except PinViolation as exc:
-                # A pin-violating Sub-agent ends with no report (§12): its
-                # own spend already settled from the carried response — or,
-                # where the violation was observed on a failed request,
-                # charged at its hold's worst case (§11.4) — by the shared
-                # model-request lifecycle before raising. Members that never
-                # ran settle empty, and the violation propagates — no further
-                # Sub-agent runs. (The hold is settled here only where it
-                # somehow stayed open.)
-                if first_hold in deps.budgets.open_hold_ids():
-                    if exc.response is None:
-                        deps.budgets.charge_hold(first_hold, origin="subagent")
-                        _ledger_settle(deps, first_hold, charged=True)
-                    else:
-                        deps.budgets.settle_hold(
-                            first_hold,
-                            step.id,
-                            _violating_response_usage(deps, exc),
-                            origin="subagent",
-                            responses=1,
-                        )
-                        _ledger_settle(deps, first_hold)
-                    _flush_attempt_usage(deps)
-                for other_hold in holds.values():
-                    deps.budgets.settle_hold(
-                        other_hold, step.id, UsageTotals(), origin="subagent"
-                    )
-                    _ledger_settle(deps, other_hold)
-                if holds:
-                    _flush_attempt_usage(deps)
-                holds.clear()
-                pin_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
-                pin_peak = member_state.peak
-                pin_payload: dict[str, object] = {
-                    "attempt_id": deps.attempt.attempt_id,
-                    "step_id": step.id,
-                    "seq": seq,
-                    "call_id": call_id,
-                    "reported": False,
-                    "answering_model": exc.observed,
-                    "response_models": [exc.observed],
-                    "ending": "pin-violation",
-                    "duration_seconds": time.monotonic() - member_started,
-                    "usage": pin_cell.as_readable(),
-                }
-                if pin_peak is not None:
-                    pin_payload["conversation_context_peak"] = pin_peak.to_record()
-                record_event(
-                    SUBAGENT_ENDED_KIND,
-                    f"sub-agent ended {call_id!r}",
-                    pin_payload,
-                )
-                raise
-        outcomes[slot] = (text, report, ok)
-        group_billable += member_billable
-        if member_fact is not None:
-            tool_facts.append(member_fact)
-        member_cell = deps.budgets.step_by_origin(step.id)["subagent"] - before_cell
-        ended_payload: dict[str, object] = {
-            "attempt_id": deps.attempt.attempt_id,
-            "step_id": step.id,
-            "seq": seq,
-            "call_id": call_id,
-            "reported": ok,
-            "answering_model": last_reported_model(response_models),
-            "response_models": list(response_models),
-            "ending": ending,
-            "duration_seconds": duration_seconds,
-            "usage": member_cell.as_readable(),
-        }
-        if peak_context is not None:
-            ended_payload["conversation_context_peak"] = peak_context.to_record()
-        if provider_error is not None:
-            ended_payload["provider_error"] = provider_error
-        if end_context is not None:
-            ended_payload["conversation_context"] = end_context.to_record()
-            if deps.context_window is not None:
-                ended_payload["usable_threshold"] = (
-                    deps.context_window.usable_threshold
-                )
-        if ending == "context-window":
-            if context_cause is not None:
-                ended_payload["context_cause"] = context_cause
-            if overflow_signal is not None:
-                ended_payload["overflow_signal"] = overflow_signal
-        record_event(
-            SUBAGENT_ENDED_KIND,
-            f"sub-agent ended {call_id!r}",
-            ended_payload,
-        )
+        try:
+            outcome = member.run(deps, step, record_event)
+        except PinViolation:
+            # A pin-violating member ends with no report and its own
+            # ``pin-violation`` ended event recorded by the member itself;
+            # the violation propagates — no further member runs.
+            for queued in members[index + 1 :]:
+                queued.discard_before_start(deps)
+            raise
+        outcomes.append((outcome.text, outcome.report, outcome.ok))
+        group_billable += outcome.billable_tool_calls
+        if outcome.limit_fact is not None:
+            tool_facts.append(outcome.limit_fact)
     return outcomes, _primary_tool_fact(tool_facts), group_billable
-
-
-def _run_default_subagent(
-    deps: AgentStepDeps,
-    call_id: str,
-    description: str,
-    instructions: str,
-    record_event: Callable[[str, str, dict[str, object]], None],
-    step_id: str,
-    seq: int,
-    first_hold_id: str,
-    member_state: ConversationContextState,
-) -> tuple[
-    str,
-    str | None,
-    bool,
-    list[str | None],
-    int,
-    LimitFact | None,
-    str | None,
-    ConversationContext | None,
-    ConversationContext | None,
-    float,
-    SubagentEnding,
-    str | None,
-    str | None,
-]:
-    """Run one real read-only Sub-agent on the one Pinned Model (§9.8).
-
-    Every model response records its observed identity in the Run Ledger
-    (§13) as it arrives, and the ordered observed models return for the
-    ``subagent_ended`` answering model. Every request — each round and each
-    provider retry — runs through the shared model-request lifecycle under
-    its own Admission hold: the first under ``first_hold_id`` (admitted up
-    front by the spawn group in call order), every later one admitted here
-    before it is sent. A refused request, or a settled spend that crossed a
-    limit, ends the Sub-agent with no report — never the calling Step
-    Execution (§11.4, ADR 0029). Every request compares the same Conversation
-    Context the member's guard compares: the member anchors its own fresh
-    state on its accepted responses, so later requests measure ``anchored``.
-
-    Every billable tool-call batch the member requests is charged against
-    the calling step before it runs, with the Attempt usage flushed after
-    each batch (§11.5); a crossing batch is not executed and ends the member
-    ``no-report`` / ``ceiling`` carrying its fact. ``member_state`` is the
-    member's own anchoring state, owned by the spawn group so the peak
-    survives a pin violation that propagates instead of returning. Returns
-    the caller-facing text, the report, whether it reported, the observed
-    models, the member's billable tool-call total, the crossing fact (or
-    ``None``), the redacted provider error (or ``None``) where the member
-    ended ``no-report`` / ``provider-failure``, the compared Conversation
-    Context (or ``None``) where the member ended ``no-report`` /
-    ``context-window``, the peak Conversation Context over the member's
-    compared requests (or ``None`` where none was compared), the member's
-    own wall duration in seconds, the ``subagent_ended`` ending (the
-    run's reason — ``reported``, ``silent``, ``round-limit``, ``ceiling``,
-    ``context-window``, ``stopped`` or ``provider-failure``), and — where
-    the ending is ``context-window`` — the context cause (``guard`` or
-    ``context-overflow``) and the overflow signal (``refused`` or
-    ``cut-short``, ``None`` for a guard).
-    """
-    from coding_agent.runtime.graph.subagent import (
-        SUBAGENT_TOOL_NAMES,
-        SubagentRecord,
-        build_subagent_tools,
-        run_subagent,
-    )
-
-    tools = build_subagent_tools(
-        deps.workspace,
-        SubagentRecord(description=description),
-        artifact_store=deps.artifact_store,
-        base_revision=deps.attempt.base_revision,
-        change_artifact_id=f"read-change-{call_id}",
-        base_tip=deps.attempt.base_tip,
-    )
-    assert {tool.name for tool in tools} == set(SUBAGENT_TOOL_NAMES)
-    response_models: list[str | None] = []
-    witness = PinWitness(
-        record_event=record_event,
-        attempt_id=deps.attempt.attempt_id,
-        pin=deps.pin,
-        step_id=step_id,
-        seq=seq,
-        call_id=call_id,
-    )
-
-    def _note_response(response: BaseMessage) -> None:
-        # The shared lifecycle already asserted the response against the
-        # pin and recorded its identity: only the observed model is
-        # collected here, for the ``subagent_ended`` answering model (§13).
-        if deps.pin.is_gateway:
-            response_models.append(gateway_identity_of(response).model_group)
-        else:
-            response_models.append(observed_response_model(response))
-        return None
-
-    first_request = True
-    # One conversation, one anchoring state: the member's guard, its Admission
-    # holds and its compared ledger values all read the spawn group's state,
-    # anchored on the member's own accepted responses only — never the main
-    # conversation. The group owns it so the peak survives a pin violation.
-
-    def _request_model(
-        bound_model: object,
-        request_messages: list[BaseMessage],
-        request_tools: list[BaseTool],
-    ) -> BaseMessage | ModelRequestEnding:
-        nonlocal first_request
-        first_hold = first_hold_id if first_request else None
-        first_request = False
-        return run_model_request(
-            deps,
-            witness,
-            step_id,
-            seq,
-            bound_model,
-            request_messages,
-            request_tools,
-            first_hold_id=first_hold,
-            record_main_context=False,
-            origin="subagent",
-            context_state=member_state,
-        )
-
-    def _charge_tool_calls(count: int) -> LimitFact | None:
-        fact = deps.budgets.note_tool_calls(step_id, count, origin="subagent")
-        _flush_attempt_usage(deps)
-        return fact
-
-    result = run_subagent(
-        fork_subagent_conversation(deps.model, call_id, description),
-        description=description,
-        instructions=instructions,
-        call_id=call_id,
-        workspace=deps.workspace,
-        artifact_store=deps.artifact_store,
-        redactions=deps.redactions,
-        base_revision=deps.attempt.base_revision,
-        base_tip=deps.attempt.base_tip,
-        price=_prices_for(deps),
-        is_gateway=_is_gateway_for(deps),
-        on_response=_note_response,
-        is_stopped=deps.is_stopped,
-        request_model=_request_model,
-        context_window=deps.context_window,
-        charge_tool_calls=_charge_tool_calls,
-        context_state=member_state,
-    )
-    if result.limit_fact is not None:
-        text = subagent_tool_result_text(result)
-        return (
-            text,
-            None,
-            False,
-            response_models,
-            result.billable_tool_calls,
-            result.limit_fact,
-            result.provider_error,
-            result.end_context,
-            result.peak_context,
-            result.duration_seconds,
-            result.reason,
-            result.context_cause,
-            result.overflow_signal,
-        )
-    if result.status == "reported":
-        assert result.report is not None
-        return (
-            f"Sub-agent {description!r} reported:\n{result.report}",
-            result.report,
-            True,
-            response_models,
-            result.billable_tool_calls,
-            None,
-            None,
-            None,
-            result.peak_context,
-            result.duration_seconds,
-            result.reason,
-            None,
-            None,
-        )
-    return (
-        subagent_tool_result_text(result),
-        None,
-        False,
-        response_models,
-        result.billable_tool_calls,
-        None,
-        result.provider_error,
-        result.end_context,
-        result.peak_context,
-        result.duration_seconds,
-        result.reason,
-        result.context_cause,
-        result.overflow_signal,
-    )
 
 
 def _evidence_view(deps: AgentStepDeps) -> dict[str, object]:
