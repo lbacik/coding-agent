@@ -279,54 +279,54 @@ def run_attempt(
     mirror = TargetMirror(
         ready.mirror_dir, canonical_remote, ready.token, registry
     )
-    with temporary_git_credential_helper(ready.token) as helper:
-        workspace = mirror.open_workspace(
-            ready.workspace_dir,
-            branch=ready.config.target.base_branch,
+    workspace = mirror.open_workspace(
+        ready.workspace_dir,
+        branch=ready.config.target.base_branch,
+    )
+    branch = AttemptId(
+        ready.workflow.id,
+        claimed.input_number,
+        claimed.n,
+    ).branch(pin_facts.title)
+    # A pickup Claim opens a Continuation at the recorded work commit on
+    # the new Attempt branch (§8): the remote still serves the exact work
+    # commit at its named ref with the recorded Base Revision in history.
+    # Any failed verification raises GitFailure, and the Attempt ends
+    # ``internal-failure`` through the poll loop's infrastructure path —
+    # never model work on a moved or unavailable revision.
+    #
+    # A pull-request Attempt instead opens its pinned Input Head on the
+    # pull request's head branch (§7.2, §9.10): the remote serves the
+    # exact head SHA, which is fetched and checked out before any model
+    # work. A missing head fails the same way — GitFailure before any
+    # model call — never model work on the base-branch tip.
+    continuation_note: str | None = None
+    if claimed.pickup_offer is not None:
+        mirror.open_for_continuation(
+            workspace_path=workspace.path,
+            offer=claimed.pickup_offer,
+            attempt_branch=branch,
         )
-        branch = AttemptId(
-            ready.workflow.id,
-            claimed.input_number,
-            claimed.n,
-        ).branch(pin_facts.title)
-        # A pickup Claim opens a Continuation at the recorded work commit on
-        # the new Attempt branch (§8): the remote still serves the exact work
-        # commit at its named ref with the recorded Base Revision in history.
-        # Any failed verification raises GitFailure, and the Attempt ends
-        # ``internal-failure`` through the poll loop's infrastructure path —
-        # never model work on a moved or unavailable revision.
-        #
-        # A pull-request Attempt instead opens its pinned Input Head on the
-        # pull request's head branch (§7.2, §9.10): the remote serves the
-        # exact head SHA, which is fetched and checked out before any model
-        # work. A missing head fails the same way — GitFailure before any
-        # model call — never model work on the base-branch tip.
-        continuation_note: str | None = None
-        if claimed.pickup_offer is not None:
-            mirror.open_for_continuation(
-                workspace_path=workspace.path,
-                offer=claimed.pickup_offer,
-                attempt_branch=branch,
+        continuation_note = claimed.pickup_offer.note
+        working_branch = branch
+    elif pin_facts.input_type == "pull-request":
+        if not pin_facts.head_branch:
+            raise GitFailure(
+                "pull-request: the pinned head branch is missing"
             )
-            continuation_note = claimed.pickup_offer.note
-            working_branch = branch
-        elif pin_facts.input_type == "pull-request":
-            if not pin_facts.head_branch:
-                raise GitFailure(
-                    "pull-request: the pinned head branch is missing"
-                )
-            if not pin_facts.input_head:
-                raise GitFailure(
-                    "pull-request: the pinned Input Head is missing"
-                )
-            mirror.open_for_pull_request(
-                workspace_path=workspace.path,
-                input_head=pin_facts.input_head,
-                head_branch=pin_facts.head_branch,
+        if not pin_facts.input_head:
+            raise GitFailure(
+                "pull-request: the pinned Input Head is missing"
             )
-            working_branch = pin_facts.head_branch
-        else:
-            working_branch = branch
+        mirror.open_for_pull_request(
+            workspace_path=workspace.path,
+            input_head=pin_facts.input_head,
+            head_branch=pin_facts.head_branch,
+        )
+        working_branch = pin_facts.head_branch
+    else:
+        working_branch = branch
+    with temporary_git_credential_helper(ready.token) as helper:
         start_commit = head_revision(workspace.path)
         evidence_dir = (
             ready.state_dir

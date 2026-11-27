@@ -154,7 +154,10 @@ class TargetMirror:
         opened (§4.4, §16.1); no later sweep retries it.
         """
         with self._fresh():
-            return merge_base_of(self._mirror_dir, head_sha, base_tip)
+            try:
+                return merge_base_of(self._mirror_dir, head_sha, base_tip)
+            except GitFailure as exc:
+                raise GitFailure(self._registry.redact(str(exc))) from exc
 
     def offer_still_served(self, offer: RoundHandoffOffer) -> bool:
         """Whether the remote still serves the offer's revisions (§8).
