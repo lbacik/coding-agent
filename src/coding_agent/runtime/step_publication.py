@@ -38,11 +38,12 @@ from typing import Literal, cast
 
 from coding_agent.inputs.errors import CredentialFailure
 from coding_agent.inputs.port import (
+    CodeHostPort,
     InputComment,
+    InputPort,
     InputPullRequest,
     InputReview,
     InputType,
-    StepTrackerPort,
 )
 from coding_agent.inputs.profile import GITHUB_PROFILE
 from coding_agent.ledger.store import RunLedger, step_effect_marker
@@ -435,7 +436,8 @@ def run_open_pull_request(
     tree_id: str | None = None,
     gate: GateChecker | None = None,
     claim_active: bool = True,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger | None = None,
     step_id: str = "open-pull-request",
     seq: int = 1,
@@ -535,7 +537,8 @@ def run_open_pull_request(
         max_body_chars=tracker.profile.max_body_chars,
     )
     outcome = drive_effect(
-        tracker=tracker,
+        inputs=inputs,
+        code_host=code_host,
         ledger=ledger,
         attempt_id=attempt_id,
         step_id=step_id,
@@ -626,7 +629,8 @@ def run_publish_review(
     tree_id: str | None = None,
     gate: GateChecker | None = None,
     claim_active: bool = True,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger | None = None,
     step_id: str = "publish-review",
     seq: int = 1,
@@ -673,7 +677,7 @@ def run_publish_review(
             detail=f"error: {exc}",
         )
     try:
-        readback = tracker.fetch_input(input_number, "pull-request")
+        readback = inputs.fetch_input(input_number, "pull-request")
     except CredentialFailure:
         raise
     except Exception as exc:
@@ -719,7 +723,8 @@ def run_publish_review(
         max_body_chars=tracker.profile.max_body_chars,
     )
     outcome = drive_effect(
-        tracker=tracker,
+        inputs=inputs,
+        code_host=code_host,
         ledger=ledger,
         attempt_id=attempt_id,
         step_id=step_id,
@@ -753,7 +758,7 @@ def run_publish_review(
     if isinstance(outcome, NotPerformed):
         if outcome.reason.startswith("stale-head"):
             try:
-                reread = tracker.fetch_input(input_number, "pull-request")
+                reread = inputs.fetch_input(input_number, "pull-request")
             except CredentialFailure:
                 raise
             except Exception:
@@ -780,7 +785,7 @@ def run_publish_review(
     assert isinstance(outcome, Failed)
     failure = outcome.error
     try:
-        reread = tracker.fetch_input(input_number, "pull-request")
+        reread = inputs.fetch_input(input_number, "pull-request")
     except CredentialFailure:
         raise
     except Exception:
@@ -828,7 +833,8 @@ def run_post_comment(
     tree_id: str | None = None,
     gate: GateChecker | None = None,
     claim_active: bool = True,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger | None = None,
     step_id: str = "post-comment",
     seq: int = 1,
@@ -884,7 +890,8 @@ def run_post_comment(
         max_body_chars=tracker.profile.max_body_chars,
     )
     outcome = drive_effect(
-        tracker=tracker,
+        inputs=inputs,
+        code_host=code_host,
         ledger=ledger,
         attempt_id=attempt_id,
         step_id=step_id,
@@ -957,7 +964,7 @@ class PublishingOperationRunner:
     """
 
     local: LocalOperationRunner
-    tracker: StepTrackerPort
+    tracker: CodeHostPort
     workflow_id: str
     config_digest: str
     issue_title: str = ""
@@ -1037,7 +1044,8 @@ class PublishingOperationRunner:
             validation_registry=self.local.validation_registry,
             gate=self.local.gate,
             claim_active=self.claim_active,
-            tracker=self.tracker,
+            inputs=self.tracker,
+            code_host=self.tracker,
             ledger=ledger,
             step_id=step.id,
             seq=seq,
@@ -1077,7 +1085,8 @@ class PublishingOperationRunner:
             validation_registry=self.local.validation_registry,
             gate=self.local.gate,
             claim_active=self.claim_active,
-            tracker=self.tracker,
+            inputs=self.tracker,
+            code_host=self.tracker,
             ledger=ledger,
             step_id=step.id,
             seq=seq,
@@ -1115,7 +1124,8 @@ class PublishingOperationRunner:
             validation_registry=self.local.validation_registry,
             gate=self.local.gate,
             claim_active=self.claim_active,
-            tracker=self.tracker,
+            inputs=self.tracker,
+            code_host=self.tracker,
             ledger=ledger,
             step_id=step.id,
             seq=seq,

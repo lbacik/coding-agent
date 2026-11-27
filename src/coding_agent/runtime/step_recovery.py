@@ -32,7 +32,7 @@ from pathlib import Path
 from coding_agent.inputs.errors import CredentialFailure
 from coding_agent.inputs.claim import recover_unconfirmed_claim
 from coding_agent.inputs.gates import GateResult
-from coding_agent.inputs.port import InputType, StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.ledger.store import (
     RunLedger,
     StepEffectRecord,
@@ -86,7 +86,8 @@ def _intent_body(intent: StepEffectRecord) -> str:
 
 def settle_step_effect(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     intent: StepEffectRecord,
     number: int,
@@ -117,7 +118,7 @@ def settle_step_effect(
         return intent.status
     target = module.target_from_dict(dict(intent.expected_target or {}))
     outcome = drive_effect(
-        tracker=tracker,
+        inputs=inputs, code_host=code_host,
         ledger=ledger,
         attempt_id=intent.attempt_id,
         step_id=intent.step_id,
@@ -145,7 +146,8 @@ def settle_step_effect(
 
 def settle_open_step_effects(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -176,7 +178,7 @@ def settle_open_step_effects(
         ):
             continue
         outcome = settle_step_effect(
-            tracker=tracker,
+            inputs=inputs, code_host=code_host,
             ledger=ledger,
             intent=intent,
             number=number,
@@ -220,7 +222,8 @@ def decide_restart_outcome(gate_result: GateResult | None) -> RestartDecision:
 
 def _finish_after_settling(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -282,7 +285,7 @@ def _finish_after_settling(
         # the crash window closed them as process loss.
         resolved = Interrupted(reason=PROCESS_LOSS_REASON)
     return finish_attempt(
-        tracker=tracker,
+        inputs=inputs, code_host=code_host,
         ledger=ledger,
         attempt_id=attempt_id,
         target=FinalisationTarget(
@@ -307,7 +310,8 @@ class RecoveredAttempt:
 
 def recover_unconfirmed_attempt(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -319,7 +323,7 @@ def recover_unconfirmed_attempt(
     if no other Claim is in force, and marks the record ``released``. There
     is no Terminal Outcome and no terminal comment.
     """
-    recover_unconfirmed_claim(tracker, ledger, attempt_id, number, input_type)
+    recover_unconfirmed_claim(inputs, ledger, attempt_id, number, input_type)
     return RecoveredAttempt(
         attempt_id=attempt_id, outcome=None, reason=None, released=True
     )
@@ -327,7 +331,8 @@ def recover_unconfirmed_attempt(
 
 def recover_attempt(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -371,7 +376,7 @@ def recover_attempt(
     )
     try:
         settle_open_step_effects(
-            tracker=tracker,
+            inputs=inputs, code_host=code_host,
             ledger=ledger,
             attempt_id=attempt_id,
             number=number,
@@ -381,7 +386,7 @@ def recover_attempt(
         )
     except CredentialFailure:
         finish_attempt(
-            tracker=tracker,
+            inputs=inputs, code_host=code_host,
             ledger=ledger,
             attempt_id=attempt_id,
             target=target,
@@ -391,7 +396,7 @@ def recover_attempt(
         )
         raise
     finalised = _finish_after_settling(
-        tracker=tracker,
+        inputs=inputs, code_host=code_host,
         ledger=ledger,
         attempt_id=attempt_id,
         number=number,
@@ -412,7 +417,8 @@ def recover_attempt(
 
 def finalise_shutdown(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -473,7 +479,7 @@ def finalise_shutdown(
     )
     try:
         settle_open_step_effects(
-            tracker=tracker,
+            inputs=inputs, code_host=code_host,
             ledger=ledger,
             attempt_id=attempt_id,
             number=number,
@@ -483,7 +489,7 @@ def finalise_shutdown(
         )
     except CredentialFailure:
         finish_attempt(
-            tracker=tracker,
+            inputs=inputs, code_host=code_host,
             ledger=ledger,
             attempt_id=attempt_id,
             target=target,
@@ -502,7 +508,7 @@ def finalise_shutdown(
             finished=False,
         )
     finalised = _finish_after_settling(
-        tracker=tracker,
+        inputs=inputs, code_host=code_host,
         ledger=ledger,
         attempt_id=attempt_id,
         number=number,

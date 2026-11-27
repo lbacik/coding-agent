@@ -1,4 +1,4 @@
-"""The GitHub adapter of ``StepTrackerPort``: inputs, Claim and Gates.
+"""The GitHub adapter of ``InputPort`` and ``CodeHostPort``: inputs, Claim and Gates.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §5 (Workflow
 Inputs and selection: candidates are the open inputs of the Workflow's
@@ -43,11 +43,13 @@ from coding_agent.inputs.errors import InputError, InputNotFound
 from coding_agent.inputs.errors import StepTrackerError as StepTrackerError
 from coding_agent.inputs.port import (
     AgentFacts,
+    CodeHostPort,
     InputComment,
     InputPort,
     InputPullRequest,
     InputReview,
     InputType,
+    IssueTrackerPort,
     LabeledEvent,
     TrackedInput,
 )
@@ -122,13 +124,14 @@ def fetch_repository_file(
 
 @dataclass(frozen=True)
 class GitHubStepTracker:
-    """A ``StepTrackerPort`` over the GitHub REST API.
+    """A ``InputPort`` and ``CodeHostPort`` over the GitHub REST API.
 
     ``owner`` and ``repo`` name the Target Repository; ``client`` carries
     the Agent Identity's token. ``agent_login`` is the only login assigned
     or unassigned. ``agent_id`` is the Agent Identity's numeric account id,
     which every receipt lookup filters by (§14); where it is ``None`` the
-    login decides instead.
+    login decides instead. One object serves the ``inputs`` and the
+    ``code_host`` ports: ``pull_requests`` returns ``self``.
     """
 
     owner: str

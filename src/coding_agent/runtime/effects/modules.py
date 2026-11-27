@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
-from coding_agent.inputs.port import InputType, StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.runtime.effects.driver import EffectContext
 
 
@@ -168,7 +168,8 @@ class EffectModule(Protocol[TargetT]):
 
     def find(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: TargetT,
         marker: str,
@@ -177,13 +178,22 @@ class EffectModule(Protocol[TargetT]):
         ...
 
     def check(
-        self, tracker: StepTrackerPort, ctx: EffectContext, target: TargetT
+        self,
+        inputs: InputPort,
+        code_host: CodeHostPort,
+        ctx: EffectContext,
+        target: TargetT,
     ) -> str | None:
         """The kind's precondition; the ``not-performed`` reason, or ``None``."""
         ...
 
     def perform(
-        self, tracker: StepTrackerPort, ctx: EffectContext, target: TargetT, body: str
+        self,
+        inputs: InputPort,
+        code_host: CodeHostPort,
+        ctx: EffectContext,
+        target: TargetT,
+        body: str,
     ) -> Any:
         """Perform the write once, body already rendered; the tracker result."""
         ...
@@ -214,32 +224,38 @@ class CommentEffect:
 
     def find(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: CommentTarget,
         marker: str,
     ) -> Any | None:
         """Find our comment by Attempt Marker (§14)."""
-        _ = target
-        return tracker.find_comment_by_marker(ctx.number, ctx.input_type, marker)
+        _ = (code_host, target)
+        return inputs.find_comment_by_marker(ctx.number, ctx.input_type, marker)
 
     def check(
-        self, tracker: StepTrackerPort, ctx: EffectContext, target: CommentTarget
+        self,
+        inputs: InputPort,
+        code_host: CodeHostPort,
+        ctx: EffectContext,
+        target: CommentTarget,
     ) -> str | None:
         """A comment has no precondition: it posts on any input state."""
-        _ = (tracker, ctx, target)
+        _ = (inputs, code_host, ctx, target)
         return None
 
     def perform(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: CommentTarget,
         body: str,
     ) -> Any:
         """Post one comment on the input, body already rendered (§10.7)."""
-        _ = target
-        return tracker.post_comment(ctx.number, ctx.input_type, body)
+        _ = (code_host, target)
+        return inputs.post_comment(ctx.number, ctx.input_type, body)
 
     def remote_id(self, result: Any) -> str | None:
         """The comment id the receipt carries (§14.1)."""
@@ -266,35 +282,38 @@ class TerminalCommentEffect:
 
     def find(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: TerminalCommentTarget,
         marker: str,
     ) -> Any | None:
         """Find our terminal comment by Attempt Marker (§14, §15.3)."""
-        _ = target
-        return tracker.find_comment_by_marker(ctx.number, ctx.input_type, marker)
+        _ = (code_host, target)
+        return inputs.find_comment_by_marker(ctx.number, ctx.input_type, marker)
 
     def check(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: TerminalCommentTarget,
     ) -> str | None:
         """The terminal comment posts even on a closed or merged input."""
-        _ = (tracker, ctx, target)
+        _ = (inputs, code_host, ctx, target)
         return None
 
     def perform(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: TerminalCommentTarget,
         body: str,
     ) -> Any:
         """Post the terminal comment, body already rendered (§15.3)."""
-        _ = target
-        return tracker.post_comment(ctx.number, ctx.input_type, body)
+        _ = (code_host, target)
+        return inputs.post_comment(ctx.number, ctx.input_type, body)
 
     def remote_id(self, result: Any) -> str | None:
         """The comment id the receipt carries (§14.1)."""
@@ -317,17 +336,22 @@ class ReviewEffect:
 
     def find(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: ReviewTarget,
         marker: str,
     ) -> Any | None:
         """Find our review by Attempt Marker (§14)."""
-        _ = target
-        return tracker.find_review_by_marker(ctx.number, marker)
+        _ = (inputs, target)
+        return code_host.find_review_by_marker(ctx.number, marker)
 
     def check(
-        self, tracker: StepTrackerPort, ctx: EffectContext, target: ReviewTarget
+        self,
+        inputs: InputPort,
+        code_host: CodeHostPort,
+        ctx: EffectContext,
+        target: ReviewTarget,
     ) -> str | None:
         """The head compare-and-swap: refuse to publish on a moved head (§10.6).
 
@@ -335,9 +359,10 @@ class ReviewEffect:
         re-checks this exactly like the forward path (ADR 0028), even where
         no Gate is supplied.
         """
+        _ = code_host
         if not target.commit_id:
             return "error: no commit id in the recorded intent"
-        live = tracker.fetch_input(ctx.number, "pull-request")
+        live = inputs.fetch_input(ctx.number, "pull-request")
         head = live.head_sha
         if head is None:
             return "error: the pull request reports no head sha"
@@ -347,13 +372,17 @@ class ReviewEffect:
 
     def perform(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: ReviewTarget,
         body: str,
     ) -> Any:
         """Publish a COMMENT-event review against the recorded head (§10.6)."""
-        return tracker.publish_review(ctx.number, commit_id=target.commit_id, body=body)
+        _ = inputs
+        return code_host.publish_review(
+            ctx.number, commit_id=target.commit_id, body=body
+        )
 
     def remote_id(self, result: Any) -> str | None:
         """The review id the receipt carries (§14.1)."""
@@ -377,7 +406,8 @@ class PullRequestEffect:
 
     def find(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: PullRequestTarget,
         marker: str,
@@ -387,26 +417,31 @@ class PullRequestEffect:
         Open preferred where both states match; a human-closed own pull
         request is found too, so it is a receipt and is never re-created.
         """
-        _ = ctx
-        return tracker.find_pull_request(target.head_branch, marker)
+        _ = (inputs, ctx)
+        return code_host.find_pull_request(target.head_branch, marker)
 
     def check(
-        self, tracker: StepTrackerPort, ctx: EffectContext, target: PullRequestTarget
+        self,
+        inputs: InputPort,
+        code_host: CodeHostPort,
+        ctx: EffectContext,
+        target: PullRequestTarget,
     ) -> str | None:
         """No precondition beyond the lookup: a closed own PR is a receipt."""
-        _ = (tracker, ctx, target)
+        _ = (inputs, code_host, ctx, target)
         return None
 
     def perform(
         self,
-        tracker: StepTrackerPort,
+        inputs: InputPort,
+        code_host: CodeHostPort,
         ctx: EffectContext,
         target: PullRequestTarget,
         body: str,
     ) -> Any:
         """Open one pull request from the recorded branch (§10.5)."""
-        _ = ctx
-        return tracker.open_pull_request(
+        _ = (inputs, ctx)
+        return code_host.open_pull_request(
             title=target.title,
             head_branch=target.head_branch,
             base_branch=target.base_branch,

@@ -45,7 +45,12 @@ from coding_agent.inputs.claim import (
 )
 from coding_agent.inputs.numbering import parse_attempt_marker
 from coding_agent.inputs.pinning import PinnedInput, pin_from_readback
-from coding_agent.inputs.port import InputComment, StepTrackerPort, TrackedInput
+from coding_agent.inputs.port import (
+    CodeHostPort,
+    InputComment,
+    InputPort,
+    TrackedInput,
+)
 from coding_agent.inputs.selection import open_agent_pr_for_issue, sort_inputs
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator.commands import CommandRecord
@@ -229,7 +234,8 @@ def pickup_exclusion_reason(
 
 
 def _pickup_guard_reason(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     claim_config: ClaimConfig,
     pickup: PickupConfig,
@@ -239,8 +245,13 @@ def _pickup_guard_reason(
     agent_id: int | None,
     exclude_comment_id: int | None = None,
 ) -> str | None:
-    """The pickup-lane guard reason for ``candidate``, read fresh (§8)."""
-    comments = tracker.list_comments(candidate.number, candidate.input_type)
+    """The pickup-lane guard reason for ``candidate``, read fresh (§8).
+
+    The ``skip-open-agent-pr`` scan is explicit orchestration across both
+    ports: ``code_host`` lists the open pull requests while ``inputs``
+    checks the per-input blocker.
+    """
+    comments = inputs.list_comments(candidate.number, candidate.input_type)
     in_force = [
         comment
         for comment in in_force_claim_comments(comments, ledger, agent_id)
@@ -250,7 +261,7 @@ def _pickup_guard_reason(
     if claim_config.input_type == "issue" and claim_config.skip_open_agent_pr:
         agent_pr_open = (
             open_agent_pr_for_issue(
-                tracker.list_open_pull_requests(),
+                code_host.list_open_pull_requests(),
                 candidate.number,
                 agent_login=claim_config.agent_login,
                 agent_id=claim_config.agent_id,
@@ -261,7 +272,7 @@ def _pickup_guard_reason(
         candidate,
         offer=offer,
         pickup_label=pickup.pickup_label,
-        blocker_open=tracker.has_open_blocker(candidate.number, candidate.input_type),
+        blocker_open=inputs.has_open_blocker(candidate.number, candidate.input_type),
         claim_in_force=bool(in_force),
         agent_pr_open=agent_pr_open,
     )
@@ -289,7 +300,8 @@ def _remote_available(
 
 
 def _pickup_readback_failure(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     claim_config: ClaimConfig,
     pickup: PickupConfig,
@@ -310,7 +322,7 @@ def _pickup_readback_failure(
     """
     from coding_agent.inputs.claim import winning_claim
 
-    readback = tracker.fetch_input(candidate.number, candidate.input_type)
+    readback = inputs.fetch_input(candidate.number, candidate.input_type)
     if not readback.is_open:
         return "closed"
     if pickup.pickup_label not in readback.labels:
@@ -322,7 +334,7 @@ def _pickup_readback_failure(
         return "assigned"
     if pickup.agent_login not in readback.assignees:
         return "assignment-missing"
-    comments = tracker.list_comments(candidate.number, candidate.input_type)
+    comments = inputs.list_comments(candidate.number, candidate.input_type)
     winner = winning_claim(comments, ledger, agent_id)
     if winner is None or winner.comment_id != own_comment_id:
         return "claim-lost"
@@ -344,7 +356,8 @@ def _pickup_readback_failure(
     if not _remote_available(pickup, offer):
         return "pickup-unavailable"
     guard = _pickup_guard_reason(
-        tracker,
+        inputs,
+        code_host,
         ledger,
         claim_config,
         pickup,
@@ -361,7 +374,8 @@ def _pickup_readback_failure(
 
 
 def attempt_pickup_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     claim_config: ClaimConfig,
     pickup: PickupConfig,
@@ -397,12 +411,13 @@ def attempt_pickup_claim(
     ledger-plus-tracker sequence.
     """
     claim_agent_id = (
-        pickup.agent_id if pickup.agent_id is not None else tracker.agent_id
+        pickup.agent_id if pickup.agent_id is not None else inputs.agent_id
     )
 
     def revalidate(attempt: str, own_comment_id: int) -> str | None:
         return _pickup_readback_failure(
-            tracker,
+            inputs,
+            code_host,
             ledger,
             claim_config,
             pickup,
@@ -428,7 +443,8 @@ def attempt_pickup_claim(
         return replace(pin, base_revision=offer.base_revision)
 
     return _execute_claim(
-        tracker,
+        inputs,
+        code_host,
         ledger,
         candidate=candidate,
         content=claim_config,
@@ -465,7 +481,8 @@ def _priority_issue_and_request(
 
 
 def sweep_pickup(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     claim_config: ClaimConfig,
     pickup: PickupConfig,
@@ -490,13 +507,13 @@ def sweep_pickup(
     if claim_config.input_type != "issue":
         return None
     claim_agent_id = (
-        pickup.agent_id if pickup.agent_id is not None else tracker.agent_id
+        pickup.agent_id if pickup.agent_id is not None else inputs.agent_id
     )
-    listed = tracker.list_issue_candidates(pickup.pickup_label)
+    listed = inputs.list_issue_candidates(pickup.pickup_label)
     ordered = sort_inputs(listed)
     priority_issue, priority_request_id = _priority_issue_and_request(priority)
     for candidate in ordered:
-        comments = tracker.list_comments(candidate.number, candidate.input_type)
+        comments = inputs.list_comments(candidate.number, candidate.input_type)
         found = newest_pickup_offer(
             comments,
             agent_id=claim_agent_id,
@@ -505,7 +522,8 @@ def sweep_pickup(
         )
         offer = found[0] if found is not None else None
         guard = _pickup_guard_reason(
-            tracker,
+            inputs,
+            code_host,
             ledger,
             claim_config,
             pickup,
@@ -524,7 +542,8 @@ def sweep_pickup(
             continue
         assert found is not None and offer is not None
         claimed = attempt_pickup_claim(
-            tracker,
+            inputs,
+            code_host,
             ledger,
             claim_config,
             pickup,

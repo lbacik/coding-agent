@@ -17,17 +17,25 @@ Row ids: INP-1 … INP-20, OP-14 (with S7b), REC-22.
 
 ``InputPort`` is a claimable input, either an issue or a pull request;
 ``IssueTrackerPort`` extends it with the pull-request-to-issue link line;
-``CodeHostPort`` is the Target Repository, its pull requests and reviews,
-plus a ``pull_requests`` facet reusing ``InputPort`` for pull-request
-Workflows. Each port carries its own identity operations, because the
-agent has a separate account in each system. ``StepTrackerPort`` is the
-combined production port both adapters serve today: the single ``target:``
-Workflow Configuration block wires both ports to the GitHub adapter.
+``CodeHostPort`` extends the input surface with the Target Repository, its
+pull requests and reviews, plus a ``pull_requests`` facet reusing
+``InputPort`` for pull-request Workflows. Each port carries its own
+identity operations through ``AgentIdentityPort``, because the agent has
+a separate account in each system. In production the single ``target:``
+Workflow Configuration block wires every port to the one GitHub adapter.
 
 There is deliberately no operation that applies the Selection Label and
 none that edits an input's title or body — those two structural abstentions
 (§18) hold because no port can express them, not because any caller
 promises restraint.
+
+The surface is partitioned so an issue tracker from a different vendor can
+be swapped in without replacing pull-request and review handling:
+``InputPort`` owns the claimable input (issue or pull request),
+``IssueTrackerPort`` is the empty future seam over it, and ``CodeHostPort``
+extends the input surface with the repository-host delivery operations. In
+production one adapter implements all three; the runtime threads the narrow
+port each call site needs.
 """
 
 from __future__ import annotations
@@ -159,11 +167,8 @@ class InputPullRequest:
     draft: bool = False
 
 
-class InputPort(Protocol):
-    """A claimable Workflow input, either an issue or a pull request.
-
-    Row ids: INP-1 … INP-13, INP-19, INP-20 (§5–§7, §14, §18).
-    """
+class AgentIdentityPort(Protocol):
+    """The Agent Identity and Target Repository every port can use (§2.1, §14, §18)."""
 
     @property
     def target_repo(self) -> str:
@@ -191,6 +196,10 @@ class InputPort(Protocol):
         mode — no YAML key selects it.
         """
         ...
+
+
+class InputPort(AgentIdentityPort, Protocol):
+    """The claimable input, issue or pull request (§5, §6, §7, §14, §15.3)."""
 
     def fetch_input(self, number: int, input_type: InputType) -> TrackedInput:
         """Read one input with every guard and Gate fact (§5, §7)."""
@@ -316,27 +325,14 @@ class IssueTrackerPort(InputPort, Protocol):
         ...
 
 
-class CodeHostPort(Protocol):
+class CodeHostPort(InputPort, Protocol):
     """The Code Host: the Target Repository, its pull requests and reviews.
 
     Row ids: INP-15 … INP-18, OP-14 (with S7b), REC-22 (§5.3, §7, §10.5,
-    §10.6, §14, §18).
+    §10.6, §14, §18). Extends :class:`InputPort` so one production object
+    serves both ports; the runtime threads the narrow port each call site
+    needs. In production ``inputs`` and ``code_host`` are the same object.
     """
-
-    @property
-    def target_repo(self) -> str:
-        """The Target Repository, ``owner/name`` (§2.1)."""
-        ...
-
-    @property
-    def agent_login(self) -> str:
-        """The Agent Identity's login on this host."""
-        ...
-
-    @property
-    def agent_id(self) -> int | None:
-        """The Agent Identity's numeric id on this host, where known."""
-        ...
 
     @property
     def profile(self) -> CodeHostProfile:
@@ -347,13 +343,6 @@ class CodeHostPort(Protocol):
     def pull_requests(self) -> InputPort:
         """The pull-request facet: pull-request Workflows claim through it."""
         ...
-
-    def fetch_agent_identity(self) -> AgentFacts:
-        """Resolve the Agent Identity: login and numeric id (§18)."""
-        ...
-
-    def fetch_repository_owner_id(self) -> int:
-        """Resolve the Target Repository owner's numeric id (§18)."""
         ...
 
     def fetch_base_tip(self, base_branch: str) -> str:
@@ -416,22 +405,9 @@ class CodeHostPort(Protocol):
         account carrying our marker is not our receipt.
         """
         ...
-
-
-class StepTrackerPort(IssueTrackerPort, CodeHostPort, Protocol):
-    """The combined production port the step-workflow runtime programs against.
-
-    Both ports wired to the one adapter the single ``target:`` Workflow
-    Configuration block names — today the GitHub adapter serving issues
-    and the Target Repository from the same host. New code should depend
-    on :class:`InputPort`, :class:`IssueTrackerPort` or
-    :class:`CodeHostPort` directly; this union stays so the one-port call
-    sites keep working unchanged.
-    """
-
-
 __all__ = [
     "AgentFacts",
+    "AgentIdentityPort",
     "CodeHostPort",
     "InputComment",
     "InputPort",
@@ -440,6 +416,5 @@ __all__ = [
     "InputType",
     "IssueTrackerPort",
     "LabeledEvent",
-    "StepTrackerPort",
     "TrackedInput",
 ]

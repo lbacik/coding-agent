@@ -50,7 +50,13 @@ from coding_agent.inputs.pinning import (
     attempt_pin_from_pin,
     pin_from_readback,
 )
-from coding_agent.inputs.port import InputComment, InputType, StepTrackerPort, TrackedInput
+from coding_agent.inputs.port import (
+    CodeHostPort,
+    InputComment,
+    InputPort,
+    InputType,
+    TrackedInput,
+)
 from coding_agent.inputs.selection import (
     exclusion_reason,
     input_author_matches,
@@ -309,7 +315,8 @@ def winning_claim(
 
 
 def _guard_reason(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     config: ClaimConfig,
     candidate: TrackedInput,
@@ -321,9 +328,12 @@ def _guard_reason(
     Every guard input is read fresh — the ``labeled`` event and its §5.1
     actor test, the native blocker, another Workflow's Claim in force, the
     Agent Identity's open pull request for this issue — so the read-back
-    re-evaluates the same predicate the intake did.
+    re-evaluates the same predicate the intake did. The ``skip-open-agent-pr``
+    scan is explicit orchestration across both ports: ``code_host``
+    lists the open pull requests while ``inputs`` checks the per-input
+    blocker.
     """
-    event = tracker.read_labeled_event(
+    event = inputs.read_labeled_event(
         candidate.number, candidate.input_type, config.selection_label
     )
     authorised = label_authorised(
@@ -333,10 +343,10 @@ def _guard_reason(
         identity_mode=identity_mode,
     )
     claim_agent_id = (
-        config.agent_id if config.agent_id is not None else tracker.agent_id
+        config.agent_id if config.agent_id is not None else inputs.agent_id
     )
     in_force = in_force_claim_comments(
-        tracker.list_comments(candidate.number, candidate.input_type),
+        inputs.list_comments(candidate.number, candidate.input_type),
         ledger,
         claim_agent_id,
     )
@@ -344,7 +354,7 @@ def _guard_reason(
     if config.input_type == "issue" and config.skip_open_agent_pr:
         agent_pr_open = (
             open_agent_pr_for_issue(
-                tracker.list_open_pull_requests(),
+                code_host.list_open_pull_requests(),
                 candidate.number,
                 agent_login=config.agent_login,
                 agent_id=config.agent_id,
@@ -355,9 +365,9 @@ def _guard_reason(
         candidate,
         selection_label=config.selection_label,
         label_authorised=authorised,
-        blocker_open=tracker.has_open_blocker(candidate.number, candidate.input_type),
+        blocker_open=inputs.has_open_blocker(candidate.number, candidate.input_type),
         claim_in_force=bool(in_force),
-        target_repo=tracker.target_repo,
+        target_repo=inputs.target_repo,
         agent_pr_open=agent_pr_open,
         require_all=config.require_all,
         require_any=config.require_any,
@@ -367,7 +377,8 @@ def _guard_reason(
 
 
 def check_eligibility(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     config: ClaimConfig,
     number: int,
@@ -381,16 +392,16 @@ def check_eligibility(
     definitely ineligible, ``None`` where it may be claimed.
     """
     try:
-        candidate = tracker.fetch_input(number, config.input_type)
+        candidate = inputs.fetch_input(number, config.input_type)
     except Exception:
         return "unreadable"
     return _guard_reason(
-        tracker, ledger, config, candidate, identity_mode=identity_mode
+        inputs, code_host, ledger, config, candidate, identity_mode=identity_mode
     )
 
 
 def _release_tracker_state(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     number: int,
     input_type: InputType,
@@ -404,25 +415,25 @@ def _release_tracker_state(
     """
     if own_comment_id is not None:
         try:
-            tracker.delete_comment(own_comment_id)
+            inputs.delete_comment(own_comment_id)
         except Exception:
             pass
     remaining = [
         comment
         for comment in in_force_claim_comments(
-            tracker.list_comments(number, input_type), ledger, tracker.agent_id
+            inputs.list_comments(number, input_type), ledger, inputs.agent_id
         )
         if comment.comment_id != own_comment_id
     ]
     if not remaining:
         try:
-            tracker.unassign_input(number, input_type)
+            inputs.unassign_input(number, input_type)
         except Exception:
             pass
 
 
 def release_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     attempt: str,
     number: int,
@@ -436,12 +447,12 @@ def release_claim(
     — the same path the Claim read-back failure and restart recovery share.
     There is no Terminal Outcome and no terminal comment.
     """
-    _release_tracker_state(tracker, ledger, number, input_type, own_comment_id)
+    _release_tracker_state(inputs, ledger, number, input_type, own_comment_id)
     ledger.set_attempt_state(attempt, "released")
 
 
 def release_priority_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     attempt: str,
     number: int,
@@ -458,7 +469,7 @@ def release_priority_claim(
     with the reason, in the same write transaction as the release — so
     the Claim boundary settles the command it tried.
     """
-    _release_tracker_state(tracker, ledger, number, input_type, own_comment_id)
+    _release_tracker_state(inputs, ledger, number, input_type, own_comment_id)
     ledger.release_priority_claim(
         attempt,
         request_id,
@@ -467,7 +478,7 @@ def release_priority_claim(
 
 
 def _settle_failed_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     candidate: TrackedInput,
     attempt: str,
@@ -484,7 +495,7 @@ def _settle_failed_claim(
     """
     if priority_request_id is not None:
         release_priority_claim(
-            tracker,
+            inputs,
             ledger,
             attempt,
             candidate.number,
@@ -495,7 +506,7 @@ def _settle_failed_claim(
         )
     else:
         release_claim(
-            tracker,
+            inputs,
             ledger,
             attempt,
             candidate.number,
@@ -540,7 +551,7 @@ class _ClaimPinFailure(Exception):
 
 
 def _write_claim_writes(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     *,
     attempt: str,
@@ -566,7 +577,7 @@ def _write_claim_writes(
             "assignee": agent_login,
         },
     )
-    tracker.assign_input(candidate.number, candidate.input_type)
+    inputs.assign_input(candidate.number, candidate.input_type)
     ledger.set_assigned_by_us(attempt, True)
     comment_key = step_effect_key(
         attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
@@ -582,7 +593,7 @@ def _write_claim_writes(
             "kind": CLAIM_KIND,
         },
     )
-    posted = tracker.post_claim_comment(
+    posted = inputs.post_claim_comment(
         candidate.number,
         candidate.input_type,
         claim_comment_body(attempt, comment_key),
@@ -594,7 +605,8 @@ def _write_claim_writes(
 
 
 def _execute_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     *,
     candidate: TrackedInput,
@@ -630,10 +642,10 @@ def _execute_claim(
     pinning, pin recording and settling — is the one shared sequence.
     """
     ledger_n = ledger.next_workflow_attempt_number(workflow_id, candidate.number)
-    claim_agent_id = agent_id if agent_id is not None else tracker.agent_id
+    claim_agent_id = agent_id if agent_id is not None else inputs.agent_id
     live_markers: list[str] = list(known_markers)
     try:
-        live_comments = tracker.list_comments(
+        live_comments = inputs.list_comments(
             candidate.number, candidate.input_type
         )
         for raw_finished in trusted_terminal_attempt_ids(
@@ -661,13 +673,13 @@ def _execute_claim(
             return None
         return ReleasedClaim(input_number=candidate.number, reason="intake-closed")
     posted = _write_claim_writes(
-        tracker, ledger, attempt=attempt, candidate=candidate, agent_login=agent_login
+        inputs, ledger, attempt=attempt, candidate=candidate, agent_login=agent_login
     )
 
     failure = revalidate(attempt, posted.comment_id)
     if failure is not None:
         return _settle_failed_claim(
-            tracker,
+            inputs,
             ledger,
             candidate,
             attempt,
@@ -676,13 +688,13 @@ def _execute_claim(
             priority_request_id=priority_request_id,
         )
 
-    readback = tracker.fetch_input(candidate.number, candidate.input_type)
-    base_tip = tracker.fetch_base_tip(base_branch)
+    readback = inputs.fetch_input(candidate.number, candidate.input_type)
+    base_tip = code_host.fetch_base_tip(base_branch)
     try:
         pin = finish_pin(readback, base_tip)
     except _ClaimPinFailure as pin_failure:
         return _settle_failed_claim(
-            tracker,
+            inputs,
             ledger,
             candidate,
             attempt,
@@ -694,7 +706,7 @@ def _execute_claim(
     if content.comments_declared and candidate.input_type == "issue":
         try:
             pinned_comments = pin_claim_comments(
-                tracker,
+                inputs,
                 ledger,
                 attempt=attempt,
                 number=candidate.number,
@@ -705,7 +717,7 @@ def _execute_claim(
             )
         except Exception:
             return _settle_failed_claim(
-                tracker,
+                inputs,
                 ledger,
                 candidate,
                 attempt,
@@ -775,7 +787,7 @@ def store_claim_content(ledger: RunLedger, attempt: str, config: ClaimConfig) ->
 
 
 def pin_claim_comments(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     *,
     attempt: str,
@@ -804,8 +816,8 @@ def pin_claim_comments(
     )
     from coding_agent.operator import archive as attempt_archives
 
-    comments = tracker.list_comments(number, input_type)
-    owner_id = tracker.fetch_repository_owner_id()
+    comments = inputs.list_comments(number, input_type)
+    owner_id = inputs.fetch_repository_owner_id()
     selected = select_trusted_comments(
         comments,
         issue_author_id=issue_author_id,
@@ -833,7 +845,8 @@ def pin_claim_comments(
 
 
 def attempt_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     config: ClaimConfig,
     candidate: TrackedInput,
@@ -872,7 +885,8 @@ def attempt_claim(
 
     def revalidate(attempt: str, own_comment_id: int) -> str | None:
         return _readback_failure(
-            tracker,
+            inputs,
+            code_host,
             ledger,
             config,
             candidate,
@@ -889,7 +903,7 @@ def attempt_claim(
             if merge_base_resolver is None:
                 raise ValueError("a pull-request Claim needs a merge-base resolver")
             merge_base = merge_base_resolver(readback.head_sha, base_tip)
-        event = tracker.read_labeled_event(
+        event = inputs.read_labeled_event(
             candidate.number, candidate.input_type, config.selection_label
         )
         return pin_from_readback(
@@ -905,7 +919,8 @@ def attempt_claim(
         )
 
     return _execute_claim(
-        tracker,
+        inputs,
+        code_host,
         ledger,
         candidate=candidate,
         content=config,
@@ -923,7 +938,8 @@ def attempt_claim(
 
 
 def _readback_failure(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     config: ClaimConfig,
     candidate: TrackedInput,
@@ -938,14 +954,14 @@ def _readback_failure(
     present and authorised; no other assignee; the Worker's own Claim
     Comment is winning; every guard and filter of §5.
     """
-    readback = tracker.fetch_input(candidate.number, candidate.input_type)
+    readback = inputs.fetch_input(candidate.number, candidate.input_type)
     if not readback.is_open:
         return "closed"
     if readback.input_type == "pull-request" and readback.merged:
         return "merged"
     if config.selection_label not in readback.labels:
         return "selection-label"
-    event = tracker.read_labeled_event(
+    event = inputs.read_labeled_event(
         candidate.number, candidate.input_type, config.selection_label
     )
     if not label_authorised(
@@ -963,10 +979,10 @@ def _readback_failure(
     if config.agent_login not in readback.assignees:
         return "assignment-missing"
     readback_agent_id = (
-        config.agent_id if config.agent_id is not None else tracker.agent_id
+        config.agent_id if config.agent_id is not None else inputs.agent_id
     )
     winner = winning_claim(
-        tracker.list_comments(candidate.number, candidate.input_type),
+        inputs.list_comments(candidate.number, candidate.input_type),
         ledger,
         readback_agent_id,
     )
@@ -976,7 +992,7 @@ def _readback_failure(
     if config.input_type == "issue" and config.skip_open_agent_pr:
         agent_pr_open = (
             open_agent_pr_for_issue(
-                tracker.list_open_pull_requests(),
+                code_host.list_open_pull_requests(),
                 candidate.number,
                 agent_login=config.agent_login,
                 agent_id=config.agent_id,
@@ -992,9 +1008,9 @@ def _readback_failure(
         ),
         selection_label=config.selection_label,
         label_authorised=True,
-        blocker_open=tracker.has_open_blocker(candidate.number, candidate.input_type),
+        blocker_open=inputs.has_open_blocker(candidate.number, candidate.input_type),
         claim_in_force=False,
-        target_repo=tracker.target_repo,
+        target_repo=inputs.target_repo,
         agent_pr_open=agent_pr_open,
         require_all=config.require_all,
         require_any=config.require_any,
@@ -1031,7 +1047,8 @@ def _priority_issue_and_request(
 
 
 def sweep_and_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     config: ClaimConfig,
     *,
@@ -1060,8 +1077,8 @@ def sweep_and_claim(
     lazy so this module never cycles with the pickup lane.
     """
     try:
-        owner_id = tracker.fetch_repository_owner_id()
-        agent = tracker.fetch_agent_identity()
+        owner_id = inputs.fetch_repository_owner_id()
+        agent = inputs.fetch_agent_identity()
         identity_mode = detect_identity_mode(agent.account_id, owner_id)
     except Exception:
         return None
@@ -1069,7 +1086,8 @@ def sweep_and_claim(
         from coding_agent.inputs.pickup import sweep_pickup
 
         claimed = sweep_pickup(
-            tracker,
+            inputs,
+            code_host,
             ledger,
             config,
             pickup,
@@ -1081,9 +1099,9 @@ def sweep_and_claim(
         if claimed is not None:
             return claimed
     if config.input_type == "issue":
-        listed = tracker.list_issue_candidates(config.selection_label)
+        listed = inputs.list_issue_candidates(config.selection_label)
     else:
-        listed = tracker.list_pull_request_candidates(config.selection_label)
+        listed = inputs.list_pull_request_candidates(config.selection_label)
     ordered = sort_inputs(listed)
     priority_issue, priority_request_id = _priority_issue_and_request(priority)
     if priority_issue is not None:
@@ -1109,7 +1127,12 @@ def sweep_and_claim(
                     )
             else:
                 guard = _guard_reason(
-                    tracker, ledger, config, candidate, identity_mode=identity_mode
+                    inputs,
+                    code_host,
+                    ledger,
+                    config,
+                    candidate,
+                    identity_mode=identity_mode,
                 )
                 if guard is not None:
                     if priority_request_id is not None:
@@ -1128,7 +1151,8 @@ def sweep_and_claim(
                     ]
                 else:
                     claimed = attempt_claim(
-                        tracker,
+                        inputs,
+                        code_host,
                         ledger,
                         config,
                         candidate,
@@ -1152,12 +1176,15 @@ def sweep_and_claim(
                     ]
     for candidate in ordered:
         if (
-            _guard_reason(tracker, ledger, config, candidate, identity_mode=identity_mode)
+            _guard_reason(
+                inputs, code_host, ledger, config, candidate, identity_mode=identity_mode
+            )
             is not None
         ):
             continue
         claimed = attempt_claim(
-            tracker,
+            inputs,
+            code_host,
             ledger,
             config,
             candidate,
@@ -1172,7 +1199,7 @@ def sweep_and_claim(
 
 
 def recover_unconfirmed_claim(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     attempt: str,
     number: int,
@@ -1188,14 +1215,14 @@ def recover_unconfirmed_claim(
     """
     own: InputComment | None = None
     key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL)
-    for comment in tracker.list_comments(number, input_type):
+    for comment in inputs.list_comments(number, input_type):
         if key in comment.body and input_author_matches_comment(
-            tracker, comment
+            inputs, comment
         ):
             own = comment
             break
     release_claim(
-        tracker,
+        inputs,
         ledger,
         attempt,
         number,
@@ -1205,12 +1232,12 @@ def recover_unconfirmed_claim(
 
 
 def input_author_matches_comment(
-    tracker: StepTrackerPort, comment: InputComment
+    inputs: InputPort, comment: InputComment
 ) -> bool:
     """Whether a comment is authored by the Agent Identity (§14)."""
-    if tracker.agent_id is not None:
-        return comment.author_id == tracker.agent_id
-    return comment.author_login == tracker.agent_login
+    if inputs.agent_id is not None:
+        return comment.author_id == inputs.agent_id
+    return comment.author_login == inputs.agent_login
 
 
 def parsed_attempt_numbers(attempt_ids: Iterable[str]) -> list[tuple[str, int, int]]:

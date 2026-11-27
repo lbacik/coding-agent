@@ -1,4 +1,4 @@
-"""A fake ``StepTrackerPort`` for the S6 input and Claim tests.
+"""A fake ``InputPort``/``CodeHostPort`` for the S6 input and Claim tests.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §5 (Workflow
 Inputs and selection: candidates, guards, filters, drafts,
@@ -41,7 +41,7 @@ _FAKE_BASE_TIP = "b" * 40
 
 @dataclass
 class FakeStepTracker:
-    """In-process ``StepTrackerPort`` double; never selectable by configuration."""
+    """In-process ``InputPort``/``CodeHostPort`` double; never selectable by configuration."""
 
     owner: str = "octocat"
     repo: str = "sandbox"
