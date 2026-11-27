@@ -34,6 +34,10 @@ from coding_agent.operator.archive import (
     NATIVE_PICKUP_EXHAUSTED,
     NATIVE_ROUND_HANDOFF_READY,
 )
+from coding_agent.workflow.effective import (
+    route_round_handoff_kind,
+    selected_usable_thresholds,
+)
 
 __all__ = [
     "NATIVE_CONTEXT_THRESHOLD_CROSSED",
@@ -110,34 +114,6 @@ def _effective_configuration(reader: RunLedgerReader, attempt_id: str) -> dict[s
         return {}
     effective = record.effective_configuration
     return effective if isinstance(effective, dict) else {}
-
-
-def _route_kind(
-    effective: dict[str, Any], ending_step: str | None, step_result: str | None
-) -> str | None:
-    """The taken Route's ``round_handoff`` kind, if the end publishes one."""
-    if not ending_step or not step_result:
-        return None
-    workflow = effective.get("workflow")
-    if not isinstance(workflow, dict):
-        return None
-    steps = workflow.get("steps")
-    if not isinstance(steps, dict):
-        return None
-    step = steps.get(ending_step)
-    if not isinstance(step, dict):
-        return None
-    routes = step.get("routes")
-    if not isinstance(routes, dict):
-        return None
-    route = routes.get(step_result)
-    if not isinstance(route, dict):
-        return None
-    annotation = route.get("round_handoff")
-    if not isinstance(annotation, dict):
-        return None
-    kind = annotation.get("kind")
-    return kind if isinstance(kind, str) and kind else None
 
 
 def _parse_ending(body: str) -> tuple[str | None, str | None]:
@@ -232,10 +208,6 @@ def _crossing_events(
         pairs = reader.list_event_payloads(attempt_id, _CROSSING_KINDS)
     except Exception:
         return []
-    try:
-        from coding_agent.operator.snapshots import _selected_usable_thresholds
-    except Exception:
-        _selected_usable_thresholds = None  # type: ignore[assignment]
     events: list[dict[str, Any]] = []
     for kind, payload in pairs:
         if not isinstance(payload, dict):
@@ -261,11 +233,9 @@ def _crossing_events(
             f"({_basis_phrase(recorded.basis)}); "
             f"usable threshold {usable}"
         )
-        if _selected_usable_thresholds is not None and isinstance(step_id, str):
+        if isinstance(step_id, str):
             try:
-                _, hard = _selected_usable_thresholds(
-                    {"effective_configuration": effective}, step_id
-                )
+                _, hard = selected_usable_thresholds(effective, step_id)
             except Exception:
                 hard = None
             if (
@@ -312,7 +282,7 @@ def _handoff_events(
         offer = None
     diagnostic = _parse_diagnostic(body)
     ending_step, step_result = _parse_ending(body)
-    kind = _route_kind(effective, ending_step, step_result)
+    kind = route_round_handoff_kind(effective, ending_step, step_result)
 
     def _record(
         name: str, text: str, reason: str | None = None

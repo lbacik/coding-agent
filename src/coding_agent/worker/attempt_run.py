@@ -220,9 +220,12 @@ def pinned_profile_text(ledger: RunLedger, attempt_id: str) -> str | None:
     never guesses a contract.
     """
     from coding_agent.operator.archive import content_blob_path
+    from coding_agent.workflow.effective import (
+        project_profile_section as _project_profile_section,
+    )
 
     record = ledger.get_attempt(attempt_id)
-    section = record.effective_configuration.get("project_profile")
+    section = _project_profile_section(record.effective_configuration)
     if section is None:
         return None
     if not isinstance(section, dict):

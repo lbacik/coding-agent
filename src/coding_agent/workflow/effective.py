@@ -19,6 +19,18 @@ an optional ``advisor_pins`` section where a step's Advisor answers on
 another pin, each entry that pin's full record — and covers every available
 member — not just the statically named skills' texts. Canonical in the
 activation and identity resolution (issue #376).
+
+Strict vs tolerant reads: :func:`is_full_effective_configuration` and
+:func:`require_full_effective_configuration` are the strict gate — ``True``
+only for the full current-version shape, and recovery refuses anything
+else. Every other reader in this module (the "Typed record reads" section
+below) is independently tolerant: each takes the record itself
+(``Mapping | None``), walks it defensively, applies the legacy-shape rules
+(``ceiling`` vs older ``limits``, ``effective_tokens`` vs older ``tokens``,
+older ``max_parallel_subagents`` placement) and returns a best-effort
+value, so display and operator code keeps reading records written by older
+releases (ADR 0017). No code outside this module walks ``workflow.*``,
+``pinned_model.*``, ``project_profile`` or ``round_handoff`` keys directly.
 """
 
 from __future__ import annotations
@@ -1268,3 +1280,530 @@ def collect_claim_blobs(
         raw = profile_text.encode("utf-8")
         blobs[hashlib.sha256(raw).hexdigest()] = raw
     return blobs
+
+
+# --- Typed record reads (tolerant) ---
+#
+# Each reader takes the Effective Configuration record itself
+# (``Mapping | None``), never a status/detail wrapper, and returns a
+# best-effort value for display and operator code: a missing or malformed
+# record reads as absent, never as zero and never as a refusal. The
+# legacy-shape rules live here and nowhere else — new keys beat legacy
+# keys, ``effective_tokens`` beats raw ``tokens``, and a boolean is never
+# numeric. Recovery keeps refusing through
+# :func:`is_full_effective_configuration` / :func:`require_full_effective_configuration`
+# above; these readers do not gate on it.
+
+
+def _as_float_meter(value: object) -> float | None:
+    """``value`` as a float where it is a real number, else ``None``."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _as_int_meter(value: object) -> int | None:
+    """``value`` as an int where it is a real number, else ``None``."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
+def _as_usable_number(value: object) -> int | float | None:
+    """``value`` as a usable token count, or ``None`` where not numeric."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def _workflow_section(record: Mapping[str, object] | None) -> Mapping[str, Any]:
+    """The record's ``workflow`` section, or ``{}`` where none is pinned."""
+    if isinstance(record, Mapping):
+        workflow = record.get("workflow")
+        if isinstance(workflow, Mapping):
+            return workflow
+    return {}
+
+
+def effective_ceiling(record: Mapping[str, object] | None) -> dict[str, Any]:
+    """The Attempt Ceiling from the pinned Effective Configuration (§11.2).
+
+    Reads the pinned ``workflow.ceiling`` (``cost_usd``,
+    ``effective_tokens``, ``tool_calls``, ``wall_clock_minutes`` → seconds),
+    falling back to the legacy ``workflow.limits`` shape and the pre-v4
+    ``tokens`` meter rows older releases carry; a missing or non-numeric
+    meter reads as ``None`` rather than zero so an absent ceiling is never
+    mistaken for a spent one. The canonical reader: every ceiling consumer
+    asks this question so current and legacy shapes cannot diverge again.
+    """
+    workflow = _workflow_section(record)
+    raw_ceiling: object = workflow.get("ceiling")
+    if not isinstance(raw_ceiling, Mapping):
+        raw_ceiling = workflow.get("limits")
+    limits: Mapping[str, object] = (
+        raw_ceiling if isinstance(raw_ceiling, Mapping) else {}
+    )
+    wall_minutes = _as_float_meter(limits.get("wall_clock_minutes"))
+    effective = _as_int_meter(limits.get("effective_tokens"))
+    if effective is None:
+        effective = _as_int_meter(limits.get("tokens"))
+    return {
+        "cost_usd": _as_float_meter(limits.get("cost_usd")),
+        "effective_tokens": effective,
+        "tool_calls": _as_int_meter(limits.get("tool_calls")),
+        "wall_clock_seconds": (
+            wall_minutes * 60.0 if wall_minutes is not None else None
+        ),
+    }
+
+
+def effective_steps(record: Mapping[str, object] | None) -> Mapping[str, Any]:
+    """The record's ``workflow.steps`` mapping, or ``{}`` where none is pinned."""
+    steps = _workflow_section(record).get("steps")
+    return steps if isinstance(steps, Mapping) else {}
+
+
+def effective_step_entry(
+    record: Mapping[str, object] | None, step_id: str | None
+) -> Mapping[str, Any]:
+    """The record's entry for ``step_id``, or ``{}`` where none is pinned."""
+    if not step_id:
+        return {}
+    entry = effective_steps(record).get(step_id)
+    return entry if isinstance(entry, Mapping) else {}
+
+
+def step_context_policy(
+    record: Mapping[str, object] | None, step_id: str | None
+) -> Mapping[str, Any] | None:
+    """The step's ``context_thresholds`` policy record, if configured."""
+    policy = effective_step_entry(record, step_id).get("context_thresholds")
+    return policy if isinstance(policy, Mapping) else None
+
+
+def is_operation_step(
+    record: Mapping[str, object] | None, step_id: str | None
+) -> bool:
+    """Whether ``step_id`` is an operation (non-agent) step."""
+    entry = effective_step_entry(record, step_id)
+    if not entry:
+        return False
+    if entry.get("operation") is not None:
+        return True
+    return entry.get("agent") is None
+
+
+def pinned_model_section(
+    record: Mapping[str, object] | None,
+) -> Mapping[str, Any]:
+    """The record's pinned-model section, or ``{}`` where none is pinned."""
+    if isinstance(record, Mapping):
+        pinned = record.get("pinned_model")
+        if isinstance(pinned, Mapping):
+            return pinned
+    return {}
+
+
+def pinned_context_window(
+    record: Mapping[str, object] | None,
+) -> Mapping[str, Any]:
+    """The pinned ``context_window`` triple, or ``{}`` where none is pinned."""
+    window = pinned_model_section(record).get("context_window")
+    return window if isinstance(window, Mapping) else {}
+
+
+def model_context_window_tokens(
+    record: Mapping[str, object] | None,
+) -> int | float | None:
+    """The Pinned Model's Model Context Window, or ``None`` where unpinned.
+
+    The pin's ``model_context_window_tokens`` (§16): the largest request
+    the model accepts, published as ``context_window``.
+    """
+    return _as_usable_number(
+        pinned_model_section(record).get("model_context_window_tokens")
+    )
+
+
+def pinned_context_threshold_tokens(
+    record: Mapping[str, object] | None,
+) -> int | float | None:
+    """The pinned Context Threshold, or ``None`` where none is pinned.
+
+    The ``context_window.threshold_tokens`` from the record (mirrored as
+    ``pinned_model.context_threshold_tokens``).
+    """
+    threshold: object = pinned_context_window(record).get("threshold_tokens")
+    if threshold is None:
+        threshold = pinned_model_section(record).get("context_threshold_tokens")
+    return _as_usable_number(threshold)
+
+
+def record_context_margins(
+    record: Mapping[str, object] | None,
+) -> tuple[Any, Any]:
+    """The safety margin and request overhead in force, with code defaults."""
+    from coding_agent.runtime.context_budget import code_owned_margins
+
+    default_safety, default_overhead = code_owned_margins()
+    window = pinned_context_window(record)
+    safety = _as_usable_number(window.get("safety_margin_tokens"))
+    if safety is None:
+        safety = default_safety
+    overhead = _as_usable_number(window.get("request_overhead_tokens"))
+    if overhead is None:
+        overhead = default_overhead
+    return safety, overhead
+
+
+def pin_default_usable_threshold(
+    record: Mapping[str, object] | None,
+) -> int | float | None:
+    """The pin-default Usable Threshold, or ``None`` where unpinned.
+
+    The pin's Context Threshold less the safety margin and the request
+    overhead (§16), published as ``context_threshold`` for steps without
+    their own policy. Steps with a policy resolve through
+    :func:`selected_usable_thresholds`.
+    """
+    from coding_agent.runtime.context_budget import pin_usable_threshold
+
+    threshold = pinned_context_threshold_tokens(record)
+    if threshold is None:
+        return None
+    safety, overhead = record_context_margins(record)
+    return pin_usable_threshold(threshold, safety, overhead)
+
+
+def selected_usable_thresholds(
+    record: Mapping[str, object] | None, step_id: str | None
+) -> tuple[Any, Any]:
+    """The selected and optional hard Usable Thresholds (§16 v1.2.1).
+
+    Returns ``(selected, hard_or_None)`` where ``selected`` is the current
+    agent Step Execution's soft Usable Threshold where the step configures
+    one, else its hard or the pin-default Usable Threshold. Where a step
+    configures both soft and hard thresholds, the hard Usable Threshold is
+    also returned for ``native.context_hard_usable_threshold_tokens``.
+    Threshold figures use configured tokens.
+    """
+    from coding_agent.runtime.context_budget import (
+        hard_usable_threshold,
+        select_usable_threshold,
+        soft_usable_threshold,
+    )
+
+    safety, overhead = record_context_margins(record)
+    policy = step_context_policy(record, step_id)
+    if policy is not None:
+        hard_raw = _as_usable_number(policy.get("hard_tokens"))
+        soft_raw = _as_usable_number(policy.get("soft_tokens"))
+        hard_usable = (
+            hard_usable_threshold(hard_raw, safety, overhead)
+            if hard_raw is not None
+            else None
+        )
+        soft_usable = (
+            soft_usable_threshold(soft_raw, safety, overhead)
+            if soft_raw is not None
+            else None
+        )
+        if hard_raw is not None and soft_raw is not None:
+            return (
+                select_usable_threshold(soft_usable, hard_usable, None),
+                hard_usable,
+            )
+        if hard_raw is not None:
+            return (hard_usable, None)
+        if soft_raw is not None:
+            # Defensive: validation requires hard alongside soft.
+            return (soft_usable, None)
+    return (pin_default_usable_threshold(record), None)
+
+
+def round_handoff_section(
+    record: Mapping[str, object] | None,
+) -> Mapping[str, Any]:
+    """The record's ``workflow.round_handoff`` section, or ``{}`` where absent."""
+    section = _workflow_section(record).get("round_handoff")
+    return section if isinstance(section, Mapping) else {}
+
+
+def round_handoff_policy(
+    record: Mapping[str, object] | None,
+) -> tuple[str, int] | None:
+    """The pinned Pickup Label and series limit, if Round Handoff is enabled.
+
+    The ``round_handoff`` enablement section (the resolved ``pickup_label``
+    and the positive ``max_automatic_pickups`` limit). ``None`` where the
+    record pins no well-shaped section — Round Handoff stays disabled.
+    """
+    section = round_handoff_section(record)
+    if not section:
+        return None
+    pickup_label = section.get("pickup_label")
+    limit = section.get("max_automatic_pickups")
+    if not isinstance(pickup_label, str) or not pickup_label:
+        return None
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        return None
+    return pickup_label, limit
+
+
+def route_round_handoff_kind(
+    record: Mapping[str, object] | None,
+    ending_step: str | None,
+    step_result: str | None,
+) -> str | None:
+    """The taken Route's ``round_handoff`` kind, if the end publishes one."""
+    if not ending_step or not step_result:
+        return None
+    step = effective_step_entry(record, ending_step)
+    if not step:
+        return None
+    routes = step.get("routes")
+    if not isinstance(routes, Mapping):
+        return None
+    route = routes.get(step_result)
+    if not isinstance(route, Mapping):
+        return None
+    annotation = route.get("round_handoff")
+    if not isinstance(annotation, Mapping):
+        return None
+    kind = annotation.get("kind")
+    return kind if isinstance(kind, str) and kind else None
+
+
+def project_profile_section(record: Mapping[str, object] | None) -> Any:
+    """The record's raw ``project_profile`` section, or ``None`` where absent.
+
+    Returns the section untouched so the caller keeps the existing
+    missing/malformed semantics: absent reads as "profile from the Target
+    Repository", while a malformed section stays the caller's refusal.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    return record.get("project_profile")
+
+
+def max_parallel_subagents(record: Mapping[str, object] | None) -> int:
+    """The Attempt's ``max_parallel_subagents`` (§2.1, §8, ADR 0020).
+
+    Reads ``workflow.max_parallel_subagents`` from the record where present
+    (falling back to the legacy ``workflow.limits.max_parallel_subagents``
+    rows older releases carry), else the contract default of 2. A missing,
+    non-integer or ``< 1`` value falls back to 2: the strict parser refuses
+    such files before any Attempt runs (C-CFG-4), so a fallback here only
+    covers scripted tests and older records.
+    """
+    from coding_agent.workflow.schema import DEFAULT_MAX_PARALLEL_SUBAGENTS
+
+    if record is None:
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    workflow = _workflow_section(record)
+    if not workflow:
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    value: object = workflow.get("max_parallel_subagents")
+    if value is None:
+        limits = workflow.get("limits")
+        if isinstance(limits, Mapping):
+            value = limits.get("max_parallel_subagents")
+    if isinstance(value, bool) or type(value) is not int or value < 1:
+        return DEFAULT_MAX_PARALLEL_SUBAGENTS
+    return value
+
+
+def make_test_record(
+    *,
+    workflow_id: str = "test",
+    model: str = "test-model",
+    ceiling: Mapping[str, object] | None = None,
+    steps: Mapping[str, Mapping[str, object]] | None = None,
+    max_parallel_subagents_value: int = 2,
+    round_handoff: Mapping[str, object] | None = None,
+    project_profile: Mapping[str, object] | None = None,
+    pin: Mapping[str, object] | None = None,
+    base_branch: str = "main",
+    prompt_texts: Mapping[str, str] | None = None,
+    member_name: str = "test-skill",
+) -> dict[str, object]:
+    """A full-shape Effective Configuration record for tests (CFG-41, v4).
+
+    Starts from a minimal record that passes
+    :func:`is_full_effective_configuration` — one workflow step, one
+    prompt, one Skill Bundle member with synthetic provenance/review and
+    its exact activation delivery, and the pinned model with its price
+    table, Model Context Window, output cap and full context-window
+    config — then applies the overrides. ``ceiling`` merges over the
+    default four-meter ceiling, ``steps`` replaces the default steps,
+    ``pin`` merges over the default pinned-model section, and
+    ``round_handoff`` / ``project_profile`` ride only where given, so
+    records that predate either section stay expressible by omitting
+    them. Tests that need legacy shapes (``limits``, ``tokens``) keep
+    hand-building partial mappings and assert through the tolerant
+    readers; everything with current-shape intent builds through here
+    so partial records stop being possible.
+    """
+    texts = dict(prompt_texts) if prompt_texts is not None else {"prompt:main": "test prompt"}
+    member_body = "test skill"
+    member_digest = hashlib.sha256(member_body.encode("utf-8")).hexdigest()
+    default_ceiling: dict[str, object] = {
+        "cost_usd": 5.0,
+        "effective_tokens": 100_000,
+        "tool_calls": 200,
+        "wall_clock_minutes": 60,
+    }
+    if ceiling is not None:
+        default_ceiling.update(ceiling)
+    default_steps: dict[str, object] = {
+        "build": {
+            "id": "build",
+            "agent": {
+                "instructions": [{"skill": None, "prompt": "prompt:main"}],
+                "tools": [],
+                "inputs": [],
+                "results": {},
+            },
+            "operation": None,
+            "with_body": False,
+            "with_draft": False,
+            "with_requires": [],
+            "max_executions": 1,
+            "limits": {},
+            "reserved": False,
+            "routes": {"done": {"end": "done"}},
+        }
+    }
+    workflow_section: dict[str, object] = {
+        "id": workflow_id,
+        "model": model,
+        "input": {
+            "type": "cli",
+            "label": "test",
+            "require_all": [],
+            "require_any": [],
+            "exclude": [],
+            "drafts": False,
+            "skip_open_agent_pr": False,
+        },
+        "ceiling": default_ceiling,
+        "max_parallel_subagents": max_parallel_subagents_value,
+        "outcomes": {"done": ["done"]},
+        "start": "build",
+        "defaults_max_executions": 1,
+        "defaults_routes": {},
+        "steps": dict(steps) if steps is not None else default_steps,
+    }
+    if round_handoff is not None:
+        workflow_section["round_handoff"] = dict(round_handoff)
+    prompts_section: dict[str, object] = {}
+    for locator in sorted(texts.keys()):
+        raw = texts[locator].encode("utf-8")
+        prompts_section[locator] = {
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size_bytes": len(raw),
+        }
+    default_pin: dict[str, object] = {
+        "key": "test:test-model",
+        "provider": "test",
+        "gateway_kind": None,
+        "gateway_url": None,
+        "model": model,
+        "endpoint": "test",
+        "effort": "medium",
+        "api_key_env": "TEST_API_KEY",
+        "prices": {
+            "input": 2.00,
+            "output": 10.00,
+            "cache_read": 0.20,
+            "cache_write": 2.50,
+        },
+        "model_context_window_tokens": 200_000,
+        "output_cap_tokens": 32_000,
+        "context_threshold_tokens": 80_000,
+        "context_window": {
+            "threshold_tokens": 80_000,
+            "safety_margin_tokens": 1_000,
+            "request_overhead_tokens": 500,
+        },
+    }
+    if pin is not None:
+        for key, value in pin.items():
+            if key == "prices" and isinstance(value, Mapping):
+                base_prices = default_pin["prices"]
+                assert isinstance(base_prices, dict)
+                merged_prices = dict(base_prices)
+                merged_prices.update(value)
+                default_pin["prices"] = merged_prices
+            elif key == "context_window" and isinstance(value, Mapping):
+                base_window = default_pin["context_window"]
+                assert isinstance(base_window, dict)
+                merged_window = dict(base_window)
+                merged_window.update(value)
+                default_pin["context_window"] = merged_window
+            else:
+                default_pin[key] = value
+    delivery_raw = member_body.encode("utf-8")
+    member_section: dict[str, object] = {
+        "sourceIdentity": "git+https://example.com/org/skills-a.git",
+        "resolvedCommit": "a" * 40,
+        "declaredRef": None,
+        "relativeSourcePath": "",
+        "storeRelativePath": member_name,
+        "files": [
+            {
+                "path": "SKILL.md",
+                "sha256": member_digest,
+                "executable": False,
+            }
+        ],
+        "overlays": [],
+        "review": {
+            "sourceIdentity": "git+https://example.com/org/skills-a.git",
+            "name": member_name,
+            "skillSha256": member_digest,
+            "requires": [],
+            "files": [],
+            "references": [],
+            "reason": "synthetic review",
+        },
+    }
+    record: dict[str, object] = {
+        "version": EFFECTIVE_CONFIGURATION_VERSION,
+        "workflow": workflow_section,
+        "file": {
+            "target": {
+                "kind": "github",
+                "repository": "example-owner/example-repo",
+                "base_branch": base_branch,
+                "token_env": "GITHUB_TOKEN",
+            },
+            "model": model,
+            "worker": {
+                "poll_interval_seconds": 5,
+                "shutdown_grace_seconds": 30,
+            },
+            "skills": [],
+        },
+        "prompts": prompts_section,
+        "skill_bundle": {"members": {member_name: member_section}},
+        "activations": {
+            member_name: {
+                "framing_version": 1,
+                "sha256": hashlib.sha256(delivery_raw).hexdigest(),
+                "size_bytes": len(delivery_raw),
+            }
+        },
+        "pinned_model": default_pin,
+    }
+    if project_profile is not None:
+        record["project_profile"] = dict(project_profile)
+    return record
