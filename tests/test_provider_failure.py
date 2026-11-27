@@ -865,7 +865,7 @@ def test_three_routed_provider_failures_halt_after_the_third_is_finalized(
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(ledger),
         run_one_attempt=_release_on_finish(
@@ -902,7 +902,7 @@ def test_a_clean_attempt_between_provider_failures_resets_the_count(
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(ledger),
         run_one_attempt=_release_on_finish(
@@ -955,7 +955,7 @@ def test_three_context_overflow_errors_never_halt(
         return run_one(claimed)
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(ledger),
         run_one_attempt=_release_on_finish(tracker, recording_runner),

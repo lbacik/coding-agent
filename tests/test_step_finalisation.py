@@ -157,7 +157,7 @@ def test_terminal_writes_comment_labels_assignment(
     assert f"coding-agent {ATTEMPT}: completed" in comment
     assert f"Attempt: {ATTEMPT}" in comment
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -186,7 +186,7 @@ def test_terminal_comment_posted_on_closed_input(
     _open_attempt(ledger)
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="withdrawn")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -212,7 +212,7 @@ def test_assignment_kept_while_another_claim_in_force(
     _open_attempt(ledger, "implement#7/2")
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="completed")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -241,7 +241,7 @@ def test_perform_never_writes_selection_label(ledger: RunLedger) -> None:
     _open_attempt(ledger)
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="completed")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -268,7 +268,7 @@ def test_restart_finds_landed_write_by_key(ledger: RunLedger) -> None:
     tracker.post_comment(NUMBER, "issue", body)
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, body)
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -289,7 +289,7 @@ def test_restart_performs_absent_write_once(ledger: RunLedger) -> None:
     body = f"a fresh comment\n{marker}"
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, body)
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -311,7 +311,7 @@ def test_restart_records_not_performed_where_gate_fails(
     marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, f"body\n{marker}")
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -330,7 +330,7 @@ def test_no_intent_means_no_write_at_restart(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -355,7 +355,7 @@ def test_receipt_recovered_after_write_before_receipt(
     assert intent is not None and intent.status == "intent"
     assert (
         settle_step_effect(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             intent=intent,
             number=NUMBER,
@@ -378,7 +378,7 @@ def test_recovery_publishes_recorded_truncated_body_unchanged(
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, truncated)
     assert (
         settle_open_step_effects(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             number=NUMBER,
@@ -424,7 +424,7 @@ def test_human_closed_pull_request_never_recreated(ledger: RunLedger) -> None:
     )
     calls_before = list(tracker.call_names())
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -469,7 +469,7 @@ def test_drift_keeps_pull_request_and_lists_it(ledger: RunLedger) -> None:
     )
     ledger.record_step_effect_receipt(ATTEMPT, "open-pr", 1, 0, remote_id="101")
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -505,7 +505,7 @@ def test_restart_releases_unconfirmed_claim(
     )
     ledger.set_assigned_by_us(ATTEMPT, True)
     recovered = recover_unconfirmed_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -529,7 +529,7 @@ def test_restart_closes_open_execution_as_interrupted(
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "process", 1, entry_result="start")
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -555,7 +555,7 @@ def test_restart_ends_withdrawn_where_input_withdrawn(
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "process", 1, entry_result="start")
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -582,7 +582,7 @@ def test_recorded_outcome_finished_as_recorded(ledger: RunLedger) -> None:
         writes=terminal_writes_for_outcome(),
     )
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -609,7 +609,7 @@ def test_failed_attempt_reverts_nothing(ledger: RunLedger) -> None:
     tracker.post_comment(NUMBER, "issue", "a review note")
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="failed")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -653,7 +653,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     )
     with pytest.raises(CredentialFailure):
         recover_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             number=NUMBER,
@@ -667,7 +667,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     assert stored.reason == "credential-failure"
     tracker.failing = False
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -711,7 +711,7 @@ def test_recover_never_commits_dirty_tree(ledger: RunLedger, tmp_path: Path) -> 
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     _open_attempt(ledger)
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -736,7 +736,7 @@ def test_sigterm_finalises_interrupted_shutdown(ledger: RunLedger) -> None:
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "review", 1, entry_result="start")
     recovered = finalise_shutdown(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -762,7 +762,7 @@ def test_sigterm_during_review_leaves_no_result(ledger: RunLedger) -> None:
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "review", 1, entry_result="start")
     recovered = finalise_shutdown(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -785,7 +785,7 @@ def test_shutdown_withdrawn_where_input_withdrawn(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     _open_attempt(ledger)
     recovered = finalise_shutdown(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,

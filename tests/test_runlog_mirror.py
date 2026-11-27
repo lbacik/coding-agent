@@ -644,7 +644,7 @@ def test_consecutive_idle_polls_print_no_ready_issue_once(
             raise AssertionError(f"no Attempt should run: {claimed!r}")
 
         assert run_worker_loop(
-            tracker=_idle_tracker(),
+            inputs=_idle_tracker(), code_host=_idle_tracker(),
             ledger=ledger,
             loop_config=config,
             run_one_attempt=_never_run,
@@ -655,7 +655,7 @@ def test_consecutive_idle_polls_print_no_ready_issue_once(
 
         # Going idle again (a later loop) prints it once more.
         assert run_worker_loop(
-            tracker=_idle_tracker(),
+            inputs=_idle_tracker(), code_host=_idle_tracker(),
             ledger=ledger,
             loop_config=config,
             run_one_attempt=_never_run,
@@ -697,7 +697,7 @@ def test_selection_prints_issue_number_then_idle_prints_once(
             )
 
         assert run_worker_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=config,
             run_one_attempt=_finish,

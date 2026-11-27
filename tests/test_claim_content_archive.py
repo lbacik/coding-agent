@@ -208,7 +208,7 @@ def test_blobs_flushed_before_dependent_ledger_transaction(tmp_path: Path) -> No
             patched.setattr(
                 attempt_archives, "store_content_blobs", _recording
             )
-            claimed = sweep_and_claim(tracker, ledger, config)
+            claimed = sweep_and_claim(tracker, tracker, ledger, config)
         assert isinstance(claimed, ConfirmedClaim)
         assert seen_ledger_row["saw"] is False
         assert blobs_at_archive_time
@@ -319,7 +319,7 @@ def test_not_delivered_excluded_but_digest_pinned(tmp_path: Path) -> None:
     try:
         tracker = _tracker_with_issue()
         config = _config(tracker, record, prompt_texts, deliveries, components)
-        claimed = sweep_and_claim(tracker, ledger, config)
+        claimed = sweep_and_claim(tracker, tracker, ledger, config)
         assert isinstance(claimed, ConfirmedClaim)
         archive = _archive_for(tmp_path, claimed.attempt_id)
         assert not (archive / "content" / secret_digest).exists()
@@ -357,7 +357,7 @@ def test_crash_before_archive_leaves_no_attempt_row(tmp_path: Path) -> None:
         with monkeypatch.context() as patched:
             patched.setattr(attempt_archives, "store_content_blobs", _failing)
             with pytest.raises(OSError):
-                sweep_and_claim(tracker, ledger, config)
+                sweep_and_claim(tracker, tracker, ledger, config)
         assert not ledger.has_attempt("implement#42/1")
         assert ledger.unfinished_attempts() == ()
     finally:
@@ -382,7 +382,7 @@ def test_crash_after_archive_leaves_orphans_but_confirmed_claim_is_whole(
         prompt_texts, deliveries, components = _startup_bytes()
         effective = _effective_with_index(prompt_texts, deliveries, components)
         config = _config(tracker, effective, prompt_texts, deliveries, components)
-        claimed = sweep_and_claim(tracker, ledger, config)
+        claimed = sweep_and_claim(tracker, tracker, ledger, config)
         assert isinstance(claimed, ConfirmedClaim)
         # The orphan is still there and permitted.
         assert (orphan_archive / "content" / _digest(b"orphan bytes")).is_file()
@@ -407,7 +407,7 @@ def test_claim_intent_assignment_ordering_unchanged(tmp_path: Path) -> None:
         prompt_texts, deliveries, components = _startup_bytes()
         effective = _effective_with_index(prompt_texts, deliveries, components)
         config = _config(tracker, effective, prompt_texts, deliveries, components)
-        claimed = sweep_and_claim(tracker, ledger, config)
+        claimed = sweep_and_claim(tracker, tracker, ledger, config)
         assert isinstance(claimed, ConfirmedClaim)
         names = tracker.call_names()
         assert names.index("assign_input") < names.index("post_claim_comment")
@@ -440,7 +440,7 @@ def test_legacy_claim_without_bytes_archives_nothing(tmp_path: Path) -> None:
             agent_id=tracker.agent_id,
             effective_configuration={"workflow": "implement"},
         )
-        claimed = sweep_and_claim(tracker, ledger, config)
+        claimed = sweep_and_claim(tracker, tracker, ledger, config)
         assert isinstance(claimed, ConfirmedClaim)
     finally:
         ledger.close()

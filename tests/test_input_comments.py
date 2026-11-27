@@ -569,7 +569,7 @@ def test_declared_claim_pins_records_and_archives(
     try:
         tracker = _claim_tracker()
         claimed = sweep_and_claim(
-            tracker, ledger, _claim_config(tracker, comments_declared=True)
+            tracker, tracker, ledger, _claim_config(tracker, comments_declared=True)
         )
         assert isinstance(claimed, ConfirmedClaim)
         assert [comment.comment_id for comment in claimed.pinned_comments] == [1, 2, 3, 6]
@@ -620,7 +620,7 @@ def test_undeclared_claim_reads_no_comment_pin(tmp_path: Path) -> None:
         tracker = _claim_tracker()
         before = _archive_files(tmp_path)
         claimed = sweep_and_claim(
-            tracker, ledger, _claim_config(tracker, comments_declared=False)
+            tracker, tracker, ledger, _claim_config(tracker, comments_declared=False)
         )
         assert isinstance(claimed, ConfirmedClaim)
         assert claimed.pinned_comments == ()
@@ -649,7 +649,7 @@ def test_unreadable_comments_release_the_claim(tmp_path: Path) -> None:
         # that fails.
         tracker.owner_calls = 1
         released = attempt_claim(
-            tracker,
+            tracker, tracker,
             ledger,
             _claim_config(tracker, comments_declared=True),
             _claim_issue(),
@@ -670,7 +670,7 @@ def test_post_claim_comment_is_neither_drift_nor_seen(
     try:
         tracker = _claim_tracker()
         claimed = sweep_and_claim(
-            tracker, ledger, _claim_config(tracker, comments_declared=True)
+            tracker, tracker, ledger, _claim_config(tracker, comments_declared=True)
         )
         assert isinstance(claimed, ConfirmedClaim)
         tracker.comments.append(
@@ -709,7 +709,7 @@ def test_continuation_pins_afresh_at_its_own_claim(tmp_path: Path) -> None:
     try:
         tracker = _claim_tracker()
         claimed = sweep_and_claim(
-            tracker, ledger, _claim_config(tracker, comments_declared=True)
+            tracker, tracker, ledger, _claim_config(tracker, comments_declared=True)
         )
         assert isinstance(claimed, ConfirmedClaim)
         tracker.comments.append(

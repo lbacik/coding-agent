@@ -253,7 +253,7 @@ def test_offer_replaces_configured_end_labels(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -281,7 +281,7 @@ def test_exhausted_offer_keeps_configured_labels(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -307,7 +307,7 @@ def test_diagnostic_keeps_configured_labels(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -334,7 +334,7 @@ def test_missing_offer_on_eligible_end_records_missing_handoff(
     tracker.inputs[NUMBER] = _issue()
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -359,7 +359,7 @@ def test_missing_offer_on_ordinary_end_stays_ordinary(ledger: RunLedger) -> None
     tracker.inputs[NUMBER] = _issue()
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -384,7 +384,7 @@ def test_offer_on_completed_outcome_keeps_configured_labels(
     tracker.inputs[NUMBER] = _issue()
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -412,7 +412,7 @@ def test_replay_reapplies_the_stored_pickup_label(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -426,7 +426,7 @@ def test_replay_reapplies_the_stored_pickup_label(ledger: RunLedger) -> None:
 
     comments_before = len(tracker.comments)
     finalised = finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -452,7 +452,7 @@ def test_replay_ignores_the_passed_handoff(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -464,7 +464,7 @@ def test_replay_ignores_the_passed_handoff(ledger: RunLedger) -> None:
     assert recorded is not None
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -488,7 +488,7 @@ def test_replay_of_exhausted_record_uses_configured_labels(
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -498,7 +498,7 @@ def test_replay_of_exhausted_record_uses_configured_labels(
     )
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -554,7 +554,7 @@ def test_crash_between_comment_and_pickup_replays_same_offer(
     tracker.inputs[NUMBER] = _issue()
     with pytest.raises(RuntimeError, match="crash between comment and pickup"):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -565,7 +565,7 @@ def test_crash_between_comment_and_pickup_replays_same_offer(
     tracker.crashing = False
 
     finalised = finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -604,7 +604,7 @@ def test_crash_before_comment_records_once_and_replays(ledger: RunLedger) -> Non
     tracker.inputs[NUMBER] = _issue()
     with pytest.raises(RuntimeError, match="crash before the terminal comment"):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -615,7 +615,7 @@ def test_crash_before_comment_records_once_and_replays(ledger: RunLedger) -> Non
     tracker.crashing = False
 
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -641,7 +641,7 @@ def test_eligible_labels_for_unfinished(
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),

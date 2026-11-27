@@ -269,7 +269,7 @@ def test_priority_claimed_first_completes_command_and_clears_projection(
     assert pending is not None
     assert pending.request_id == "req-new"
 
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=pending)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending)
 
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 41
@@ -298,7 +298,7 @@ def test_priority_absent_resolves_and_claims_normal(
     pending = ledger.pending_next_command()
     assert pending is not None
 
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=pending)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending)
 
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 40
@@ -319,7 +319,7 @@ def test_priority_guarded_resolves_with_reason_and_claims_normal(
     pending = ledger.pending_next_command()
     assert pending is not None
 
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=pending)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending)
 
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 40
@@ -361,7 +361,7 @@ def test_priority_readback_race_releases_resolves_and_claims_normal(
     pending = ledger.pending_next_command()
     assert pending is not None
 
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=pending)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending)
 
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 7
@@ -388,7 +388,7 @@ def test_priority_head_missing_releases_resolves_and_claims_normal(
     assert pending is not None
 
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker, input_type="pull-request", label=PR_LABEL),
         priority=pending,
@@ -415,7 +415,7 @@ def test_priority_invalid_issue_resolves_and_claims_normal(
     pending = ledger.pending_next_command()
     assert pending is not None
 
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=pending)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending)
 
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 40
@@ -436,7 +436,7 @@ def test_intake_closed_keeps_priority_pending_then_resume_settles(
     pending = ledger.pending_next_command()
     assert pending is not None
 
-    assert sweep_and_claim(tracker, ledger, _config(tracker), priority=pending) is None
+    assert sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending) is None
 
     assert not ledger.has_unfinished_attempt()
     stored = _read_command(ledger, "req-closed")
@@ -448,7 +448,7 @@ def test_intake_closed_keeps_priority_pending_then_resume_settles(
     _commit(ledger, request_id="req-resume", issue=0, kind="resume")
     pending = ledger.pending_next_command()
     assert pending is not None
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=pending)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending)
 
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 41
@@ -518,7 +518,7 @@ def test_finalize_after_confirm_leaves_newer_priority_pending(
     tracker.labeled_events[(44, LABEL)] = _human_event(44)
     pending = ledger.pending_next_command()
     assert pending is not None
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=pending)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=pending)
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 44
     first = _read_command(ledger, "req-first")
@@ -598,7 +598,7 @@ def test_worker_loop_tries_priority_first(
 
     workflow = _loop_workflow()
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=WorkerLoopConfig(
             claim_config=ClaimConfig(

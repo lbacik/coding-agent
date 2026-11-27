@@ -49,7 +49,12 @@ from coding_agent.inputs.claim import (
 from coding_agent.attempt_id import AttemptId
 from coding_agent.inputs.gates import GateResult, check_gate
 from coding_agent.inputs.pinning import PinnedInput
-from coding_agent.inputs.port import InputType, StepTrackerPort, TrackedInput
+from coding_agent.inputs.port import (
+    CodeHostPort,
+    InputPort,
+    InputType,
+    TrackedInput,
+)
 from coding_agent.ledger.store import AttemptPin, RunLedger
 from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
 from coding_agent.workflow.effective import (
@@ -301,7 +306,8 @@ def _pin_to_input(pin: AttemptPin) -> PinnedInput:
 
 
 def _recovery_gate(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     pin: PinnedInput,
     *,
     selection_label: str,
@@ -310,9 +316,9 @@ def _recovery_gate(
     """The restart Gate over the live input and the Claim pin (§7.3, §16.1)."""
 
     def gate() -> GateResult:
-        current: TrackedInput = tracker.fetch_input(pin.input_number, pin.input_type)
+        current: TrackedInput = inputs.fetch_input(pin.input_number, pin.input_type)
         try:
-            base_tip_now: str | None = tracker.fetch_base_tip(base_branch)
+            base_tip_now: str | None = code_host.fetch_base_tip(base_branch)
         except Exception:
             base_tip_now = None
         return check_gate(
@@ -327,7 +333,8 @@ def _recovery_gate(
 
 def recover_unfinished_step_attempts(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     workflow: Workflow,
 ) -> StepRecoverySummary:
@@ -410,7 +417,8 @@ def recover_unfinished_step_attempts(
             input_type = pin.input_type
         if record.state == "open":
             recover_unconfirmed_attempt(
-                tracker=tracker,
+                inputs=inputs,
+                code_host=code_host,
                 ledger=ledger,
                 attempt_id=record.attempt_id,
                 number=number,
@@ -423,13 +431,15 @@ def recover_unfinished_step_attempts(
             gate: GateCheck | None = None
             if pin is not None:
                 gate = _recovery_gate(
-                    tracker,
+                    inputs,
+                    code_host,
                     pin,
                     selection_label=selection_label,
                     base_branch=base_branch,
                 )
             recover_attempt(
-                tracker=tracker,
+                inputs=inputs,
+                code_host=code_host,
                 ledger=ledger,
                 attempt_id=record.attempt_id,
                 number=number,
@@ -445,7 +455,8 @@ def recover_unfinished_step_attempts(
             gate_result: GateResult | None = None
         else:
             pre_gate = _recovery_gate(
-                tracker,
+                inputs,
+                code_host,
                 pin,
                 selection_label=selection_label,
                 base_branch=base_branch,
@@ -460,7 +471,8 @@ def recover_unfinished_step_attempts(
         else:
             attempt_decision = Interrupted(reason=restart.reason)
         recover_attempt(
-            tracker=tracker,
+            inputs=inputs,
+            code_host=code_host,
             ledger=ledger,
             attempt_id=record.attempt_id,
             number=number,
@@ -548,7 +560,8 @@ def checkpoint_or_ignore(ledger: RunLedger) -> None:
 
 def _poll_loop(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     loop_config: WorkerLoopConfig,
     run_one_attempt: Callable[[ConfirmedClaim], WorkflowResult],
@@ -668,7 +681,8 @@ def _poll_loop(
             # from the settled ledger state.
             try:
                 summary = recover_unfinished_step_attempts(
-                    tracker=tracker,
+                    inputs=inputs,
+                    code_host=code_host,
                     ledger=ledger,
                     workflow=loop_config.workflow,
                 )
@@ -770,7 +784,8 @@ def _poll_loop(
         priority = ledger.pending_next_command()
         try:
             claimed = sweep_and_claim(
-                tracker,
+                inputs,
+                code_host,
                 ledger,
                 loop_config.claim_config,
                 priority=priority,
@@ -859,7 +874,8 @@ def _poll_loop(
             # so restart recovery finishes its terminal writes after the
             # credential is fixed (REC-17).
             finish_attempt(
-                tracker=tracker,
+                inputs=inputs,
+                code_host=code_host,
                 ledger=ledger,
                 attempt_id=claimed.attempt_id,
                 target=FinalisationTarget(
@@ -903,7 +919,8 @@ def _poll_loop(
             infra_reason = f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)} {exc}"
             try:
                 finish_attempt(
-                    tracker=tracker,
+                    inputs=inputs,
+                    code_host=code_host,
                     ledger=ledger,
                     attempt_id=claimed.attempt_id,
                     target=FinalisationTarget(
@@ -963,7 +980,8 @@ def _poll_loop(
             )
             try:
                 finish_attempt(
-                    tracker=tracker,
+                    inputs=inputs,
+                    code_host=code_host,
                     ledger=ledger,
                     attempt_id=claimed.attempt_id,
                     target=FinalisationTarget(
@@ -1031,7 +1049,8 @@ def _poll_loop(
             )
             try:
                 finish_attempt(
-                    tracker=tracker,
+                    inputs=inputs,
+                    code_host=code_host,
                     ledger=ledger,
                     attempt_id=claimed.attempt_id,
                     target=FinalisationTarget(
@@ -1162,7 +1181,8 @@ def _poll_loop(
 
 def run_worker_loop(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     loop_config: WorkerLoopConfig,
     run_one_attempt: Callable[[ConfirmedClaim], WorkflowResult],
@@ -1182,7 +1202,8 @@ def run_worker_loop(
     """
     try:
         return _poll_loop(
-            tracker=tracker,
+            inputs=inputs,
+            code_host=code_host,
             ledger=ledger,
             loop_config=loop_config,
             run_one_attempt=run_one_attempt,

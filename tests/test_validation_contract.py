@@ -697,7 +697,7 @@ def test_profile_unavailable_ends_attempt_and_halts(
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(workflow),
         run_one_attempt=run_one,
@@ -730,7 +730,7 @@ def test_unexpected_escape_ends_attempt_and_keeps_polling(
         raise ValueError("boom")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -762,7 +762,7 @@ def test_three_unexpected_escapes_halt(
         raise ValueError("boom")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,

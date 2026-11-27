@@ -551,7 +551,7 @@ def test_startup_reconciliation_runs_before_first_claim(tmp_path: Path) -> None:
         tracker = FakeStepTracker(agent_login="owner")
         tracker.inputs.clear()
         worker_run._poll_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=_loop_config(),
             run_one_attempt=_never_run,
@@ -942,7 +942,7 @@ def test_startup_reconciliation_retries_on_later_sweeps(
         tracker = FakeStepTracker(agent_login="owner")
         tracker.inputs.clear()
         worker_run._poll_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=_loop_config(),
             run_one_attempt=_never_run,

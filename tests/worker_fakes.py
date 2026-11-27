@@ -42,7 +42,7 @@ from coding_agent.inputs.authorisation import IdentityMode, detect_identity_mode
 from coding_agent.inputs.github import (
     fetch_repository_file as _fetch_repository_file,
 )
-from coding_agent.inputs.port import StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort
 from coding_agent.provider.capability import (
     CapabilityAssertionResult,
     ProviderCapabilityReport,
@@ -161,7 +161,7 @@ class FakeCodeHostPort:
         repo: str,
         token: str,
         identity: Identity,
-    ) -> StepTrackerPort:
+    ) -> CodeHostPort:
         """Hand out the configured tracker, recording the startup facts."""
         self.tracker_calls.append(
             {"owner": owner, "repo": repo, "token": token, "identity": identity}
@@ -188,7 +188,7 @@ class FakeCodeHostPort:
 
     def resolve_identity_mode(
         self,
-        tracker: StepTrackerPort,
+        tracker: CodeHostPort,
         identity: Identity,
     ) -> IdentityMode:
         """Resolve the owner through the tracker, then detect the mode."""

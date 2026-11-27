@@ -205,7 +205,7 @@ def test_each_decision_records_once_with_terminal_writes(
         tracker.inputs[NUMBER] = _issue()
         _open_attempt(ledger, attempt)
         finalised = finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=attempt,
             target=_target(),
@@ -236,7 +236,7 @@ def test_pin_violation_comment_carries_the_detail(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -255,7 +255,7 @@ def test_interrupted_decision_closes_open_executions(ledger: RunLedger) -> None:
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "work", 1, entry_result="start")
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -311,7 +311,7 @@ def test_recorded_outcome_predates_first_tracker_write(
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -352,7 +352,7 @@ def test_crash_between_record_and_publish_replays_same_bytes(
     ledger.set_attempt_state(ATTEMPT, "claim-confirmed")
     with pytest.raises(RuntimeError, match="crash between the record"):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -381,7 +381,7 @@ def test_crash_between_record_and_publish_replays_same_bytes(
     # same bytes and no second terminal comment.
     tracker.crashing = False
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -420,7 +420,7 @@ def test_recorded_workflow_end_is_recovered_with_its_category(
     )
     assert ledger.get_outcome(ATTEMPT) is None
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -465,7 +465,7 @@ def test_refuses_an_attempt_with_an_unsettled_effect_intent(
     )
     with pytest.raises(UnsettledEffectsError):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -476,7 +476,7 @@ def test_refuses_an_attempt_with_an_unsettled_effect_intent(
     # The Credential Failure records without settling: recovery finishes the
     # terminal writes after the credential is fixed (REC-17).
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -497,7 +497,7 @@ def test_credential_failure_records_without_terminal_writes(
     _open_attempt(ledger)
     ledger.set_attempt_state(ATTEMPT, "claim-confirmed")
     finalised = finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -518,7 +518,7 @@ def test_credential_failure_records_without_terminal_writes(
     assert ledger.get_attempt(ATTEMPT).state == "outcome-recorded"
     # Recovery finishes the recorded row with its terminal writes.
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -540,7 +540,7 @@ def test_end_labels_follow_the_recorded_outcome(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -559,7 +559,7 @@ def test_end_labels_follow_the_recorded_outcome(ledger: RunLedger) -> None:
     second = FakeStepTracker()
     second.inputs[NUMBER] = _issue(labels=("needs-human",))
     finalised = finish_attempt(
-        tracker=second,
+        inputs=second, code_host=second,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),

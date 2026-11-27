@@ -42,7 +42,7 @@ from coding_agent.inputs.errors import (
     StepTrackerError,
 )
 from coding_agent.inputs.gates import GateResult
-from coding_agent.inputs.port import InputType, StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.inputs.retry import (
     INITIAL_BACKOFF_SECONDS,
     MAX_IN_PLACE_ATTEMPTS,
@@ -152,7 +152,8 @@ def _transient_exhaustion_error(
 
 def drive_effect(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     step_id: str,
@@ -205,7 +206,7 @@ def drive_effect(
         attempt_id, step_id, seq, ordinal, kind=module.marker_kind
     )
     try:
-        existing = module.find(tracker, ctx, target, marker)
+        existing = module.find(inputs, code_host, ctx, target, marker)
     except CredentialFailure:
         raise
     except Exception as exc:
@@ -217,7 +218,7 @@ def drive_effect(
         )
         return Landed(remote_id=remote, effect=existing)
     try:
-        precondition = module.check(tracker, ctx, target)
+        precondition = module.check(inputs, code_host, ctx, target)
     except CredentialFailure:
         raise
     except Exception as exc:
@@ -246,7 +247,7 @@ def drive_effect(
     waited_seconds = 0.0
     while True:
         try:
-            written = module.perform(tracker, ctx, target, body)
+            written = module.perform(inputs, code_host, ctx, target, body)
         except CredentialFailure:
             raise
         except Exception as exc:
@@ -265,7 +266,7 @@ def drive_effect(
             sleep(delay)
             waited_seconds += delay
             try:
-                existing = module.find(tracker, ctx, target, marker)
+                existing = module.find(inputs, code_host, ctx, target, marker)
             except CredentialFailure:
                 raise
             except Exception as find_exc:

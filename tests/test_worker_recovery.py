@@ -277,7 +277,7 @@ def test_rec_10_crash_before_confirmation_releases_with_no_terminal_outcome(
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     summary = recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow()
+        inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
     )
 
     assert summary.settled == ("implement#7/1",)
@@ -291,10 +291,10 @@ def test_rec_10_the_input_is_claimable_as_n_plus_one(ledger: RunLedger) -> None:
     ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow()
+        inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
     )
 
-    claimed = sweep_and_claim(tracker=tracker, ledger=ledger, config=_claim_config())
+    claimed = sweep_and_claim(inputs=tracker, code_host=tracker, ledger=ledger, config=_claim_config())
 
     assert isinstance(claimed, ConfirmedClaim)
     assert (claimed.attempt_id, claimed.n) == ("implement#7/2", 2)
@@ -326,7 +326,7 @@ def test_rec_10_through_the_claim_halt_path(ledger: RunLedger) -> None:
     failing.labeled_events.update(tracker.labeled_events)
 
     halted = run_worker_loop(
-        tracker=failing,
+        inputs=failing, code_host=failing,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_stub_run(ledger, ran),
@@ -339,7 +339,7 @@ def test_rec_10_through_the_claim_halt_path(ledger: RunLedger) -> None:
     assert ran == []
 
     restarted = run_worker_loop(
-        tracker=failing,
+        inputs=failing, code_host=failing,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(failing, _stub_run(ledger, ran)),
@@ -368,7 +368,7 @@ def test_rec_12_process_loss_ends_interrupted_with_terminal_writes(
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,
@@ -395,7 +395,7 @@ def test_rec_12_a_withdrawn_input_ends_withdrawn(ledger: RunLedger) -> None:
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,
@@ -417,7 +417,7 @@ def test_rec_12_drift_ends_drift(ledger: RunLedger) -> None:
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,
@@ -443,7 +443,7 @@ def test_rec_12_a_recorded_outcome_is_finished_as_recorded(
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,
@@ -511,7 +511,7 @@ def test_rec_17_a_credential_failure_records_and_propagates(
 
     with pytest.raises(CredentialFailure):
         recover_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id="implement#7/1",
             number=7,
@@ -561,7 +561,7 @@ def test_another_workflows_attempt_stays_pending_with_intake_closed(
     its Attempts are left pending and reported."""
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         ClaimConfig(
             workflow_id="review",
@@ -576,7 +576,7 @@ def test_another_workflows_attempt_stays_pending_with_intake_closed(
     assert isinstance(claimed, ConfirmedClaim)
 
     summary = recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow()
+        inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
     )
 
     assert summary.settled == ()
@@ -590,12 +590,12 @@ def test_startup_settles_an_unfinished_attempt_before_selecting(
     """Startup recovery precedes selection: the restart settles the
     unfinished Attempt first, then idles with nothing left to claim."""
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
-    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    claimed = sweep_and_claim(tracker, tracker, ledger, _claim_config())
     assert isinstance(claimed, ConfirmedClaim)
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(tracker, _stub_run(ledger, ran)),
@@ -618,7 +618,7 @@ def test_rec_11_a_legacy_attempt_refuses_recovery(ledger: RunLedger) -> None:
 
     with pytest.raises(LegacyAttemptRefused):
         recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
 
     assert tracker.calls == []
@@ -634,7 +634,7 @@ def test_rec_11_a_legacy_halt_leaves_the_ledger_untouched(
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_stub_run(ledger, ran),
@@ -697,7 +697,7 @@ def test_rec_18_three_consecutive_recovery_failures_halt(
 ) -> None:
     """REC-18: the failed recovery write is retried each poll; the third halts."""
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
-    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    claimed = sweep_and_claim(tracker, tracker, ledger, _claim_config())
     assert isinstance(claimed, ConfirmedClaim)
     # Back to an unconfirmed Claim: recovery must release it (unassign).
     ledger.set_attempt_state(claimed.attempt_id, "open")
@@ -705,7 +705,7 @@ def test_rec_18_three_consecutive_recovery_failures_halt(
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=failing,
+        inputs=failing, code_host=failing,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_stub_run(ledger, ran),
@@ -723,14 +723,14 @@ def test_rec_18_a_success_resets_the_failure_count(ledger: RunLedger) -> None:
     """REC-18: two failed writes then a settled recovery — no halt, and the
     input is claimed as ``#N/2`` on the same run."""
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
-    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    claimed = sweep_and_claim(tracker, tracker, ledger, _claim_config())
     assert isinstance(claimed, ConfirmedClaim)
     ledger.set_attempt_state(claimed.attempt_id, "open")
     failing = _failing_release_tracker(tracker, [1, 1])
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=failing,
+        inputs=failing, code_host=failing,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(failing, _stub_run(ledger, ran)),
@@ -756,7 +756,7 @@ def test_settle_open_step_effects_with_no_intents_settles_nothing(
     ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
 
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,
@@ -774,7 +774,7 @@ def test_recover_unconfirmed_attempt_releases_without_terminal_writes(
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     recovered = recover_unconfirmed_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,
@@ -852,7 +852,7 @@ def test_recovery_leaves_a_scripted_model_untouched(ledger: RunLedger) -> None:
     model = ScriptedModel([])
 
     recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow()
+        inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
     )
 
     assert model.invocations == []
@@ -864,12 +864,12 @@ def test_startup_recovery_reports_settled_attempts(
 ) -> None:
     """The restart names the Attempts it settled on stderr."""
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
-    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    claimed = sweep_and_claim(tracker, tracker, ledger, _claim_config())
     assert isinstance(claimed, ConfirmedClaim)
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(tracker, _stub_run(ledger, ran)),

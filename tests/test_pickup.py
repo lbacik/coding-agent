@@ -354,7 +354,7 @@ def test_pickup_claim_pins_recorded_revision_and_evidence(
     source = _seed_offer(tracker, _offer())
     assert tracker.base_tip != BASE
     claimed = attempt_pickup_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         _pickup_config(tracker),
@@ -388,7 +388,7 @@ def test_pickup_sweep_runs_ahead_of_selection(
     )
     _seed_offer(tracker, _offer())
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         pickup=_pickup_config(tracker),
@@ -404,7 +404,7 @@ def test_exhausted_offer_falls_back_to_selection(
     """An exhausted signal stays ineligible with both labels present."""
     _seed_offer(tracker, _offer(used=2, limit=2, exhausted=True))
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         pickup=_pickup_config(tracker),
@@ -422,7 +422,7 @@ def test_replaced_offer_falls_back_to_selection(
     _seed_offer(tracker, _offer())
     _trusted_comment(tracker, f"{WORKFLOW}#9/2", None)
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         pickup=_pickup_config(tracker),
@@ -453,7 +453,7 @@ def test_readback_replacement_releases_the_claim(
     tracker.list_comments = _appending_list  # type: ignore[method-assign]
     try:
         claimed = attempt_pickup_claim(
-            tracker,
+            tracker, tracker,
             ledger,
             _claim_config(tracker),
             _pickup_config(tracker),
@@ -476,7 +476,7 @@ def test_pickup_ignored_for_pull_request_inputs(
     config = _claim_config(tracker)
     config = replace(config, input_type="pull-request")
     claimed = sweep_and_claim(
-        tracker, ledger, config, pickup=_pickup_config(tracker)
+        tracker, tracker, ledger, config, pickup=_pickup_config(tracker)
     )
     assert claimed is None
 
@@ -487,7 +487,7 @@ def test_misconfigured_pickup_keeps_selection(
     """A non-positive pickup limit leaves the ordinary selection path alone."""
     _seed_offer(tracker, _offer())
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         pickup=_pickup_config(tracker, limit=0),
@@ -502,7 +502,7 @@ def test_pickup_priority_issue_still_confirms(
     """A ``next issue N`` reorder over the pickup issue still confirms it."""
     _seed_offer(tracker, _offer())
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         priority=9,

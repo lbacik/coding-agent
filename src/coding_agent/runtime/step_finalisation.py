@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from coding_agent.inputs.comments import SelectedComment
 
 from coding_agent.inputs.claim import attempt_finished_in_ledger
-from coding_agent.inputs.port import InputType, StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.ledger.store import (
     STEP_EFFECT_STATUS_INTENT,
     STEP_TRANSITION_END,
@@ -151,7 +151,7 @@ def render_comments_disclosure(late: Sequence[SelectedComment]) -> str:
 
 
 def late_trusted_comments(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     *,
     attempt_id: str,
@@ -175,7 +175,7 @@ def late_trusted_comments(
     pinned = ledger.get_pinned_comments(attempt_id) or []
     pinned_ids = {comment.comment_id for comment in pinned}
     try:
-        live = tracker.list_comments(number, input_type)
+        live = inputs.list_comments(number, input_type)
     except Exception:
         return []
     return new_trusted_comments(
@@ -184,7 +184,7 @@ def late_trusted_comments(
         issue_author_id=stored.issue_author_id,
         owner_id=stored.owner_id,
         agent_id=stored.agent_id,
-        agent_login=tracker.agent_login,
+        agent_login=inputs.agent_login,
     )
 
 
@@ -380,17 +380,17 @@ def count_uncommitted_files(workspace: Path) -> int:
 
 
 def _tracker_comments(
-    tracker: StepTrackerPort, number: int, input_type: InputType
+    inputs: InputPort, number: int, input_type: InputType
 ) -> list[object]:
     try:
-        result = tracker.list_comments(number, input_type)
+        result = inputs.list_comments(number, input_type)
     except Exception:
         return []
     return list(result)
 
 
 def other_claim_in_force(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -409,11 +409,11 @@ def other_claim_in_force(
     from coding_agent.inputs.numbering import parse_attempt_marker
     from coding_agent.inputs.port import InputComment
 
-    comments = _tracker_comments(tracker, number, input_type)
+    comments = _tracker_comments(inputs, number, input_type)
     narrowed: list[InputComment] = [
         comment for comment in comments if isinstance(comment, InputComment)
     ]
-    trusted: set[str] = trusted_terminal_attempt_ids(narrowed, tracker.agent_id)
+    trusted: set[str] = trusted_terminal_attempt_ids(narrowed, inputs.agent_id)
     for comment in comments:
         body = getattr(comment, "body", "")
         if not isinstance(body, str) or "kind=claim" not in body:
@@ -515,7 +515,7 @@ def _has_terminal_intent(
 
 
 def _remote_labels_and_assignees(
-    tracker: StepTrackerPort, number: int, input_type: InputType
+    inputs: InputPort, number: int, input_type: InputType
 ) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
     """Best-effort read-back of the input's labels and assignees (§14.2).
 
@@ -526,7 +526,7 @@ def _remote_labels_and_assignees(
     from coding_agent.inputs.errors import CredentialFailure as _CredentialFailure
 
     try:
-        current = tracker.fetch_input(number, input_type)
+        current = inputs.fetch_input(number, input_type)
     except _CredentialFailure:
         raise
     except Exception:
@@ -602,7 +602,8 @@ def _resolve_terminal_plan(
 
 def perform_terminal_writes(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     number: int,
@@ -632,7 +633,8 @@ def perform_terminal_writes(
             if _has_terminal_receipt(ledger, attempt_id, TERMINAL_COMMENT_ORDINAL):
                 continue
             outcome = drive_effect(
-                tracker=tracker,
+                inputs=inputs,
+                code_host=code_host,
                 ledger=ledger,
                 attempt_id=attempt_id,
                 step_id=FINALISATION_STEP,
@@ -665,13 +667,13 @@ def perform_terminal_writes(
                 {"terminal-write": "remove-selection-label", "label": selection_label},
             )
             if retrying:
-                labels, _ = _remote_labels_and_assignees(tracker, number, input_type)
+                labels, _ = _remote_labels_and_assignees(inputs, number, input_type)
                 if labels is not None and selection_label not in labels:
                     _record_terminal_receipt(
                         ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL, selection_label
                     )
                     continue
-            tracker.remove_label(number, input_type, selection_label)
+            inputs.remove_label(number, input_type, selection_label)
             _record_terminal_receipt(
                 ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL, selection_label
             )
@@ -695,7 +697,7 @@ def perform_terminal_writes(
                 )
                 continue
             if retrying:
-                labels, _ = _remote_labels_and_assignees(tracker, number, input_type)
+                labels, _ = _remote_labels_and_assignees(inputs, number, input_type)
                 if labels is not None and all(
                     label in labels for label in safe_end_labels
                 ):
@@ -706,7 +708,7 @@ def perform_terminal_writes(
                         ",".join(safe_end_labels),
                     )
                     continue
-            tracker.add_labels(number, input_type, safe_end_labels)
+            inputs.add_labels(number, input_type, safe_end_labels)
             _record_terminal_receipt(
                 ledger, attempt_id, ADD_END_LABELS_ORDINAL, ",".join(safe_end_labels)
             )
@@ -723,23 +725,23 @@ def perform_terminal_writes(
                 "release assignment",
                 {"terminal-write": "release-assignment"},
             )
-            if other_claim_in_force(tracker, ledger, attempt_id, number, input_type):
+            if other_claim_in_force(inputs, ledger, attempt_id, number, input_type):
                 _record_terminal_receipt(
-                    ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, tracker.agent_login
+                    ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, inputs.agent_login
                 )
                 continue
             if retrying:
                 _, assignees = _remote_labels_and_assignees(
-                    tracker, number, input_type
+                    inputs, number, input_type
                 )
-                if assignees is not None and tracker.agent_login not in assignees:
+                if assignees is not None and inputs.agent_login not in assignees:
                     _record_terminal_receipt(
-                        ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, tracker.agent_login
+                        ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, inputs.agent_login
                     )
                     continue
-            tracker.unassign_input(number, input_type)
+            inputs.unassign_input(number, input_type)
             _record_terminal_receipt(
-                ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, tracker.agent_login
+                ledger, attempt_id, RELEASE_ASSIGNMENT_ORDINAL, inputs.agent_login
             )
         else:
             raise AssertionError(f"unknown terminal write kind: {write_kind!r}")
@@ -1033,7 +1035,8 @@ def _not_performed_summaries(ledger: RunLedger, attempt_id: str) -> list[str]:
 
 def finish_attempt(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     attempt_id: str,
     target: FinalisationTarget,
@@ -1104,7 +1107,8 @@ def finish_attempt(
             if replay_pickup is not None:
                 replay_end_labels = (replay_pickup,)
         perform_terminal_writes(
-            tracker=tracker,
+            inputs=inputs,
+            code_host=code_host,
             ledger=ledger,
             attempt_id=attempt_id,
             number=target.number,
@@ -1146,7 +1150,7 @@ def finish_attempt(
     comments_section = ""
     try:
         late = late_trusted_comments(
-            tracker,
+            inputs,
             ledger,
             attempt_id=attempt_id,
             number=target.number,
@@ -1191,7 +1195,8 @@ def finish_attempt(
     if live_pickup is not None:
         live_end_labels = live_pickup
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=inputs,
+        code_host=code_host,
         ledger=ledger,
         attempt_id=attempt_id,
         number=target.number,

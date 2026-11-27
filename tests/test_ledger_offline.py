@@ -323,7 +323,7 @@ def test_orderly_exit_checkpoints_the_wal_with_truncate(tmp_path: Path) -> None:
             )
 
         exit_code = run_worker_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=_loop_config(),
             run_one_attempt=run_one,
@@ -368,7 +368,7 @@ def test_sigterm_shutdown_checkpoints_the_wal_with_truncate(tmp_path: Path) -> N
             )
 
         exit_code = run_worker_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=_loop_config(),
             run_one_attempt=run_one,

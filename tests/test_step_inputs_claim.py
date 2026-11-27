@@ -134,7 +134,7 @@ def test_issue_claim_confirms_and_pins_from_the_readback(
     tracker: FakeStepTracker, ledger: RunLedger
 ) -> None:
     """INP-14: intent, assignment, Claim Comment, read-back, pin, confirmed."""
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker))
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker))
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.attempt_id == "implement#42/1"
     assert claimed.n == 1
@@ -169,7 +169,7 @@ def test_claim_comment_carries_attempt_id_and_intent_key(
     tracker: FakeStepTracker, ledger: RunLedger
 ) -> None:
     """INP-5, OP-14: the Claim Comment bears kind=claim and the intent key."""
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker))
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker))
     assert isinstance(claimed, ConfirmedClaim)
     body = tracker.comments[-1].body
     assert "implement#42/1" in body
@@ -181,11 +181,11 @@ def test_second_attempt_counts_up_and_never_reuses(
     tracker: FakeStepTracker, ledger: RunLedger
 ) -> None:
     """INP-13: ``implement#42/1``, ``implement#42/2``; ``review#42/1`` apart."""
-    first = sweep_and_claim(tracker, ledger, _config(tracker))
+    first = sweep_and_claim(tracker, tracker, ledger, _config(tracker))
     assert isinstance(first, ConfirmedClaim)
     ledger.set_attempt_state(first.attempt_id, "finished")
     tracker.inputs[42] = _issue_input(assignees=())
-    second = sweep_and_claim(tracker, ledger, _config(tracker))
+    second = sweep_and_claim(tracker, tracker, ledger, _config(tracker))
     assert isinstance(second, ConfirmedClaim)
     assert second.attempt_id == "implement#42/2"
 
@@ -199,7 +199,7 @@ def test_second_attempt_counts_up_and_never_reuses(
         created_at="2026-10-01T00:00:00Z",
     )
     review = sweep_and_claim(
-        review_tracker,
+        review_tracker, review_tracker,
         ledger,
         _config(
             review_tracker,
@@ -222,7 +222,7 @@ def test_pull_request_claim_pins_head_and_merge_base(
     tracker.inputs[42] = _pull_input(labels=(LABEL,))
     tracker.labeled_events[(42, LABEL)] = _human_event(42)
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -256,7 +256,7 @@ def test_readback_uses_fresh_facts_not_the_listing(
         )
 
     tracker.on_assign = _rewrite
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker))
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker))
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.pin.body == "the edited body"
 
@@ -273,7 +273,7 @@ def test_bot_label_refused_under_shared_identity(
         actor_type="Bot",
         created_at="2026-10-01T00:00:00Z",
     )
-    assert sweep_and_claim(tracker, ledger, _config(tracker)) is None
+    assert sweep_and_claim(tracker, tracker, ledger, _config(tracker)) is None
     assert tracker.call_names().count("assign_input") == 0
 
 
@@ -289,7 +289,7 @@ def test_agent_identity_label_accepted_under_shared_identity(
         actor_type="User",
         created_at="2026-10-01T00:00:00Z",
     )
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker))
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker))
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.pin.identity_mode == "shared-identity"
 
@@ -305,7 +305,7 @@ def test_agent_identity_label_refused_when_dedicated(
         actor_type="User",
         created_at="2026-10-01T00:00:00Z",
     )
-    assert sweep_and_claim(tracker, ledger, _config(tracker)) is None
+    assert sweep_and_claim(tracker, tracker, ledger, _config(tracker)) is None
 
 
 def test_competing_claim_lowest_comment_id_wins(
@@ -313,13 +313,13 @@ def test_competing_claim_lowest_comment_id_wins(
 ) -> None:
     """INP-5: two Workers, one Agent Identity — the lowest comment id wins."""
     first = attempt_claim(
-        tracker, ledger, _config(tracker), tracker.inputs[42], identity_mode="dedicated"
+        tracker, tracker, ledger, _config(tracker), tracker.inputs[42], identity_mode="dedicated"
     )
     assert isinstance(first, ConfirmedClaim)
 
     second_ledger = RunLedger(ledger.path.parent / "ledger-b.db")
     loser = attempt_claim(
-        tracker,
+        tracker, tracker,
         second_ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -357,7 +357,7 @@ def test_readback_failure_releases_and_cleans_up(
 
     tracker.on_assign = _close
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -394,7 +394,7 @@ def test_other_assignee_at_readback_releases(
 
     tracker.on_assign = _race
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -423,10 +423,10 @@ def test_skip_open_agent_pr_skips_the_issue(
         )
     )
     skipping = _config(tracker, skip_open_agent_pr=True)
-    assert sweep_and_claim(tracker, ledger, skipping) is None
+    assert sweep_and_claim(tracker, tracker, ledger, skipping) is None
     assert tracker.call_names().count("assign_input") == 0
     plain = _config(tracker, skip_open_agent_pr=False)
-    claimed = sweep_and_claim(tracker, ledger, plain)
+    claimed = sweep_and_claim(tracker, tracker, ledger, plain)
     assert isinstance(claimed, ConfirmedClaim)
 
 
@@ -438,7 +438,7 @@ def test_priority_input_claimed_first_under_same_guards(
         number=7, created_at="2026-09-01T00:00:00Z", body="older"
     )
     tracker.labeled_events[(7, LABEL)] = _human_event(7)
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=42)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=42)
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 42
 
@@ -458,7 +458,7 @@ def test_guarded_priority_falls_back_to_order(
         actor_type="Bot",
         created_at="2026-10-01T00:00:00Z",
     )
-    claimed = sweep_and_claim(tracker, ledger, _config(tracker), priority=42)
+    claimed = sweep_and_claim(tracker, tracker, ledger, _config(tracker), priority=42)
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 7
 
@@ -468,12 +468,12 @@ def test_check_eligibility_applies_the_same_guards(
 ) -> None:
     """INP-12: eligibility reads fresh and never claims."""
     assert (
-        check_eligibility(tracker, ledger, _config(tracker), 42, identity_mode="dedicated")
+        check_eligibility(tracker, tracker, ledger, _config(tracker), 42, identity_mode="dedicated")
         is None
     )
     assert tracker.call_names().count("assign_input") == 0
     assert (
-        check_eligibility(tracker, ledger, _config(tracker), 404, identity_mode="dedicated")
+        check_eligibility(tracker, tracker, ledger, _config(tracker), 404, identity_mode="dedicated")
         == "selection-label"
     )
 
@@ -532,7 +532,7 @@ def test_next_n_rebuilt_from_marks_where_ledger_lost(
         )
     )
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],

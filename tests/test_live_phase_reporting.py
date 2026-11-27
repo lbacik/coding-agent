@@ -400,7 +400,7 @@ def test_no_live_view_runs_as_before(
 
     with started as ready:
         ready.live = None
-        claimed = sweep_and_claim(tracker, ready.ledger, ready.claim_config)
+        claimed = sweep_and_claim(tracker, tracker, ready.ledger, ready.claim_config)
         assert isinstance(claimed, ConfirmedClaim)
         result = run_attempt(ready, claimed, workflow_runner=_stub_runner)
 
@@ -595,7 +595,7 @@ def test_production_attempt_without_archive_still_writes_transcript(
         )
 
     with started as ready:
-        claimed = sweep_and_claim(tracker, ready.ledger, ready.claim_config)
+        claimed = sweep_and_claim(tracker, tracker, ready.ledger, ready.claim_config)
         assert isinstance(claimed, ConfirmedClaim)
         result = run_attempt(ready, claimed, workflow_runner=_stub_runner)
     assert result.outcome == "completed"
