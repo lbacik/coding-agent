@@ -29,7 +29,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from coding_agent.github.errors import CredentialFailure
+from coding_agent.inputs.errors import CredentialFailure
 from coding_agent.inputs.claim import recover_unconfirmed_claim
 from coding_agent.inputs.gates import GateResult
 from coding_agent.inputs.port import InputType, StepTrackerPort
