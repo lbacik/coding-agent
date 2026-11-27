@@ -99,6 +99,8 @@ from coding_agent.workflow.schema import (
     Workflow,
     WorkflowConfiguration,
     SkillBundleRequirement,
+    default_routes_for_step,
+    result_names_for_step,
 )
 
 ROUND_HANDOFF_FIELDS = frozenset({"pickup-label", "max-automatic-pickups"})
@@ -203,44 +205,6 @@ class Problems:
 
     def __bool__(self) -> bool:
         return bool(self.items)
-
-
-@dataclass
-class WorkflowFacts:
-    """Phase-1 output for one Workflow; phase 2 proves the graph over it."""
-
-    input_type: str | None = None
-    ceiling: dict[str, float] | None = None
-    routes_all: dict[str, dict[str, RouteTarget]] = field(default_factory=dict)
-    required_inputs: dict[str, list[tuple[str, tuple[str, str, str | None]]]] = field(
-        default_factory=dict
-    )
-    reserved_allow: dict[str, dict[str, float]] = field(default_factory=dict)
-    plain_allow: dict[str, dict[str, float]] = field(default_factory=dict)
-    thresholds: dict[str, int] = field(default_factory=dict)
-    """Valid per-step `context-thresholds`: step id -> hard tokens (§3)."""
-    soft_thresholds: dict[str, int] = field(default_factory=dict)
-    """Valid per-step soft bounds: step id -> soft tokens, where configured (§3)."""
-    subagent_steps: set[str] = field(default_factory=set)
-    """Agent steps declaring the `subagents` tool group (pin-default floor)."""
-    advisor_pins: dict[str, str] = field(default_factory=dict)
-    """Advisor pins by step: step id -> `models` id answering its Advisor (§9).
-
-    Present exactly where the step declares both the `advisor` tool group
-    and a valid `agent.advisor` mapping; absent where the Advisor uses the
-    Pinned Model (no other pin) or the declaration is invalid.
-    """
-    agent_steps: set[str] = field(default_factory=set)
-    """Every agent step id: the per-step Admission floor maxima cover them."""
-    start: str | None = None
-    label: str | None = None
-    outcomes: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    note_inputs: dict[str, list[str]] = field(default_factory=dict)
-    """Where the special note input is declared: step id -> `agent.inputs` item paths."""
-    round_handoff: tuple[str, int] | None = None
-    """The validated enablement: (resolved pickup label, positive limit), if present."""
-    round_handoff_annotations: list[tuple[str, str]] = field(default_factory=list)
-    """Every annotated publishing Route: (step id, result key), in route order."""
 
 
 def code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
@@ -676,57 +640,6 @@ def check_payload(
     return parsed
 
 
-# --- Per-step results ------------------------------------------------------------
-
-
-def step_has_threshold_policy(step: Mapping[str, Any]) -> bool:
-    """Whether a raw agent step carries a `context-thresholds` policy (§3).
-
-    Best-effort and shape-only: a mapping value opts the step in even where
-    the policy itself is invalid (the policy fault is recorded separately),
-    so the threshold Routes stay routable and no cascading fault follows.
-    """
-    return "agent" in step and isinstance(step.get("context-thresholds"), dict)
-
-
-def threshold_results_for(step: Mapping[str, Any]) -> tuple[str, ...]:
-    """The threshold Step Results a raw agent step's policy selects (§3).
-
-    The hard spelling wherever the step is opted in, plus the soft spelling
-    where the policy configures ``soft-tokens``; steps without the policy
-    select none here — the spellings stay ordinary business results a legacy
-    step may declare.
-    """
-    control = step.get("context-thresholds")
-    if "agent" not in step or not isinstance(control, dict):
-        return ()
-    if control.get("soft-tokens") is not None:
-        return (HARD_CONTEXT_RESULT, SOFT_CONTEXT_RESULT)
-    return (HARD_CONTEXT_RESULT,)
-
-
-def step_results(step: Mapping[str, Any], input_type: str | None) -> list[str]:
-    """Every result name a step can produce: declared or catalog results plus
-    the runtime-reserved pair (§3)."""
-    if "agent" in step:
-        results: list[str] = []
-        agent = step.get("agent")
-        if isinstance(agent, dict) and isinstance(agent.get("results"), dict):
-            results.extend(str(name) for name in agent["results"])
-        return results + list(RESERVED_RESULTS) + list(threshold_results_for(step))
-    operation = step.get("operation")
-    spec = OPERATIONS.get(operation) if isinstance(operation, str) else None
-    if spec is None:
-        return list(RESERVED_RESULTS)
-    results = list(spec.business)
-    if step.get("operation") == "commit-and-push" and input_type == "pull-request":
-        results.append("stale-head")
-    with_block = step.get("with")
-    if isinstance(with_block, dict) and with_block.get("requires"):
-        results.append("requirement-unmet")
-    return results + list(RESERVED_RESULTS)
-
-
 def parse_round_handoff_annotation(
     problems: Problems, where: str, raw: Any
 ) -> RoundHandoffAnnotation | None:
@@ -833,7 +746,7 @@ def parse_route_target(
 
 def validate_target(
     problems: Problems, data: Mapping[str, Any], base: Path
-) -> dict[str, str | None] | None:
+) -> TargetRepository | None:
     raw = data.get("target")
     mapping = check_keys(
         problems, "target", raw, TARGET_FIELDS, section_required(TargetRepository)
@@ -880,18 +793,18 @@ def validate_target(
         or not profile_ok
     ):
         return None
-    return {
-        "kind": kind,
-        "repository": repository,
-        "base_branch": base_branch,
-        "token_env": token_env,
-        "profile": profile,
-    }
+    return TargetRepository(
+        kind=kind,
+        repository=repository,
+        base_branch=base_branch,
+        token_env=token_env,
+        profile=profile,
+    )
 
 
 def validate_models(
     problems: Problems, data: Mapping[str, Any]
-) -> dict[str, dict[str, Any]] | None:
+) -> dict[str, ModelDecl] | None:
     raw = data.get("models")
     mapping = mapping_at(raw, "models", problems, "'models'")
     if mapping is None:
@@ -899,7 +812,7 @@ def validate_models(
     if not mapping:
         problems.add("models", "'models' must declare at least one model")
         return None
-    parsed: dict[str, dict[str, Any]] = {}
+    parsed: dict[str, ModelDecl] = {}
     for model_id in mapping:
         model_path = f"models.{model_id}"
         if check_id(model_id, model_path, problems, "model") is None:
@@ -1030,39 +943,51 @@ def validate_models(
                 continue
             if output_cap is None or threshold is None or window is None:
                 continue
-            parsed[str(model_id)] = {
-                "provider": None,
-                "model": model,
-                "endpoint": endpoint,
-                "effort": effort,
-                "api_key_env": api_key_env,
-                "prices": prices,
-                "gateway_kind": gateway_kind,
-                "gateway_url": gateway_url,
-                "gateway_url_env": gateway_url_env,
-                "output_cap_tokens": output_cap,
-                "context_threshold_tokens": threshold,
-                "context_window_tokens": window,
-            }
+            parsed[str(model_id)] = ModelDecl(
+                id=str(model_id),
+                provider=None,
+                model=model,
+                endpoint=endpoint,
+                effort=effort,
+                api_key_env=api_key_env,
+                prices=ModelPrices(
+                    input=prices["input"],
+                    output=prices["output"],
+                    cache_read=prices["cache-read"],
+                    cache_write=prices["cache-write"],
+                ),
+                gateway_kind=gateway_kind,
+                gateway_url=gateway_url,
+                gateway_url_env=gateway_url_env,
+                output_cap_tokens=output_cap,
+                context_threshold_tokens=threshold,
+                context_window_tokens=window,
+            )
         else:
             if provider is None:
                 continue
             if output_cap is None or threshold is None or window is None:
                 continue
-            parsed[str(model_id)] = {
-                "provider": provider,
-                "model": model,
-                "endpoint": endpoint,
-                "effort": effort,
-                "api_key_env": api_key_env,
-                "prices": prices,
-                "gateway_kind": None,
-                "gateway_url": None,
-                "gateway_url_env": None,
-                "output_cap_tokens": output_cap,
-                "context_threshold_tokens": threshold,
-                "context_window_tokens": window,
-            }
+            parsed[str(model_id)] = ModelDecl(
+                id=str(model_id),
+                provider=provider,
+                model=model,
+                endpoint=endpoint,
+                effort=effort,
+                api_key_env=api_key_env,
+                prices=ModelPrices(
+                    input=prices["input"],
+                    output=prices["output"],
+                    cache_read=prices["cache-read"],
+                    cache_write=prices["cache-write"],
+                ),
+                gateway_kind=None,
+                gateway_url=None,
+                gateway_url_env=None,
+                output_cap_tokens=output_cap,
+                context_threshold_tokens=threshold,
+                context_window_tokens=window,
+            )
     return parsed
 
 
@@ -1155,7 +1080,7 @@ def validate_worker(problems: Problems, data: Mapping[str, Any]) -> WorkerSettin
 
 def check_model_table(
     problems: Problems,
-    models: Mapping[str, Mapping[str, Any]],
+    models: Mapping[str, ModelDecl],
     pairs: frozenset[tuple[str, str]],
     endpoints: Mapping[str, frozenset[str]],
 ) -> None:
@@ -1168,9 +1093,9 @@ def check_model_table(
     _, gateway_endpoints, _, _, _ = gateway_code_owned()
     for model_id in sorted(models):
         entry = models[model_id]
-        if entry.get("gateway_kind") is not None:
-            kind = str(entry["gateway_kind"])
-            endpoint = str(entry["endpoint"])
+        if entry.gateway_kind is not None:
+            kind = str(entry.gateway_kind)
+            endpoint = str(entry.endpoint)
             admissible = gateway_endpoints.get(kind)
             if admissible is not None and endpoint != admissible:
                 problems.add(
@@ -1179,9 +1104,9 @@ def check_model_table(
                     f"must be {admissible!r}",
                 )
             continue
-        provider = str(entry["provider"])
-        model = str(entry["model"])
-        endpoint = str(entry["endpoint"])
+        provider = str(entry.provider)
+        model = str(entry.model)
+        endpoint = str(entry.endpoint)
         if (provider, model) not in pairs:
             problems.add(
                 f"models.{model_id}.model",
@@ -1421,7 +1346,7 @@ def validate_advisor(
     step_where: str,
     raw: Any,
     base: Path,
-    models: Mapping[str, Mapping[str, Any]] | None,
+    models: Mapping[str, ModelDecl] | None,
 ) -> Advisor | None:
     """Validate one `agent.advisor` mapping (§9).
 
@@ -1470,16 +1395,21 @@ def validate_agent_inputs(
     steps: Mapping[str, Any],
     raw: Any,
     *,
-    step_id: str,
     input_type: str | None,
-    facts: WorkflowFacts,
-) -> list[tuple[str, tuple[str, str, str | None]]] | None:
+) -> tuple[InputRef, ...] | None:
+    """Validate one agent step's declared inputs (§2.5).
+
+    Returns the typed inputs in declaration order, or ``None`` where the
+    list itself is unusable. The required-input proof runs in phase 2 over
+    the typed Workflow; the special note and trusted-comments references
+    validate here, and every fault names its YAML path.
+    """
     if raw is None:
-        return []
+        return ()
     if not isinstance(raw, list):
         problems.add(step_where, "'inputs' must be a list of references")
         return None
-    required: list[tuple[str, tuple[str, str, str | None]]] = []
+    typed: list[InputRef] = []
     for index, item in enumerate(raw):
         item_where = f"{step_where}[{index}]"
         optional = False
@@ -1510,7 +1440,7 @@ def validate_agent_inputs(
                     f"`{{optional: {ROUND_HANDOFF_NOTE_REF}}}`",
                 )
                 continue
-            facts.note_inputs.setdefault(step_id, []).append(item_where)
+            typed.append(InputRef(reference=ref, optional=True))
             continue
         if ref == INPUT_COMMENTS_REF:
             if input_type == "pull-request":
@@ -1522,11 +1452,12 @@ def validate_agent_inputs(
                 continue
             # The input is always present — required and `{optional: ...}`
             # both validate, and neither constrains the step's path.
+            typed.append(InputRef(reference=ref, optional=optional))
             continue
-        parsed = check_ref(problems, item_where, steps, ref, document_only=False)
-        if parsed is not None and not optional:
-            required.append((ref if isinstance(ref, str) else str(ref), parsed))
-    return required
+        check_ref(problems, item_where, steps, ref, document_only=False)
+        if isinstance(ref, str):
+            typed.append(InputRef(reference=ref, optional=optional))
+    return tuple(typed)
 
 
 def check_round_handoff_placement(
@@ -1663,27 +1594,35 @@ def validate_step(
     steps_raw: Mapping[str, Any],
     input_type: str | None,
     defaults_max: int | None,
+    defaults_routes: Mapping[str, RouteTarget],
     base: Path,
     bundle_names: frozenset[str],
-    facts: WorkflowFacts,
     *,
     undeclared_skill_label: str | None = None,
-    models: Mapping[str, Mapping[str, Any]] | None = None,
-) -> None:
+    models: Mapping[str, ModelDecl] | None = None,
+) -> WorkflowStep | None:
+    """Validate one step and read its typed form: the single read (§3).
+
+    Shape-only parsing directly into the typed ``WorkflowStep``: known keys,
+    the executor, the ``context-thresholds`` policy, routes and
+    ``max-executions`` each parse exactly once here. Every fault names its
+    YAML path. Returns the typed step, or ``None`` where it is unusable (a
+    fault is recorded). Pin-dependent bounds stay in phase 2, over the typed
+    Workflow.
+    """
     step_where = f"{workflow_where}.steps.{step_id}"
     mapping = check_keys(problems, step_where, step_raw, STEP_FIELDS, STEP_REQUIRED)
     if mapping is None:
-        return
+        return None
     is_agent = "agent" in mapping
     is_operation = "operation" in mapping
     if is_agent == is_operation:
         problems.add(
             step_where, "a step has exactly one executor: `agent` or `operation`"
         )
-        return
-    if is_agent:
-        facts.agent_steps.add(step_id)
-    opted_in = step_has_threshold_policy(mapping)
+        return None
+    opted_in = is_agent and isinstance(mapping.get("context-thresholds"), dict)
+    policy: ContextThresholds | None = None
     if "context-thresholds" in mapping and not is_agent:
         problems.add(
             f"{step_where}.context-thresholds",
@@ -1695,12 +1634,8 @@ def validate_step(
         policy = validate_context_thresholds(
             problems, step_where, mapping["context-thresholds"]
         )
-        if policy is not None:
-            facts.thresholds[step_id] = policy.hard_tokens
-            if policy.soft_tokens is not None:
-                facts.soft_thresholds[step_id] = policy.soft_tokens
 
-    required_inputs: list[tuple[str, tuple[str, str, str | None]]] = []
+    agent: Agent | None = None
     operation: str | None = None
     with_body: str | None = None
     with_draft: bool | None = None
@@ -1712,7 +1647,7 @@ def validate_step(
             problems, f"{step_where}.agent", agent_raw, AGENT_FIELDS, frozenset({"results"})
         )
         if agent_mapping is None:
-            return
+            return None
         instructions = validate_instructions(
             problems, f"{step_where}.agent.instructions", agent_mapping.get("instructions"),
             base, bundle_names,
@@ -1724,9 +1659,7 @@ def validate_step(
         agent_inputs = validate_agent_inputs(
             problems, f"{step_where}.agent.inputs", steps_raw,
             agent_mapping.get("inputs"),
-            step_id=step_id,
             input_type=input_type,
-            facts=facts,
         )
         results = check_payload(
             problems,
@@ -1738,25 +1671,27 @@ def validate_step(
             problems, step_where, agent_mapping.get("advisor"), base, models
         )
         if instructions is None or tools is None or agent_inputs is None or results is None:
-            return
-        if "subagents" in tools:
-            facts.subagent_steps.add(step_id)
+            return None
         if "advisor" in tools and agent_mapping.get("advisor") is None:
             problems.add(
                 f"{step_where}.agent.advisor",
                 "the `advisor` tool group requires an `agent.advisor` mapping "
                 "with `prompt` (and optional `model`)",
             )
-            return
+            return None
         if "advisor" not in tools and advisor is not None:
             problems.add(
                 f"{step_where}.agent.tools",
                 "an `agent.advisor` mapping requires the `advisor` tool group",
             )
-            return
-        if advisor is not None and advisor.model is not None:
-            facts.advisor_pins[step_id] = advisor.model
-        required_inputs.extend(agent_inputs)
+            return None
+        agent = Agent(
+            instructions=tuple(instructions),
+            tools=tuple(tools),
+            inputs=agent_inputs,
+            results=results,
+            advisor=advisor,
+        )
         if "with" in mapping:
             problems.add(
                 step_where,
@@ -1766,7 +1701,7 @@ def validate_step(
         operation_raw = mapping["operation"]
         if not isinstance(operation_raw, str) or not operation_raw:
             problems.add(f"{step_where}.operation", "must be a non-empty string")
-            return
+            return None
         operation = operation_raw
         spec = OPERATIONS.get(operation)
         if spec is None:
@@ -1775,7 +1710,7 @@ def validate_step(
                 f"unknown Runtime Operation {operation!r} "
                 f"(catalog: {', '.join(sorted(OPERATIONS))})",
             )
-            return
+            return None
         if spec.input_type is not None and input_type is not None and spec.input_type != input_type:
             other = "issue" if spec.input_type == "pull-request" else "pull-request"
             problems.add(
@@ -1786,7 +1721,7 @@ def validate_step(
         with_raw = mapping.get("with") or {}
         with_mapping = check_keys(problems, f"{step_where}.with", with_raw, spec.with_keys)
         if with_mapping is None:
-            return
+            return None
         if "facts" in with_mapping:
             problems.add(
                 f"{step_where}.with.facts",
@@ -1824,7 +1759,6 @@ def validate_step(
                     body_raw, document_only=True,
                 )
                 if parsed_body is not None and isinstance(body_raw, str):
-                    required_inputs.append((body_raw, parsed_body))
                     with_body = body_raw
         if "draft" in with_mapping:
             draft = bool_at(
@@ -1857,14 +1791,12 @@ def validate_step(
                 f"{step_where}.reserved", "only agent steps can be Reserved Steps"
             )
 
-    facts.required_inputs[step_id] = required_inputs
-
     step_descs = described_map(WorkflowStep)
     max_executions = defaults_max if defaults_max is not None else 1
     parsed_max = check_leaf(problems, mapping, step_where, step_descs["max-executions"])
     if "max-executions" in mapping:
         if parsed_max is None:
-            return
+            return None
         max_executions = int(parsed_max)
 
     limits: dict[str, float] = {}
@@ -1873,13 +1805,13 @@ def validate_step(
             problems, f"{step_where}.limits", mapping["limits"], STEP_LIMITS_FIELDS
         )
         if limits_mapping is None:
-            return
+            return None
         for meter, value in limits_mapping.items():
             parsed_value = positive_number_at(
                 value, f"{step_where}.limits.{meter}", problems, f"'{meter}'"
             )
             if parsed_value is None:
-                return
+                return None
             limits[meter] = parsed_value
 
     reserved = mapping.get("reserved") is True
@@ -1894,25 +1826,23 @@ def validate_step(
                 "a Reserved Step declares all four meters "
                 f"(missing: {', '.join(missing)})",
             )
-            return
-        facts.reserved_allow[step_id] = dict(limits)
+            return None
     elif reserved and is_operation:
-        return
-    elif is_agent and limits:
-        facts.plain_allow[step_id] = dict(limits)
+        return None
     if reserved and not is_agent:
-        return
+        return None
 
-    # Routes.
+    # Routes: the single parse of the step's route table. Result names come
+    # from the typed components above, via the shared implementation.
     routes_raw = mapping.get("routes")
     routes_mapping = mapping_at(routes_raw, f"{step_where}.routes", problems, "'routes'")
     if routes_mapping is None:
-        return
-    result_names = step_results(mapping, input_type)
-    effective_defaults: dict[str, RouteTarget] = {}
-    for key, target in facts.routes_all.get("__defaults__", {}).items():
-        if key in result_names:
-            effective_defaults[key] = target
+        return None
+    with_requires_tuple = tuple(with_requires)
+    result_names = result_names_for_step(
+        agent, policy, operation, with_requires_tuple, input_type
+    )
+    effective_defaults = default_routes_for_step(dict(defaults_routes), result_names)
     for key in routes_mapping:
         if key == "*" or key == "default":
             problems.add(
@@ -1925,7 +1855,11 @@ def validate_step(
                 f"{key!r} is not a possible result of this step "
                 f"(results: {', '.join(result_names)})",
             )
-    explicit_thresholds = set(threshold_results_for(mapping)) if opted_in else set()
+    explicit_thresholds: set[str] = set()
+    if policy is not None:
+        explicit_thresholds.add(HARD_CONTEXT_RESULT)
+        if policy.soft_tokens is not None:
+            explicit_thresholds.add(SOFT_CONTEXT_RESULT)
     for result in result_names:
         if result in explicit_thresholds:
             continue
@@ -1938,13 +1872,16 @@ def validate_step(
             problems.add(
                 f"{step_where}.routes", f"result {result!r} is not routed{suffix}"
             )
-    if opted_in:
+    if policy is not None:
         if HARD_CONTEXT_RESULT not in routes_mapping:
             problems.add(
                 f"{step_where}.routes",
                 f"result {HARD_CONTEXT_RESULT!r} needs a step-local route",
             )
-        if step_id in facts.soft_thresholds and SOFT_CONTEXT_RESULT not in routes_mapping:
+        if (
+            policy.soft_tokens is not None
+            and SOFT_CONTEXT_RESULT not in routes_mapping
+        ):
             problems.add(
                 f"{step_where}.routes",
                 f"result {SOFT_CONTEXT_RESULT!r} needs a step-local route",
@@ -2032,10 +1969,20 @@ def validate_step(
                 )
                 if parsed_note is None:
                     continue
-                required_inputs.append((annotation.note, parsed_note))
-            facts.round_handoff_annotations.append((step_id, key))
         merged[key] = parsed_target
-    facts.routes_all[step_id] = merged
+    return WorkflowStep(
+        id=step_id,
+        agent=agent,
+        operation=operation,
+        with_body=with_body,
+        with_draft=with_draft,
+        with_requires=tuple(with_requires),
+        context_thresholds=policy,
+        max_executions=max_executions,
+        limits=limits,
+        reserved=reserved,
+        routes=merged,
+    )
 
 
 def validate_defaults(
@@ -2288,35 +2235,31 @@ FLOOR_METERS: tuple[str, str] = ("effective-tokens", "cost-usd")
 
 
 def _pin_for_workflow(
-    models: Mapping[str, Mapping[str, Any]] | None,
-    workflow_raw: Mapping[str, Any],
-) -> Mapping[str, Any] | None:
+    models: Mapping[str, ModelDecl] | None,
+    model_id: str,
+) -> ModelDecl | None:
     """The parsed pin entry for the Workflow's model, if usable."""
     if models is None:
         return None
-    model_id = workflow_raw.get("model")
-    if not isinstance(model_id, str):
-        return None
-    pin = models.get(model_id)
-    return pin if isinstance(pin, Mapping) else None
+    return models.get(model_id)
 
 
-def _pin_output_and_window(pin: Mapping[str, Any]) -> tuple[int, int] | None:
+def _pin_output_and_window(pin: ModelDecl) -> tuple[int, int] | None:
     """The pin's validated output cap and Model Context Window, if usable."""
-    output_cap = pin.get("output_cap_tokens")
-    window = pin.get("context_window_tokens")
-    if not _is_plain_int(output_cap) or not _is_plain_int(window):
+    output_cap = pin.output_cap_tokens
+    window = pin.context_window_tokens
+    if output_cap is None or window is None:
         return None
     return output_cap, window
 
 
-def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
+def admission_floor_for(pin: ModelDecl) -> AdmissionFloor | None:
     """The floor for a parsed pin entry, or None when it carries no usable
     token budget (a phase-1 fault already refused it)."""
     from coding_agent.runtime.context_budget import usable_from_raw
 
-    threshold = pin.get("context_threshold_tokens")
-    if not _is_plain_int(threshold):
+    threshold = pin.context_threshold_tokens
+    if threshold is None:
         return None
     _, _, safety, overhead, _ = gateway_code_owned()
     usable = usable_from_raw(threshold, safety, overhead)
@@ -2326,7 +2269,7 @@ def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
 
 
 def admission_floor_with_usable(
-    pin: Mapping[str, Any], usable: int
+    pin: ModelDecl, usable: int
 ) -> AdmissionFloor | None:
     """The floor for a parsed pin entry at one Usable Threshold.
 
@@ -2336,22 +2279,13 @@ def admission_floor_with_usable(
     budget, including a non-positive Usable Threshold (the Context Budget
     module refuses it).
     """
-    cap = pin.get("output_cap_tokens")
-    prices = pin.get("prices")
-    if not _is_plain_int(cap):
+    cap = pin.output_cap_tokens
+    if cap is None:
         return None
-    if not isinstance(prices, dict):
-        return None
-    input_price = prices.get("input")
-    output_price = prices.get("output")
-    cache_write_price = prices.get("cache-write")
-    if (
-        not is_number(input_price)
-        or not is_number(output_price)
-        or not is_number(cache_write_price)
-    ):
-        return None
-    gateway = pin.get("gateway_kind") is not None
+    input_price = pin.prices.input
+    output_price = pin.prices.output
+    cache_write_price = pin.prices.cache_write
+    gateway = pin.gateway_kind is not None
     from coding_agent.runtime.context_budget import (
         admission_floor,
         effective_input_price,
