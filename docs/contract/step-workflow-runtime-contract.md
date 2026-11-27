@@ -890,6 +890,7 @@ A Claim intent or assignment whose read-back never happened, or happened and los
 - **A Credential Failure** ends the Attempt `interrupted` with reason `credential-failure`, and the Worker halts. Recovery finishes the terminal writes after the credential is fixed. A single refused permission is an ordinary operation `error` (§14.4).
 - **An asserted pin violation** ends the Attempt `interrupted` with reason `pin-violation`, and the Worker halts (§9.1, §12). Recovery finishes the terminal writes after the operator re-pins the name the vendor reports. The set of Terminal Outcomes stays closed: only this reason is new.
 - **Recovery write failures** are retried every sweep; three consecutive failures halt the Worker with `recovery-write-failure`.
+- **A missing Validation Contract at the Attempt's start** ends the Attempt `internal-failure` through the normal finalisation, and the Worker halts with `profile-unavailable` (§4.4): a Workflow that needs a Validation Contract whose profile cannot be pinned at the Attempt's start commit would fail every queued Attempt the same way, like a Credential Failure. A restart runs the startup check again, which refuses until the profile is restored.
 
 ### 16.4 Incompatible records, drain, upgrade and rollback
 

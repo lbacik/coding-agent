@@ -103,7 +103,7 @@ def _workflow_with_step(step: WorkflowStep) -> Workflow:
 
 def _agent_workflow(*tools: str) -> Workflow:
     return _workflow_with_step(
-        WorkflowStep(id="s", agent=Agent(tools=list(tools)))
+        WorkflowStep(id="s", agent=Agent(tools=tuple(tools)))
     )
 
 
@@ -166,7 +166,7 @@ def test_needs_validation_contract_mixed_steps() -> None:
         ),
         start="a",
         steps={
-            "a": WorkflowStep(id="a", agent=Agent(tools=["shell"])),
+            "a": WorkflowStep(id="a", agent=Agent(tools=("shell",))),
             "b": WorkflowStep(id="b", operation="commit-and-push"),
         },
     )
@@ -183,7 +183,7 @@ def test_needs_validation_contract_mixed_steps() -> None:
         ),
         start="a",
         steps={
-            "a": WorkflowStep(id="a", agent=Agent(tools=["shell"])),
+            "a": WorkflowStep(id="a", agent=Agent(tools=("shell",))),
             "b": WorkflowStep(id="b", operation="run-validation"),
         },
     )

@@ -147,7 +147,8 @@ def is_pin_violation_reason(reason: str) -> bool:
 def is_infrastructure_reason(reason: str) -> bool:
     """Whether ``reason`` counts toward the halt-after-three (§4.4).
 
-    The infrastructure classes are setup, git, GitHub API and provider;
+    The infrastructure classes are setup, git, GitHub API, provider and
+    ``unexpected`` (any other exception escaping the Attempt run);
     every ``infrastructure-failure`` reason the Attempt records names its
     class after the colon, so the prefix decides.
     """
