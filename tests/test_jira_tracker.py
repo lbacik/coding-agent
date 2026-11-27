@@ -46,7 +46,6 @@ from coding_agent.inputs.jira import (
     marker_property_value,
 )
 from coding_agent.inputs.marker import AttemptMarker
-from coding_agent.inputs.port import IssueTrackerPort
 from coding_agent.jira.client import JiraClient
 from coding_agent.runtime.effects.driver import _is_transient_perform_error
 

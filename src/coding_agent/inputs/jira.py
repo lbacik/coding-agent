@@ -42,7 +42,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import requests
 
@@ -59,9 +59,6 @@ from coding_agent.inputs.port import (
 )
 from coding_agent.jira.client import JiraClient
 from coding_agent.jira.errors import request_with_retry
-
-if TYPE_CHECKING:
-    from coding_agent.identity.startup import StartupCheckFailed, TokenRejected
 
 _PAGE_SIZE = 50
 """One search or comment page (reads paginate)."""
@@ -750,7 +747,12 @@ class JiraTracker:
         """
         raw_id = payload.get("id")
         try:
-            comment_id = int(raw_id) if not isinstance(raw_id, int) else raw_id
+            if isinstance(raw_id, int):
+                comment_id = raw_id
+            elif isinstance(raw_id, str):
+                comment_id = int(raw_id)
+            else:
+                raise TypeError(f"unexpected comment id: {raw_id!r}")
         except (TypeError, ValueError):
             raise StepTrackerError(
                 f"comment on {key} returned an unexpected id",
