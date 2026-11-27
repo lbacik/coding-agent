@@ -69,10 +69,10 @@ class _PropertyBagTracker:
     def post_comment(
         self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
-        _ = (number, input_type, body)
+        _ = (number, input_type)
         comment = InputComment(
             comment_id=len(self._comments) + 1,
-            body=self.format_marker(marker),
+            body=body,
             author_login=self.agent_login,
             author_id=self.agent_id,
             marker_present=True,
@@ -84,10 +84,10 @@ class _PropertyBagTracker:
     def publish_review(
         self, number: int, *, commit_id: str, body: str, marker: AttemptMarker
     ) -> InputReview:
-        _ = (number, body)
+        _ = number
         review = InputReview(
             review_id=len(self._reviews) + 1,
-            body=self.format_marker(marker),
+            body=body,
             author_login=self.agent_login,
             author_id=self.agent_id,
             commit_id=commit_id,
@@ -119,14 +119,14 @@ class _PropertyBagTracker:
         draft: bool = False,
         marker: AttemptMarker,
     ) -> InputPullRequest:
-        _ = (title, body)
+        _ = title
         opened = InputPullRequest(
             number=len(self._pulls) + 1,
             url=f"https://example.test/pull/{len(self._pulls) + 1}",
             title=title,
             head_branch=head_branch,
             base_branch=base_branch,
-            body=self.format_marker(marker),
+            body=body,
             state="open",
             author_login=self.agent_login,
             author_id=self.agent_id,
@@ -178,6 +178,7 @@ def test_stub_comment_round_trip_through_the_value() -> None:
     found = tracker.find_comment_by_marker(7, "issue", marker)
     assert found is not None
     assert found.comment_id == posted.comment_id
+    assert found.body == "a document"
     assert (
         tracker.find_comment_by_marker(
             7,
@@ -210,6 +211,7 @@ def test_stub_review_round_trip_through_the_value() -> None:
     found = tracker.find_review_by_marker(31, marker)
     assert found is not None
     assert found.review_id == published.review_id
+    assert found.body == "a document"
 
 
 def test_stub_pull_request_round_trip_through_the_value() -> None:
@@ -236,6 +238,7 @@ def test_stub_pull_request_round_trip_through_the_value() -> None:
     found = tracker.find_pull_request("agent/branch", marker)
     assert found is not None
     assert found.number == opened.number
+    assert found.body == f"{reference}\n\na document"
 
 
 def test_stub_claim_and_terminal_markers_are_ordinary_values() -> None:
