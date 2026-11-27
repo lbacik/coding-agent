@@ -523,7 +523,7 @@ def _remote_labels_and_assignees(
     blocking finalisation on a read. :class:`CredentialFailure` propagates so
     the Worker halts and recovery retries after the credential is fixed.
     """
-    from coding_agent.github.errors import CredentialFailure as _CredentialFailure
+    from coding_agent.inputs.errors import CredentialFailure as _CredentialFailure
 
     try:
         current = tracker.fetch_input(number, input_type)

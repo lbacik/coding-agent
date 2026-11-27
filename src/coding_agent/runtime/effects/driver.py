@@ -35,16 +35,16 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
-from coding_agent.github.errors import (
+from coding_agent.inputs.errors import (
     INITIAL_BACKOFF_SECONDS,
     MAX_IN_PLACE_ATTEMPTS,
     MAX_IN_PLACE_WAIT_SECONDS,
     CredentialFailure,
-    GitHubFailure,
+    HostFailure,
     RateLimitExhausted,
+    StepTrackerError,
 )
 from coding_agent.inputs.gates import GateResult
-from coding_agent.inputs.github import StepTrackerError
 from coding_agent.inputs.port import InputType, StepTrackerPort
 from coding_agent.ledger.store import RunLedger, step_effect_marker
 
@@ -110,7 +110,7 @@ def _is_transient_perform_error(exc: BaseException) -> bool:
         return True
     if isinstance(exc, RateLimitExhausted):
         return False
-    if isinstance(exc, GitHubFailure):
+    if isinstance(exc, HostFailure):
         return exc.failure_class == "github" and 500 <= exc.status_code <= 599
     if isinstance(exc, StepTrackerError):
         return exc.transient
@@ -119,7 +119,7 @@ def _is_transient_perform_error(exc: BaseException) -> bool:
 
 def _transient_exhaustion_error(
     operation: str, ctx: EffectContext, last: BaseException
-) -> GitHubFailure:
+) -> HostFailure:
     """The infrastructure-class failure a transient bound ends with (§14.4).
 
     Exhaustion reports ``infrastructure-failure`` / ``github`` like an
@@ -128,8 +128,8 @@ def _transient_exhaustion_error(
     Where the failure names no call, the operation and target identity
     stand in for the method and path.
     """
-    if isinstance(last, GitHubFailure):
-        return GitHubFailure(
+    if isinstance(last, HostFailure):
+        return HostFailure(
             last.method,
             last.path,
             last.status_code,
@@ -139,7 +139,7 @@ def _transient_exhaustion_error(
     method = getattr(last, "method", None)
     path = getattr(last, "path", None)
     status_code = getattr(last, "status_code", None)
-    return GitHubFailure(
+    return HostFailure(
         method if isinstance(method, str) else operation,
         path if isinstance(path, str) else f"{ctx.input_type} {ctx.number}",
         status_code if isinstance(status_code, int) else 0,

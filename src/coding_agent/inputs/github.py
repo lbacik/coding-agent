@@ -38,6 +38,7 @@ import requests
 
 from coding_agent.github.client import GitHubClient
 from coding_agent.github.errors import request_with_retry
+from coding_agent.inputs.errors import StepTrackerError as StepTrackerError
 from coding_agent.inputs.port import (
     AgentFacts,
     InputComment,
@@ -52,31 +53,9 @@ _PAGE_SIZE = 100
 """One candidate, comment or pull-request page (reads paginate)."""
 
 
-class StepTrackerError(Exception):
-    """A step-workflow tracker read or write failed; the recorded intent stands.
-
-    ``transient`` marks a write failure the effect driver may repeat after
-    re-looking the write up by Attempt Marker: a 5xx response (§14.4). The
-    ``method``, ``path`` and ``status_code`` of the failed call travel along
-    so the driver can record an infrastructure-class receipt on exhaustion.
-    ``None`` where the failure has no HTTP exchange (a connection error or
-    timeout propagates raw instead) or the status is unknown.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        transient: bool = False,
-        method: str | None = None,
-        path: str | None = None,
-        status_code: int | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.transient = transient
-        self.method = method
-        self.path = path
-        self.status_code = status_code
+# ``StepTrackerError`` is canonical in ``coding_agent.inputs.errors`` and
+# re-exported here for one release, so ``from coding_agent.inputs.github
+# import StepTrackerError`` keeps resolving to the same class object.
 
 
 def _write_error(method: str, path: str, response: requests.Response) -> StepTrackerError:

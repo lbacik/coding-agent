@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from coding_agent.github.errors import CredentialFailure
+from coding_agent.inputs.errors import CredentialFailure
 from coding_agent.inputs.port import (
     InputComment,
     InputPullRequest,

@@ -32,11 +32,12 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from coding_agent.inputs.pickup import PickupConfig
 
-from coding_agent.github.errors import (
+from coding_agent.inputs.errors import (
     CredentialFailure,
-    GitHubFailure,
+    HostFailure,
     PermissionRefusal,
     RateLimitExhausted,
+    StepTrackerError,
 )
 from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import (
@@ -47,7 +48,6 @@ from coding_agent.inputs.claim import (
 )
 from coding_agent.attempt_id import AttemptId
 from coding_agent.inputs.gates import GateResult, check_gate
-from coding_agent.inputs.github import StepTrackerError
 from coding_agent.inputs.pinning import PinnedInput
 from coding_agent.inputs.port import InputType, StepTrackerPort, TrackedInput
 from coding_agent.ledger.store import AttemptPin, RunLedger
@@ -206,7 +206,7 @@ def _failure_class(exc: BaseException) -> str:
     if isinstance(exc, GitFailure):
         return "git"
     if isinstance(
-        exc, (GitHubFailure, RateLimitExhausted, PermissionRefusal, StepTrackerError)
+        exc, (HostFailure, RateLimitExhausted, PermissionRefusal, StepTrackerError)
     ):
         return "github"
     return "setup"
@@ -716,7 +716,7 @@ def _poll_loop(
                 )
                 return 1
             except (
-                GitHubFailure,
+                HostFailure,
                 RateLimitExhausted,
                 PermissionRefusal,
                 StepTrackerError,
@@ -789,7 +789,7 @@ def _poll_loop(
             )
             return 1
         except (
-            GitHubFailure,
+            HostFailure,
             RateLimitExhausted,
             PermissionRefusal,
             StepTrackerError,
@@ -879,7 +879,7 @@ def _poll_loop(
             )
             return 1
         except (
-            GitHubFailure,
+            HostFailure,
             RateLimitExhausted,
             PermissionRefusal,
             StepTrackerError,
@@ -930,7 +930,7 @@ def _poll_loop(
                 )
                 return 1
             except (
-                GitHubFailure,
+                HostFailure,
                 RateLimitExhausted,
                 PermissionRefusal,
                 StepTrackerError,
@@ -990,7 +990,7 @@ def _poll_loop(
                 )
                 return 1
             except (
-                GitHubFailure,
+                HostFailure,
                 RateLimitExhausted,
                 PermissionRefusal,
                 StepTrackerError,
@@ -1060,7 +1060,7 @@ def _poll_loop(
                 )
                 return 1
             except (
-                GitHubFailure,
+                HostFailure,
                 RateLimitExhausted,
                 PermissionRefusal,
                 StepTrackerError,
