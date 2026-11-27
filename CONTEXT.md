@@ -397,7 +397,7 @@ The MVP's commit that fixes the candidate tree an Attempt offers for judgement. 
 _Avoid_: snapshot, checkpoint commit, candidate commit, WIP commit
 
 **Validation Contract**:
-The set of validation commands and their evidence declarations from the Project Profile, pinned at Claim time from whichever source supplies it. It is what this Attempt is judged by, so a candidate that edits the Target Repository's Project Profile changes the contract for the next Attempt and never for its own, and changes no contract at all where the Workflow Configuration supplies the profile.
+The set of validation commands and their evidence declarations from the Project Profile, pinned at Claim time from whichever source supplies it. It is what this Attempt is judged by, so a candidate that edits the Target Repository's Project Profile changes the contract for the next Attempt and never for its own, and changes no contract at all where the Workflow Configuration supplies the profile. Only a Workflow that validates needs one; an Attempt of a Workflow that never validates may have none.
 _Avoid_: commands, checks, test config
 
 **Validation Evidence**:
