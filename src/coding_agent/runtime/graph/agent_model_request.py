@@ -164,13 +164,13 @@ def _hard_usable_for(
     or no context-window config is bound (tests only): such a step keeps the
     requesting pin's Context Threshold guard and its existing outcomes.
     """
-    from coding_agent.runtime.context_budget import usable_from_raw
+    from coding_agent.runtime.context_budget import hard_usable_threshold
 
     policy = step.context_thresholds
     window = request_pin.context_window if request_pin is not None else deps.context_window
     if policy is None or window is None:
         return None
-    return usable_from_raw(
+    return hard_usable_threshold(
         policy.hard_tokens,
         window.safety_margin_tokens,
         window.request_overhead_tokens,
@@ -191,7 +191,7 @@ def _soft_usable_for(
     existing outcomes. Where configured the soft bound sits strictly below
     the hard one, so this is the tighter of the two step guards.
     """
-    from coding_agent.runtime.context_budget import usable_from_raw
+    from coding_agent.runtime.context_budget import soft_usable_threshold
 
     policy = step.context_thresholds
     window = request_pin.context_window if request_pin is not None else deps.context_window
@@ -199,7 +199,7 @@ def _soft_usable_for(
         return None
     if policy.soft_tokens is None:
         return None
-    return usable_from_raw(
+    return soft_usable_threshold(
         policy.soft_tokens,
         window.safety_margin_tokens,
         window.request_overhead_tokens,

@@ -14,8 +14,11 @@ from coding_agent.runtime.context_budget import (
     admission_floor,
     admission_hold,
     effective_input_price,
+    hard_usable_threshold,
+    pin_usable_threshold,
     priced_bound,
     select_usable_threshold,
+    soft_usable_threshold,
     threshold_outcome,
     usable_from_raw,
 )
@@ -234,6 +237,8 @@ def test_hold_floor_equivalence_gateway_and_direct_diverge_only_by_rate() -> Non
         cache_write_price=5.0,
         is_gateway=False,
     )
+    assert gateway is not None
+    assert direct is not None
     assert gateway[0] == direct[0] == 199_000
     assert gateway[1] == pytest.approx(
         198_000 / 1_000_000 * 5.0 + 1_000 / 1_000_000 * 8.0
@@ -241,3 +246,48 @@ def test_hold_floor_equivalence_gateway_and_direct_diverge_only_by_rate() -> Non
     assert direct[1] == pytest.approx(
         198_000 / 1_000_000 * 2.0 + 1_000 / 1_000_000 * 8.0
     )
+
+
+@pytest.mark.parametrize("usable", [0, -500])
+@pytest.mark.parametrize("is_gateway", [False, True])
+def test_admission_floor_refuses_non_positive_usable(
+    usable: int, is_gateway: bool
+) -> None:
+    """The floor refuses non-positive usable values: no floor, never a guard."""
+    assert (
+        admission_floor(
+            usable,
+            1_000,
+            input_price=2.0,
+            output_price=8.0,
+            cache_write_price=5.0,
+            is_gateway=is_gateway,
+        )
+        is None
+    )
+
+
+def test_named_usable_constructors_share_the_margin_rule() -> None:
+    """Hard, soft and pin constructors apply the one margin rule.
+
+    The named wrappers agree with ``usable_from_raw`` at the same inputs;
+    soft propagates ``None`` where the step configures no soft bound.
+    """
+    assert (
+        hard_usable_threshold(200_000, SAFETY, OVERHEAD)
+        == usable_from_raw(200_000, SAFETY, OVERHEAD)
+        == 198_000
+    )
+    assert (
+        soft_usable_threshold(192_000, SAFETY, OVERHEAD)
+        == usable_from_raw(192_000, SAFETY, OVERHEAD)
+        == 190_000
+    )
+    assert (
+        pin_usable_threshold(200_000, SAFETY, OVERHEAD)
+        == usable_from_raw(200_000, SAFETY, OVERHEAD)
+        == 198_000
+    )
+    assert soft_usable_threshold(None, SAFETY, OVERHEAD) is None
+    assert hard_usable_threshold(None, SAFETY, OVERHEAD) is None
+    assert pin_usable_threshold(None, SAFETY, OVERHEAD) is None

@@ -72,6 +72,104 @@ def usable_from_raw(
 
 
 @overload
+def hard_usable_threshold(
+    hard_tokens: int,
+    safety_margin_tokens: int,
+    request_overhead_tokens: int,
+) -> int: ...
+
+
+@overload
+def hard_usable_threshold(
+    hard_tokens: int | float | None,
+    safety_margin_tokens: int | float | None,
+    request_overhead_tokens: int | float | None,
+) -> int | float | None: ...
+
+
+def hard_usable_threshold(
+    hard_tokens: int | float | None,
+    safety_margin_tokens: int | float | None,
+    request_overhead_tokens: int | float | None,
+) -> int | float | None:
+    """The step's own Hard Usable Threshold, where the step opts in (§3).
+
+    The policy's ``hard-tokens`` less the code-owned safety margin and request
+    overhead. ``None`` where any input is missing (no policy, or no
+    context-window config bound).
+    """
+    return usable_from_raw(
+        hard_tokens, safety_margin_tokens, request_overhead_tokens
+    )
+
+
+@overload
+def soft_usable_threshold(
+    soft_tokens: int,
+    safety_margin_tokens: int,
+    request_overhead_tokens: int,
+) -> int: ...
+
+
+@overload
+def soft_usable_threshold(
+    soft_tokens: int | float | None,
+    safety_margin_tokens: int | float | None,
+    request_overhead_tokens: int | float | None,
+) -> int | float | None: ...
+
+
+def soft_usable_threshold(
+    soft_tokens: int | float | None,
+    safety_margin_tokens: int | float | None,
+    request_overhead_tokens: int | float | None,
+) -> int | float | None:
+    """The step's own Soft Usable Threshold, where the step configures it (§3).
+
+    The policy's ``soft-tokens`` less the code-owned safety margin and request
+    overhead. ``None`` where the step configures no soft bound (hard-only
+    opted-in steps and legacy steps alike) or no context-window config is
+    bound.
+    """
+    if soft_tokens is None:
+        return None
+    return usable_from_raw(
+        soft_tokens, safety_margin_tokens, request_overhead_tokens
+    )
+
+
+@overload
+def pin_usable_threshold(
+    threshold_tokens: int,
+    safety_margin_tokens: int,
+    request_overhead_tokens: int,
+) -> int: ...
+
+
+@overload
+def pin_usable_threshold(
+    threshold_tokens: int | float | None,
+    safety_margin_tokens: int | float | None,
+    request_overhead_tokens: int | float | None,
+) -> int | float | None: ...
+
+
+def pin_usable_threshold(
+    threshold_tokens: int | float | None,
+    safety_margin_tokens: int | float | None,
+    request_overhead_tokens: int | float | None,
+) -> int | float | None:
+    """The requesting pin's default Usable Threshold (§16).
+
+    The pin's Context Threshold less the safety margin and the request
+    overhead. ``None`` where unpinned.
+    """
+    return usable_from_raw(
+        threshold_tokens, safety_margin_tokens, request_overhead_tokens
+    )
+
+
+@overload
 def select_usable_threshold(
     soft_usable: int | None,
     hard_usable: int | None,
@@ -107,7 +205,7 @@ def select_usable_threshold(
 
 
 def threshold_outcome(
-    value: int | float,
+    compared_value: int | float,
     *,
     hard_usable: int | float | None,
     soft_usable: int | float | None,
@@ -123,12 +221,12 @@ def threshold_outcome(
     including where no bound is configured.
     """
     if hard_usable is not None:
-        if value > hard_usable:
+        if compared_value > hard_usable:
             return "hard"
-        if soft_usable is not None and value > soft_usable:
+        if soft_usable is not None and compared_value > soft_usable:
             return "soft"
         return None
-    if pin_usable is not None and value > pin_usable:
+    if pin_usable is not None and compared_value > pin_usable:
         return "pin"
     return None
 
@@ -207,13 +305,15 @@ def admission_floor(
     output_price: float,
     cache_write_price: float,
     is_gateway: bool,
-) -> tuple[int, float]:
+) -> tuple[int, float] | None:
     """The admission floor: the same pricing core at the maximum.
 
     The largest admissible input carries ``usable_threshold`` context tokens
-    plus the pin's full output cap. The caller proves ``usable_threshold``
-    positive (non-positive usable values yield no floor).
+    plus the pin's full output cap. ``None`` where ``usable_threshold`` is
+    non-positive: non-positive usable values yield no floor.
     """
+    if usable_threshold <= 0:
+        return None
     return priced_bound(
         usable_threshold,
         output_cap,

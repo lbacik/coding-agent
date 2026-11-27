@@ -2333,7 +2333,8 @@ def admission_floor_with_usable(
     The largest admissible input carries ``usable`` context tokens priced as
     uncached input (a gateway pin prices at max(`input`, `cache-write`)),
     plus the pin's full output cap. ``None`` where the pin carries no usable
-    budget. The caller proves ``usable`` positive.
+    budget, including a non-positive Usable Threshold (the Context Budget
+    module refuses it).
     """
     cap = pin.get("output_cap_tokens")
     prices = pin.get("prices")
@@ -2350,15 +2351,13 @@ def admission_floor_with_usable(
         or not is_number(cache_write_price)
     ):
         return None
-    if usable <= 0:
-        return None
     gateway = pin.get("gateway_kind") is not None
     from coding_agent.runtime.context_budget import (
+        admission_floor,
         effective_input_price,
-        priced_bound,
     )
 
-    token_minimum, cost_minimum = priced_bound(
+    bound = admission_floor(
         usable,
         cap,
         input_price=float(input_price),
@@ -2366,6 +2365,9 @@ def admission_floor_with_usable(
         cache_write_price=float(cache_write_price),
         is_gateway=gateway,
     )
+    if bound is None:
+        return None
+    token_minimum, cost_minimum = bound
     effective_input = effective_input_price(
         float(input_price), float(cache_write_price), is_gateway=gateway
     )
