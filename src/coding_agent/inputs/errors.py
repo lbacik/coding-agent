@@ -187,15 +187,18 @@ class InputNotFound(HostFailure):
         )
 
 
-class StepTrackerError(Exception):
+class StepTrackerError(HostFailure):
     """A step-workflow tracker read or write failed; the recorded intent stands.
 
-    ``transient`` marks a write failure the effect driver may repeat after
-    re-looking the write up by Attempt Marker: a 5xx response (§14.4). The
-    ``method``, ``path`` and ``status_code`` of the failed call travel along
-    so the driver can record an infrastructure-class receipt on exhaustion.
-    ``None`` where the failure has no HTTP exchange (a connection error or
-    timeout propagates raw instead) or the status is unknown.
+    The adapter's translation of tracker failures into the neutral inputs
+    taxonomy: a subclass of :class:`HostFailure`, so core call sites catching
+    the neutral type catch these too. ``transient`` marks a write failure
+    the effect driver may repeat after re-looking the write up by Attempt
+    Marker: a 5xx response (§14.4). The ``method``, ``path`` and
+    ``status_code`` of the failed call travel along so the driver can record
+    an infrastructure-class receipt on exhaustion (``""`` / ``0`` where the
+    failure has no HTTP exchange: a connection error or timeout propagates
+    raw instead). The human message stays the exception text.
     """
 
     def __init__(
@@ -207,8 +210,12 @@ class StepTrackerError(Exception):
         path: str | None = None,
         status_code: int | None = None,
     ) -> None:
-        super().__init__(message)
-        self.transient = transient
-        self.method = method
-        self.path = path
-        self.status_code = status_code
+        super().__init__(
+            method or "",
+            path or "",
+            status_code if status_code is not None else 0,
+            reason="tracker-error",
+            failure_class="github",
+            transient=transient,
+        )
+        self.args = (message,)
