@@ -1,10 +1,9 @@
 """The coding-agent conformance harness (issue #260).
 
-Contract: ``agent-operator-contract`` major 1 at ``06ee46c`` (parent
-#245). The upstream ``v1.0.0`` harness API does not exist yet, so this
-module implements the five operations the issue names over the
-existing test doubles — the fake tracker
-(``tests/support/fake_tracker.py``) and the scripted model
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §5 (Workflow
+Inputs and selection). This module implements the five operations the issue
+names over the existing test doubles — the fake step tracker
+(``tests/support/fake_step_tracker.py``) and the scripted model
 (``tests/support/scripted_model.py``) — in the same shape the future
 contract will pin:
 
@@ -105,10 +104,11 @@ class ConformanceHarness:
         no exclusion label, so the Worker's guards pass and the next sweep
         claims it first in ``(created_at, number)`` order.
         """
-        from coding_agent.tracker.port import CandidateIssue
+        from coding_agent.inputs.port import TrackedInput
 
-        candidate = CandidateIssue(
+        candidate = TrackedInput(
             number=number,
+            input_type="issue",
             title=title,
             body=body,
             is_open=True,
@@ -116,7 +116,7 @@ class ConformanceHarness:
             labels=labels,
             created_at=created_at,
         )
-        tracker.candidates[number] = candidate
+        tracker.inputs[number] = candidate
         return candidate
 
     def hold_attempt_at_phase(self, phase: str) -> PhaseGate:

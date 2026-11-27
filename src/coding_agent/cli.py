@@ -29,9 +29,9 @@ if TYPE_CHECKING:
     from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 
 from coding_agent.env import EnvFileError, load_application_environment
-from coding_agent.github.client import GitHubClient
-from coding_agent.identity.startup import StartupCheckFailed, run_startup_checks
+from coding_agent.identity.startup import StartupCheckFailed
 from coding_agent.identity.token import TokenRejected
+from coding_agent.inputs import github as github_adapter
 from coding_agent.preflight.probes import run_preflight
 from coding_agent.profile.parser import (
     InvalidProfile,
@@ -417,8 +417,8 @@ def load_token(token_env: str) -> str:
 
 
 def run_preflight_command(owner: str, repo: str, token: str) -> int:
-    client = GitHubClient(token)
-    report = run_preflight(client, owner, repo)
+    transport = github_adapter.make_probe_transport(token)
+    report = run_preflight(transport, owner, repo)
     for result in report.results:
         mark = "PASS" if result.passed else "FAIL"
         print(f"[{mark}] {result.name}: {result.detail}")
@@ -430,9 +430,8 @@ def run_preflight_command(owner: str, repo: str, token: str) -> int:
 
 
 def run_startup_check_command(owner: str, repo: str, token: str) -> int:
-    client = GitHubClient(token)
     try:
-        result = run_startup_checks(client, token, owner, repo)
+        result = github_adapter.run_startup_checks(token, owner, repo)
     except (TokenRejected, StartupCheckFailed) as exc:
         print(f"startup-check: FAILED: {exc}", file=sys.stderr)
         return 1

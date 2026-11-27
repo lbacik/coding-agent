@@ -36,9 +36,6 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from coding_agent.inputs.errors import (
-    INITIAL_BACKOFF_SECONDS,
-    MAX_IN_PLACE_ATTEMPTS,
-    MAX_IN_PLACE_WAIT_SECONDS,
     CredentialFailure,
     HostFailure,
     RateLimitExhausted,
@@ -46,6 +43,11 @@ from coding_agent.inputs.errors import (
 )
 from coding_agent.inputs.gates import GateResult
 from coding_agent.inputs.port import InputType, StepTrackerPort
+from coding_agent.inputs.retry import (
+    INITIAL_BACKOFF_SECONDS,
+    MAX_IN_PLACE_ATTEMPTS,
+    MAX_IN_PLACE_WAIT_SECONDS,
+)
 from coding_agent.ledger.store import RunLedger, step_effect_marker
 
 if TYPE_CHECKING:
@@ -111,9 +113,9 @@ def _is_transient_perform_error(exc: BaseException) -> bool:
     if isinstance(exc, RateLimitExhausted):
         return False
     if isinstance(exc, HostFailure):
+        if exc.transient:
+            return True
         return exc.failure_class == "github" and 500 <= exc.status_code <= 599
-    if isinstance(exc, StepTrackerError):
-        return exc.transient
     return False
 
 

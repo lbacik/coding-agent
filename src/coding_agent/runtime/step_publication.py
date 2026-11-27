@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from coding_agent.github.profile import GITHUB, CodeHostProfile
 from coding_agent.inputs.errors import CredentialFailure
 from coding_agent.inputs.port import (
     InputComment,
@@ -45,6 +44,7 @@ from coding_agent.inputs.port import (
     InputType,
     StepTrackerPort,
 )
+from coding_agent.inputs.profile import GITHUB_PROFILE
 from coding_agent.ledger.store import RunLedger, step_effect_marker
 from coding_agent.runtime.effects.driver import (
     Failed,
@@ -78,13 +78,15 @@ from coding_agent.workflow.schema import WorkflowStep
 PUBLISHING_OPERATIONS = STEP_EFFECT_OPERATIONS
 """The S7b publishing operations this slice executes for real (§10.5–§10.7)."""
 
-GITHUB_BODY_CHAR_LIMIT = GITHUB.body_char_limit
-"""GitHub's body limit for pull requests, reviews and comments (§14.4, OP-19).
+GITHUB_BODY_CHAR_LIMIT = GITHUB_PROFILE.max_body_chars
+"""The host body limit for pull requests, reviews and comments (§14.4, OP-19).
 
-A rendered publication body never exceeds this: only the ``document`` is
-truncated, with an explicit marker and a pointer to the Step Artifact, while
-the closing keyword, the provenance footer and the Attempt Marker stay
-intact.
+An alias for today's host profile value: a rendered publication body never
+exceeds the host limit — only the ``document`` is truncated, with an
+explicit marker and a pointer to the Step Artifact, while the delivery
+reference, the provenance footer and the Attempt Marker stay intact.
+Executors read the live limit from the tracker's own
+:class:`CodeHostProfile` instead of this alias.
 """
 
 OPEN_PULL_REQUEST_KIND = "open-pull-request"
@@ -155,13 +157,14 @@ def pull_request_title_for_issue(issue_title: str) -> str:
 def closing_keyword_line(issue_number: int, *, draft: bool) -> str:
     """The runtime-template closing keyword of a pull request (§10.5, OP-17).
 
-    A ready pull request carries the closing ``Closes #<issue>``; a draft
-    carries the non-closing ``Part of #<issue>``. There is no parameter for
-    it, and the ``document`` is never rewritten for it (OP-20).
+    A ready pull request carries the closing line; a draft carries the
+    non-closing line. The vendor text comes from today's host profile —
+    core never formats the keyword itself — and the ``document`` is never
+    rewritten for it (OP-20). New code should call
+    ``tracker.delivery_reference`` and pass the line to
+    :func:`render_open_pull_request_body` instead.
     """
-    if draft:
-        return f"Part of #{issue_number}"
-    return f"Closes #{issue_number}"
+    return GITHUB_PROFILE.delivery_reference(str(issue_number), draft=draft)
 
 
 def provenance_footer(
@@ -227,20 +230,21 @@ def _fit_document(
     artifact_ref: str,
     assemble: Callable[[str], str],
     fixed: str,
-    profile: CodeHostProfile = GITHUB,
+    max_body_chars: int = GITHUB_BODY_CHAR_LIMIT,
 ) -> str:
     """Render the ``document`` part so ``fixed`` + it fits the limit (§14.4).
 
     The truncation marker itself takes space, so one pass can still exceed
-    GitHub's limit; the budget shrinks by the overflow until the assembled
+    the host limit; the budget shrinks by the overflow until the assembled
     body fits. The budget only ever shrinks, so the loop terminates.
+    Executors pass the tracker's own profile limit; the default is today's
+    host value.
     """
-    limit = profile.body_char_limit
-    budget = limit - len(fixed)
+    budget = max_body_chars - len(fixed)
     rendered = truncate_document(document, artifact_ref=artifact_ref, budget=budget)
     body = assemble(rendered)
-    while len(body) > limit and budget > 0:
-        budget = max(0, budget - (len(body) - limit))
+    while len(body) > max_body_chars and budget > 0:
+        budget = max(0, budget - (len(body) - max_body_chars))
         rendered = truncate_document(
             document, artifact_ref=artifact_ref, budget=budget
         )
@@ -256,20 +260,21 @@ def render_open_pull_request_body(
     workflow_id: str,
     step_id: str,
     config_digest: str,
-    issue_number: int,
-    draft: bool,
+    delivery_reference: str,
     base_revision: str,
     effect_marker: str,
-    profile: CodeHostProfile = GITHUB,
+    max_body_chars: int = GITHUB_BODY_CHAR_LIMIT,
 ) -> str:
     """Render a pull-request body from the fixed template (§10.5, §14.4, OP-18).
 
-    The closing keyword, then the ``document`` verbatim (truncated only to
-    fit GitHub's limit, OP-19), then the provenance footer carrying the Base
-    Revision, then the Attempt Marker. The runtime adds no validation
-    evidence and never rewrites model-authored text (OP-20).
+    The delivery reference line (composed by the tracker's
+    ``delivery_reference`` from the issue reference — core never formats
+    vendor keyword text itself), then the ``document`` verbatim (truncated
+    only to fit the host limit, OP-19), then the provenance footer carrying
+    the Base Revision, then the Attempt Marker. The runtime adds no
+    validation evidence and never rewrites model-authored text (OP-20).
     """
-    keyword = closing_keyword_line(issue_number, draft=draft)
+    keyword = delivery_reference
     footer = provenance_footer(
         attempt_id=attempt_id,
         workflow_id=workflow_id,
@@ -284,7 +289,7 @@ def render_open_pull_request_body(
         artifact_ref=artifact_ref,
         assemble=lambda part: f"{keyword}\n\n{part}\n\n{footer}\n{effect_marker}",
         fixed=fixed,
-        profile=profile,
+        max_body_chars=max_body_chars,
     )
     return f"{keyword}\n\n{rendered_document}\n\n{footer}\n{effect_marker}"
 
@@ -299,7 +304,7 @@ def render_review_body(
     config_digest: str,
     input_head: str,
     effect_marker: str,
-    profile: CodeHostProfile = GITHUB,
+    max_body_chars: int = GITHUB_BODY_CHAR_LIMIT,
 ) -> str:
     """Render a review body from the fixed template (§10.6, §14.4, OP-18).
 
@@ -321,7 +326,7 @@ def render_review_body(
         artifact_ref=artifact_ref,
         assemble=lambda part: f"{part}\n\n{footer}\n{effect_marker}",
         fixed=fixed,
-        profile=profile,
+        max_body_chars=max_body_chars,
     )
     return f"{rendered_document}\n\n{footer}\n{effect_marker}"
 
@@ -335,7 +340,7 @@ def render_comment_body(
     step_id: str,
     config_digest: str,
     effect_marker: str,
-    profile: CodeHostProfile = GITHUB,
+    max_body_chars: int = GITHUB_BODY_CHAR_LIMIT,
 ) -> str:
     """Render a ``post-comment`` body from the fixed template (§10.7, §14.4, OP-18).
 
@@ -356,7 +361,7 @@ def render_comment_body(
         artifact_ref=artifact_ref,
         assemble=lambda part: f"{part}\n\n{footer}\n{effect_marker}",
         fixed=fixed,
-        profile=profile,
+        max_body_chars=max_body_chars,
     )
     return f"{rendered_document}\n\n{footer}\n{effect_marker}"
 
@@ -522,10 +527,12 @@ def run_open_pull_request(
         workflow_id=workflow_id,
         step_id=step_id,
         config_digest=config_digest,
-        issue_number=input_number,
-        draft=draft,
+        delivery_reference=tracker.delivery_reference(
+            str(input_number), draft=draft
+        ),
         base_revision=base_revision,
         effect_marker=marker,
+        max_body_chars=tracker.profile.max_body_chars,
     )
     outcome = drive_effect(
         tracker=tracker,
@@ -709,6 +716,7 @@ def run_publish_review(
         config_digest=config_digest,
         input_head=head,
         effect_marker=marker,
+        max_body_chars=tracker.profile.max_body_chars,
     )
     outcome = drive_effect(
         tracker=tracker,
@@ -873,6 +881,7 @@ def run_post_comment(
         step_id=step_id,
         config_digest=config_digest,
         effect_marker=marker,
+        max_body_chars=tracker.profile.max_body_chars,
     )
     outcome = drive_effect(
         tracker=tracker,

@@ -30,7 +30,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from coding_agent.github.profile import GITHUB, CodeHostProfile
+from coding_agent.inputs.profile import (
+    GITHUB_PROFILE,
+    WORKFLOWS_PATH_PREFIX,
+    WORKFLOWS_PATH_ROOT,
+    CodeHostProfile,
+)
 from coding_agent.runtime.redaction import (
     GitCredentialHelper,
     Redactable,
@@ -405,16 +410,13 @@ def _status_paths(status_output: str) -> list[str]:
     return paths
 
 
-def _is_workflows_path(path: str, *, profile: CodeHostProfile = GITHUB) -> bool:
+def _is_workflows_path(path: str, *, profile: CodeHostProfile = GITHUB_PROFILE) -> bool:
     """Whether ``path`` is the workflows directory or a file under it (§13)."""
-    normalized = path.strip().strip('"')
-    prefix = profile.protected_ci_paths[0]
-    root = profile.protected_ci_paths[1]
-    return normalized == root or normalized.startswith(prefix)
+    return profile.is_workflows_path(path)
 
 
 def tree_touches_workflows_path(
-    workspace_path: Path, *, profile: CodeHostProfile = GITHUB
+    workspace_path: Path, *, profile: CodeHostProfile = GITHUB_PROFILE
 ) -> bool:
     """Whether the working tree touches ``.github/workflows/`` (§13, L3-ERR-9).
 
@@ -435,7 +437,7 @@ def tree_touches_workflows_path(
 
 
 def commit_touches_workflows_path(
-    workspace_path: Path, revision: str = "HEAD", *, profile: CodeHostProfile = GITHUB
+    workspace_path: Path, revision: str = "HEAD", *, profile: CodeHostProfile = GITHUB_PROFILE
 ) -> bool:
     """Whether ``revision`` touches ``.github/workflows/`` (§13, L3-ERR-9)."""
     output = _run(
@@ -804,16 +806,17 @@ def restore_detached_head(workspace_path: Path, *, sha: str) -> None:
 
 
 def target_repository_url(
-    owner: str, repo: str, *, profile: CodeHostProfile = GITHUB
+    owner: str, repo: str, *, profile: CodeHostProfile = GITHUB_PROFILE
 ) -> str:
     """The canonical credential-free URL for the Target Repository (§18).
 
-    The only remote URL the Worker ever builds (L3-ERR-11): git
-    authenticates through a :class:`GitCredentialHelper`, never through a
-    token embedded in the URL, so no log, no ``.git/config`` and no failure
-    message ever carries the token.
+    The only remote URL the Worker ever builds (L3-ERR-11): today's host
+    profile renders it. Git authenticates through a
+    :class:`GitCredentialHelper`, never through a token embedded in the
+    URL, so no log, no ``.git/config`` and no failure message ever carries
+    the token.
     """
-    return profile.remote_url(owner, repo)
+    return profile.repository_url(owner, repo)
 
 
 def read_file_at_revision(workspace_path: Path, revision: str, relpath: str) -> str | None:

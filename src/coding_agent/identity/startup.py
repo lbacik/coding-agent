@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 import requests
 
-from coding_agent.github.client import GitHubClient
 from coding_agent.identity.token import (
     assert_fine_grained_token,
     assert_no_oauth_scopes,
 )
+from coding_agent.inputs import github as github_adapter
+
+
+class StartupHttp(Protocol):
+    """The narrow HTTP surface the startup checks need.
+
+    Structural: the GitHub adapter's client satisfies it, and so does any
+    test double. Startup never names the concrete client type.
+    """
+
+    def get(self, path: str, **kwargs: Any) -> requests.Response:
+        """One authenticated ``GET`` against the code host."""
+        ...
+
 
 DEFAULT_RATE_LIMIT_MINIMUM = 100
 
@@ -31,7 +45,7 @@ class StartupCheckResult:
     rate_limit_limit: int
 
 
-def resolve_identity(client: GitHubClient) -> tuple[Identity, requests.Response]:
+def resolve_identity(client: StartupHttp) -> tuple[Identity, requests.Response]:
     """`GET /user`, applying the live token assertion to the response.
 
     The token's expiration is not checked: whether a token expires, and
@@ -47,7 +61,7 @@ def resolve_identity(client: GitHubClient) -> tuple[Identity, requests.Response]
     return Identity(account_id=body["id"], login=body["login"]), response
 
 
-def check_push_permission(client: GitHubClient, owner: str, repo: str) -> bool:
+def check_push_permission(client: StartupHttp, owner: str, repo: str) -> bool:
     """`GET /repos/{owner}/{repo}` for `permissions.push`."""
     response = client.get(f"/repos/{owner}/{repo}")
     if response.status_code != 200:
@@ -87,7 +101,7 @@ def run_startup_checks_for_token(
     credential and the Target Repository coordinates, never a client.
     """
     return run_startup_checks(
-        GitHubClient(token),
+        github_adapter.make_probe_transport(token),
         token,
         owner,
         repo,
@@ -96,7 +110,7 @@ def run_startup_checks_for_token(
 
 
 def run_startup_checks(
-    client: GitHubClient,
+    client: StartupHttp,
     token: str,
     owner: str,
     repo: str,

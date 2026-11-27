@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO, overload
 
-from coding_agent.github.profile import GITHUB, CodeHostProfile
+from coding_agent.inputs.profile import GITHUB_PROFILE, CodeHostProfile
 
 
 def redaction_marker(name: str) -> str:
@@ -322,7 +322,7 @@ class GitCredentialHelper:
 
 @contextmanager
 def temporary_git_credential_helper(
-    token: str, *, profile: CodeHostProfile = GITHUB
+    token: str, *, profile: CodeHostProfile = GITHUB_PROFILE
 ) -> Iterator[GitCredentialHelper]:
     """Hold a short-lived git credential helper for one Attempt (§18).
 

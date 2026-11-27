@@ -26,12 +26,14 @@ from dataclasses import dataclass, field, replace
 from coding_agent.inputs.port import (
     AgentFacts,
     InputComment,
+    InputPort,
     InputPullRequest,
     InputReview,
     InputType,
     LabeledEvent,
     TrackedInput,
 )
+from coding_agent.inputs.profile import GITHUB_PROFILE, CodeHostProfile
 
 _FAKE_BASE_TIP = "b" * 40
 """The base-branch tip the fake reports at Claim (contract §7)."""
@@ -46,6 +48,7 @@ class FakeStepTracker:
     agent_login: str = "coding-agent"
     agent_id: int | None = 1001
     owner_id: int = 999
+    profile: CodeHostProfile = GITHUB_PROFILE
     calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fail_on: str | None = None
     inputs: dict[int, TrackedInput] = field(default_factory=dict)
@@ -54,7 +57,7 @@ class FakeStepTracker:
     base_tip: str = _FAKE_BASE_TIP
     comments: list[InputComment] = field(default_factory=list)
     reviews: list[InputReview] = field(default_factory=list)
-    pull_requests: list[InputPullRequest] = field(default_factory=list)
+    opened_pull_requests: list[InputPullRequest] = field(default_factory=list)
     _next_pull_number: int = field(default=101, repr=False)
     open_pull_requests: list[TrackedInput] = field(default_factory=list)
     _next_comment_id: int = field(default=1, repr=False)
@@ -65,6 +68,15 @@ class FakeStepTracker:
     def target_repo(self) -> str:
         """The Target Repository, ``owner/name``."""
         return f"{self.owner}/{self.repo}"
+
+    @property
+    def pull_requests(self) -> InputPort:
+        """The pull-request facet: pull-request Workflows claim through it."""
+        return self
+
+    def delivery_reference(self, ref: str, *, draft: bool = False) -> str:
+        """The pull-request-to-issue link line for issue ``ref``."""
+        return self.profile.delivery_reference(ref, draft=draft)
 
     def _record(self, name: str, *args: object) -> None:
         self.calls.append((name, args))
@@ -330,7 +342,7 @@ class FakeStepTracker:
             draft=draft,
         )
         self._next_pull_number += 1
-        self.pull_requests.append(opened)
+        self.opened_pull_requests.append(opened)
         return opened
 
     def find_pull_request(
@@ -339,7 +351,7 @@ class FakeStepTracker:
         """Find our pull request by head branch and Attempt Marker."""
         self._record("find_pull_request", head_branch, marker)
         matching: list[InputPullRequest] = []
-        for candidate in self.pull_requests:
+        for candidate in self.opened_pull_requests:
             if candidate.head_branch != head_branch:
                 continue
             if marker not in candidate.body:
@@ -395,7 +407,7 @@ class FakeStepTracker:
             marker_present=True,
             draft=False,
         )
-        self.pull_requests.append(opened)
+        self.opened_pull_requests.append(opened)
         self._next_pull_number += 1
         return opened
 
