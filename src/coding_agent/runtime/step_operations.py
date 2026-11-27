@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
+from coding_agent.github.profile import GITHUB, CodeHostProfile
 from coding_agent.inputs.gates import GateResult
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.parser import (
@@ -522,14 +523,12 @@ class CommitPushOutcome:
     detail: str
 
 
-WORKFLOWS_PATH_PREFIX = ".github/workflows/"
-WORKFLOWS_PATH_ROOT = ".github/workflows"
-
-
-def _is_workflows_path(path: str) -> bool:
+def _is_workflows_path(path: str, *, profile: CodeHostProfile = GITHUB) -> bool:
     """Whether ``path`` is the workflows directory or a file under it (§10.4)."""
     normalized = path.strip()
-    return normalized == WORKFLOWS_PATH_ROOT or normalized.startswith(WORKFLOWS_PATH_PREFIX)
+    prefix = profile.protected_ci_paths[0]
+    root = profile.protected_ci_paths[1]
+    return normalized == root or normalized.startswith(prefix)
 
 
 def _unresolved_conflict_paths(
@@ -545,7 +544,11 @@ def _unresolved_conflict_paths(
 
 
 def _workflows_violation_paths(
-    git: AttemptWorkspaceGit, revision: str, parents: list[str]
+    git: AttemptWorkspaceGit,
+    revision: str,
+    parents: list[str],
+    *,
+    profile: CodeHostProfile = GITHUB,
 ) -> list[str]:
     """Paths under ``.github/workflows/`` not taken verbatim from a parent (§10.4).
 
@@ -561,7 +564,7 @@ def _workflows_violation_paths(
         changed.update(git.diff_names(parent, revision))
     violating: list[str] = []
     for path in sorted(changed):
-        if not _is_workflows_path(path):
+        if not _is_workflows_path(path, profile=profile):
             continue
         try:
             new_blob = git.read_blob(revision, path)

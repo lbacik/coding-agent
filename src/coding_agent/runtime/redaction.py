@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO, overload
 
+from coding_agent.github.profile import GITHUB, CodeHostProfile
+
 
 def redaction_marker(name: str) -> str:
     """The replacement text for a registered secret (§18, L3-ERR-11)."""
@@ -320,18 +322,21 @@ class GitCredentialHelper:
 
 @contextmanager
 def temporary_git_credential_helper(
-    token: str, *, host: str = "github.com"
+    token: str, *, profile: CodeHostProfile = GITHUB
 ) -> Iterator[GitCredentialHelper]:
     """Hold a short-lived git credential helper for one Attempt (§18).
 
     Writes the token to a ``0600`` store file outside the repository and
     yields the helper; the file is removed on exit. A token containing a
-    newline is refused rather than written.
+    newline is refused rather than written. The store entry host is the
+    profile's first redaction host, so the remote URL itself stays the
+    canonical credential-free form.
     """
     if not token:
         raise ValueError("temporary_git_credential_helper needs a non-empty token")
     if "\n" in token or "\r" in token:
         raise ValueError("token must not contain a newline")
+    host = profile.redaction_hosts[0]
     descriptor, tmp_name = tempfile.mkstemp(prefix="coding-agent-git-credentials-")
     try:
         os.fchmod(descriptor, 0o600)

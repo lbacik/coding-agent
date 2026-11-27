@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from coding_agent.github.profile import GITHUB, CodeHostProfile
 from coding_agent.inputs.errors import CredentialFailure
 from coding_agent.inputs.port import (
     InputComment,
@@ -77,7 +78,7 @@ from coding_agent.workflow.schema import WorkflowStep
 PUBLISHING_OPERATIONS = STEP_EFFECT_OPERATIONS
 """The S7b publishing operations this slice executes for real (§10.5–§10.7)."""
 
-GITHUB_BODY_CHAR_LIMIT = 65_536
+GITHUB_BODY_CHAR_LIMIT = GITHUB.body_char_limit
 """GitHub's body limit for pull requests, reviews and comments (§14.4, OP-19).
 
 A rendered publication body never exceeds this: only the ``document`` is
@@ -226,6 +227,7 @@ def _fit_document(
     artifact_ref: str,
     assemble: Callable[[str], str],
     fixed: str,
+    profile: CodeHostProfile = GITHUB,
 ) -> str:
     """Render the ``document`` part so ``fixed`` + it fits the limit (§14.4).
 
@@ -233,11 +235,12 @@ def _fit_document(
     GitHub's limit; the budget shrinks by the overflow until the assembled
     body fits. The budget only ever shrinks, so the loop terminates.
     """
-    budget = GITHUB_BODY_CHAR_LIMIT - len(fixed)
+    limit = profile.body_char_limit
+    budget = limit - len(fixed)
     rendered = truncate_document(document, artifact_ref=artifact_ref, budget=budget)
     body = assemble(rendered)
-    while len(body) > GITHUB_BODY_CHAR_LIMIT and budget > 0:
-        budget = max(0, budget - (len(body) - GITHUB_BODY_CHAR_LIMIT))
+    while len(body) > limit and budget > 0:
+        budget = max(0, budget - (len(body) - limit))
         rendered = truncate_document(
             document, artifact_ref=artifact_ref, budget=budget
         )
@@ -257,6 +260,7 @@ def render_open_pull_request_body(
     draft: bool,
     base_revision: str,
     effect_marker: str,
+    profile: CodeHostProfile = GITHUB,
 ) -> str:
     """Render a pull-request body from the fixed template (§10.5, §14.4, OP-18).
 
@@ -280,6 +284,7 @@ def render_open_pull_request_body(
         artifact_ref=artifact_ref,
         assemble=lambda part: f"{keyword}\n\n{part}\n\n{footer}\n{effect_marker}",
         fixed=fixed,
+        profile=profile,
     )
     return f"{keyword}\n\n{rendered_document}\n\n{footer}\n{effect_marker}"
 
@@ -294,6 +299,7 @@ def render_review_body(
     config_digest: str,
     input_head: str,
     effect_marker: str,
+    profile: CodeHostProfile = GITHUB,
 ) -> str:
     """Render a review body from the fixed template (§10.6, §14.4, OP-18).
 
@@ -315,6 +321,7 @@ def render_review_body(
         artifact_ref=artifact_ref,
         assemble=lambda part: f"{part}\n\n{footer}\n{effect_marker}",
         fixed=fixed,
+        profile=profile,
     )
     return f"{rendered_document}\n\n{footer}\n{effect_marker}"
 
@@ -328,6 +335,7 @@ def render_comment_body(
     step_id: str,
     config_digest: str,
     effect_marker: str,
+    profile: CodeHostProfile = GITHUB,
 ) -> str:
     """Render a ``post-comment`` body from the fixed template (§10.7, §14.4, OP-18).
 
@@ -348,6 +356,7 @@ def render_comment_body(
         artifact_ref=artifact_ref,
         assemble=lambda part: f"{part}\n\n{footer}\n{effect_marker}",
         fixed=fixed,
+        profile=profile,
     )
     return f"{rendered_document}\n\n{footer}\n{effect_marker}"
 
