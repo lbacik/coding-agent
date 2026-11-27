@@ -635,7 +635,7 @@ def test_requires_base_tree_evidence_never_satisfies() -> None:
 def test_commit_and_push_requirement_unmet_before_any_write(tmp_path: Path) -> None:
     """`requirement-unmet`: validation passed only on an earlier tree."""
     repo = tmp_path / "repo"
-    _init_repo(repo)
+    head = _init_repo(repo)
     (repo / "work.txt").write_text("new\n", encoding="utf-8")
     git = FakeGitOps()
     registry = ValidationRegistry()
@@ -648,6 +648,7 @@ def test_commit_and_push_requirement_unmet_before_any_write(tmp_path: Path) -> N
         expected_head=None,
         author_name="agent",
         author_email="1+agent@users.noreply.github.com",
+        start_commit=head,
         with_requires=(("run-validation", "passed"),),
         validation_registry=registry,
         gate=None,
@@ -661,6 +662,13 @@ def test_commit_and_push_requirement_unmet_before_any_write(tmp_path: Path) -> N
 # --- OP-5: commit-and-push on an issue branch ----------------------------------
 
 
+def _start_or_head(repo: Path, git: FakeGitOps, start_commit: str | None) -> str:
+    """Default an omitted start commit to the current HEAD (test-only)."""
+    if start_commit is not None:
+        return start_commit
+    return git.head_sha(repo)
+
+
 def _issue_push(
     repo: Path,
     git: FakeGitOps,
@@ -669,6 +677,7 @@ def _issue_push(
     with_requires: tuple[tuple[str, str], ...] = (),
     validation_registry: ValidationRegistry | None = None,
     branch: str = "agent/implement/7/1-greeting",
+    start_commit: str | None = None,
 ) -> CommitPushOutcome:
     return run_commit_and_push(
         workspace=repo,
@@ -678,6 +687,7 @@ def _issue_push(
         expected_head=None,
         author_name="agent",
         author_email="1+agent@users.noreply.github.com",
+        start_commit=_start_or_head(repo, git, start_commit),
         with_requires=with_requires,
         validation_registry=validation_registry,
         gate=gate,
@@ -694,6 +704,7 @@ def _pr_push(
     expected_head: str | None,
     ledger: RunLedger | None = None,
     branch: str = "pr-head",
+    start_commit: str | None = None,
 ) -> CommitPushOutcome:
     return run_commit_and_push(
         workspace=repo,
@@ -703,6 +714,7 @@ def _pr_push(
         expected_head=expected_head,
         author_name="agent",
         author_email="1+agent@users.noreply.github.com",
+        start_commit=_start_or_head(repo, git, start_commit),
         with_requires=(),
         validation_registry=ValidationRegistry(),
         gate=None,
@@ -745,6 +757,43 @@ def test_commit_and_push_issue_no_changes(tmp_path: Path, ledger: RunLedger) -> 
     assert ledger.get_step_effect("implement#7/1", "push", 1, 0) is None
 
 
+def test_commit_and_push_issue_clean_without_attempt_commit_is_no_changes(
+    tmp_path: Path, ledger: RunLedger
+) -> None:
+    """§10.4: clean, HEAD == start, no remote branch → `no-changes`; no push."""
+    repo = tmp_path / "repo"
+    head = _init_repo(repo)
+    git = FakeGitOps()
+    outcome = _issue_push(repo, git, ledger, start_commit=head)
+    assert outcome.result == "no-changes"
+    assert outcome.revision == head
+    assert git.pushes == []
+    assert "agent/implement/7/1-greeting" not in git.remote
+    assert ledger.get_step_effect("implement#7/1", "push", 1, 0) is None
+
+
+def test_commit_and_push_issue_clean_past_start_pushes(
+    tmp_path: Path, ledger: RunLedger
+) -> None:
+    """§10.4: clean, HEAD past the start, no remote branch → `pushed`."""
+    repo = tmp_path / "repo"
+    base = _init_repo(repo)
+    (repo / "work.txt").write_text("work\n", encoding="utf-8")
+    _git("add", "-A", cwd=repo)
+    _git("commit", "-qm", "an earlier Attempt commit", cwd=repo)
+    head = _git("rev-parse", "HEAD", cwd=repo)
+    assert head != base
+    git = FakeGitOps()
+    outcome = _issue_push(repo, git, ledger, start_commit=base)
+    assert outcome.result == "pushed"
+    assert outcome.revision == head
+    assert git.remote["agent/implement/7/1-greeting"] == head
+    assert git.pushes == [("issue", "agent/implement/7/1-greeting")]
+    record = ledger.get_step_effect("implement#7/1", "push", 1, 0)
+    assert record is not None
+    assert record.status == "receipt"
+
+
 def test_commit_and_push_issue_remote_moved_is_error(tmp_path: Path) -> None:
     """OP-5/§10.4: a moved remote branch is never overwritten (`error`)."""
     repo = tmp_path / "repo"
@@ -762,7 +811,7 @@ def test_commit_and_push_pushes_fast_forward_only(tmp_path: Path) -> None:
     from coding_agent.runtime.step_operations import LiveCommitPushGitOps
 
     repo = tmp_path / "repo"
-    _init_repo(repo)
+    base = _init_repo(repo)
     bare = tmp_path / "remote.git"
     completed = subprocess.run(
         ["git", "init", "--bare", str(bare)], capture_output=True, text=True
@@ -779,6 +828,7 @@ def test_commit_and_push_pushes_fast_forward_only(tmp_path: Path) -> None:
         expected_head=None,
         author_name="agent",
         author_email="1+agent@users.noreply.github.com",
+        start_commit=base,
         git=git,
     )
     assert first.result == "pushed"
@@ -801,6 +851,7 @@ def test_commit_and_push_pushes_fast_forward_only(tmp_path: Path) -> None:
         expected_head=None,
         author_name="agent",
         author_email="1+agent@users.noreply.github.com",
+        start_commit=base,
         git=git,
     )
     assert second.result == "error"
@@ -1351,6 +1402,7 @@ def test_implement_shape_open_pr_after_validated_commit(
         expected_head=None,
         author_name="agent",
         author_email="1+agent@users.noreply.github.com",
+        start_commit=base,
         validation_registry=registry,
         git=git,
         ledger=ledger,
@@ -1405,7 +1457,7 @@ def test_pr_shape_publish_review_after_validated_commit(
     from coding_agent.runtime.step_publication import run_publish_review
 
     repo = tmp_path / "repo"
-    _init_repo(repo)
+    pr_base = _init_repo(repo)
     (repo / "fix.txt").write_text("fix\n", encoding="utf-8")
     pre_commit_tree = tree_identity(repo)
     registry = ValidationRegistry()
@@ -1419,6 +1471,7 @@ def test_pr_shape_publish_review_after_validated_commit(
         expected_head="a" * 40,
         author_name="agent",
         author_email="1+agent@users.noreply.github.com",
+        start_commit=pr_base,
         validation_registry=registry,
         git=git,
         ledger=ledger,

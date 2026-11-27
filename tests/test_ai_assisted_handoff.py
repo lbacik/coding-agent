@@ -1188,16 +1188,18 @@ def _e2e_offer(tracker: Any, number: int) -> Any:
 def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requests_mock: Any
 ) -> None:
-    """Both publication shapes continue on a second Worker, same evidence.
+    """A pushed round continues on a second Worker; a clean one diagnoses.
 
     Worker 1 publishes a pushed AI-assisted Round Handoff for issue 7 (the
-    scribe writes a file) and a verified clean one for issue 8 (two
-    ``commit-and-push`` steps, the second genuinely reporting
-    ``no-changes``). Main advances on the remote between the workers; a
-    second Worker with a fresh state volume picks up both offers, opens
-    each Continuation at the exact published work commit with the recorded
-    Base Revision retained, and sees each published note as declared input
-    data after the operation preflight.
+    scribe writes a file). For issue 8 the scribe writes nothing, so both
+    ``commit-and-push`` steps genuinely report ``no-changes`` and push
+    nothing (§10.4): the remote cannot serve a work commit and the round
+    ends with an ``unavailable-revision`` diagnostic instead of an offer.
+    Main advances on the remote between the workers; a second Worker with
+    a fresh state volume picks up issue 7's offer, opens the Continuation
+    at the exact published work commit with the recorded Base Revision
+    retained, and sees the published note as declared input data after
+    the operation preflight.
     """
     import json as _json
 
@@ -1283,11 +1285,18 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     finally:
         tracker.inputs[7] = _replace(tracker.inputs[7], labels=saved_labels)
     assert exit_1b == 0
-    offer_8 = _e2e_offer(tracker, 8)
-    assert offer_8.note_kind == "ai-assisted"
-    assert offer_8.note == note_8
-    assert offer_8.base_revision == base
-    assert offer_8.work_commit != offer_7.work_commit
+    # Nothing was pushed for issue 8, so no pickup is offered: the
+    # terminal record carries the `unavailable-revision` diagnostic.
+    from coding_agent.inputs.pickup import newest_pickup_offer as _newest
+
+    assert _newest(tracker.list_comments(8, "issue"), agent_id=999, workflow_id=WORKFLOW, issue_number=8) is None
+    terminal_8 = [
+        comment
+        for comment in tracker.list_comments(8, "issue")
+        if comment.author_id == 999 and "implement#8/1" in comment.body
+    ]
+    assert terminal_8, "no terminal record for implement#8/1"
+    assert "Round Handoff: no pickup (unavailable-revision)" in terminal_8[-1].body
 
     executions_8 = [
         (record.step_id, record.result)
@@ -1296,6 +1305,7 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
         )
     ]
     _Ledger(w1 / "state" / "run-ledger.sqlite3").close()
+    assert ("push-1", "no-changes") in executions_8
     assert ("push-2", "no-changes") in executions_8
 
     # Main moves on while the offers stand: the Continuation must retain
@@ -1308,7 +1318,7 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     moved = _e2e_git(src, "rev-parse", "HEAD")
     assert moved != base
 
-    offers = {7: offer_7, 8: offer_8}
+    offers = {7: offer_7}
     seen_notes: dict[str, str] = {}
     workspace_checks: list[str] = []
 
@@ -1357,7 +1367,6 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
     model_w2 = _ScriptedModel(
         [
             _e2e_ai([_e2e_report_call("done", {})]),
-            _e2e_ai([_e2e_report_call("done", {})]),
         ]
     )
     # ADR 0037: the validating continue workflow reads the Target
@@ -1387,37 +1396,33 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
         remote=seeded["remote"],
         run_dir=w2,
         name="continue",
-        max_attempts=2,
+        max_attempts=1,
         workflow_runner=_observing_runner,
         monkeypatch=monkeypatch,
     )
     assert exit_2 == 0
     assert seen_notes == {
         "implement#7/2": note_7,
-        "implement#8/2": note_8,
     }
-    assert sorted(workspace_checks) == ["implement#7/2", "implement#8/2"]
+    assert sorted(workspace_checks) == ["implement#7/2"]
 
     ledger_2 = _Ledger(w2 / "state" / "run-ledger.sqlite3")
     try:
         outcome_7_2 = ledger_2.get_outcome("implement#7/2")
         assert outcome_7_2 is not None
         assert outcome_7_2.outcome == "completed"
-        outcome_8_2 = ledger_2.get_outcome("implement#8/2")
-        assert outcome_8_2 is not None
-        assert outcome_8_2.outcome == "completed"
         pin_7_2 = ledger_2.get_attempt_pin("implement#7/2")
         assert pin_7_2 is not None
         assert pin_7_2.base_revision == base
     finally:
         ledger_2.close()
 
-    # Each Continuation's opening request frames the published note as
+    # The Continuation's opening request frames the published note as
     # declared input data: the exact note JSON under the heading, with the
     # data-not-instructions boundary.
-    assert len(model_w2.invocations) == 2
+    assert len(model_w2.invocations) == 1
     for invocation, expected_note in zip(
-        model_w2.invocations, (note_7, note_8), strict=True
+        model_w2.invocations, (note_7,), strict=True
     ):
         text = " ".join(str(message.content) for message in invocation)
         assert "# Declared inputs" in text
