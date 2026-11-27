@@ -133,6 +133,7 @@ def _serve_mutation(
     ledger_path: Path,
     kind: str,
     request: dict[str, Any],
+    live: LiveView | None = None,
     registry: Redactable = None,
 ) -> dict[str, Any] | None:
     """Commit a ``stop`` or ``resume``; ``None`` where the line is malformed.
@@ -143,6 +144,12 @@ def _serve_mutation(
     ``{"error_code": ...}`` with the fields the client maps to its
     envelope. A lock wait past the budget answers ``internal`` with
     ``stored: false`` (§8.4).
+
+    A ``stop --after`` plan records the live Attempt only where the
+    Worker has finished startup recovery (``live`` ready): a plan
+    committed during ``starting`` or ``recovering`` records none, so
+    unfinished Attempts from an earlier process never count when
+    recovery settles them.
     """
     from coding_agent.operator import commands as operator_commands
 
@@ -181,12 +188,14 @@ def _serve_mutation(
                 pass
             return {"error_code": "internal", "stored": False}
         if kind == "stop":
+            recovery_complete = True if live is None else live.is_ready()
             record, replayed, error = operator_commands.commit_stop(
                 connection,
                 request_id=request_id,
                 expect_repo=expect_repo,
                 target_repository=target_repository,
                 after=after,
+                recovery_complete=recovery_complete,
                 registry=registry,
             )
         else:
@@ -550,7 +559,11 @@ def _handle_one(
         return build_status_result(ledger_path, live)
     if op == "stop":
         return _serve_mutation(
-            ledger_path=ledger_path, kind="stop", request=request, registry=registry
+            ledger_path=ledger_path,
+            kind="stop",
+            request=request,
+            live=live,
+            registry=registry,
         )
     if op == "resume":
         return _serve_mutation(

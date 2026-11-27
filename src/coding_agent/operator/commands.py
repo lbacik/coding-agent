@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS operator_intake (
     stop_plan_sequence INTEGER,
     stop_plan_remaining INTEGER,
     stop_plan_counted INTEGER,
+    stop_plan_active_attempt TEXT,
     updated_at TEXT NOT NULL
 )
 """
@@ -282,6 +283,7 @@ def ensure_operator_tables(connection: sqlite3.Connection) -> None:
         ("stop_plan_sequence", "INTEGER"),
         ("stop_plan_remaining", "INTEGER"),
         ("stop_plan_counted", "INTEGER"),
+        ("stop_plan_active_attempt", "TEXT"),
     ):
         if column not in existing:
             try:
@@ -318,7 +320,7 @@ def read_intake(connection: sqlite3.Connection) -> dict[str, Any]:
         row = connection.execute(
             "SELECT state, pending_stop_request_id, pending_stop_sequence,"
             " stop_plan_request_id, stop_plan_sequence,"
-            " stop_plan_remaining, stop_plan_counted"
+            " stop_plan_remaining, stop_plan_counted, stop_plan_active_attempt"
             " FROM operator_intake WHERE id = 1"
         ).fetchone()
     except sqlite3.Error:
@@ -349,11 +351,18 @@ def read_intake(connection: sqlite3.Connection) -> dict[str, Any]:
             plan_counted = int(row[6]) if row[6] is not None else 0
         except (TypeError, ValueError):
             plan_counted = 0
+        try:
+            active_attempt = (
+                str(row[7]) if len(row) > 7 and row[7] is not None else None
+            )
+        except (TypeError, ValueError):
+            active_attempt = None
         plan = {
             "request_id": str(row[3]),
             "sequence": plan_sequence,
             "remaining": plan_remaining,
             "counted": plan_counted,
+            "active_attempt": active_attempt,
         }
     return {"state": state, "pending_stop": pending, "stop_plan": plan}
 
@@ -458,14 +467,16 @@ def _set_intake(
     stop_plan_sequence: int | None = None,
     stop_plan_remaining: int | None = None,
     stop_plan_counted: int | None = None,
+    stop_plan_active_attempt: str | None = None,
 ) -> None:
     """Write the single Intake row (the caller holds the write lock)."""
     connection.execute(
         "INSERT INTO operator_intake"
         " (id, state, pending_stop_request_id, pending_stop_sequence,"
         "  stop_plan_request_id, stop_plan_sequence,"
-        "  stop_plan_remaining, stop_plan_counted, updated_at)"
-        " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "  stop_plan_remaining, stop_plan_counted, stop_plan_active_attempt,"
+        "  updated_at)"
+        " VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(id) DO UPDATE SET"
         " state = excluded.state,"
         " pending_stop_request_id = excluded.pending_stop_request_id,"
@@ -474,6 +485,7 @@ def _set_intake(
         " stop_plan_sequence = excluded.stop_plan_sequence,"
         " stop_plan_remaining = excluded.stop_plan_remaining,"
         " stop_plan_counted = excluded.stop_plan_counted,"
+        " stop_plan_active_attempt = excluded.stop_plan_active_attempt,"
         " updated_at = excluded.updated_at",
         (
             state,
@@ -483,6 +495,7 @@ def _set_intake(
             stop_plan_sequence,
             stop_plan_remaining,
             stop_plan_counted,
+            stop_plan_active_attempt,
             now,
         ),
     )
@@ -550,6 +563,100 @@ def validate_stop_after(value: Any) -> int | None:
     return number
 
 
+def _single_unfinished_attempt(connection: sqlite3.Connection) -> str | None:
+    """The unfinished Attempt id where exactly one exists, else ``None``.
+
+    Read in the caller's write transaction: while a running Worker holds
+    the volume there is at most one unfinished Attempt and it is the
+    live one, so this identifies the Attempt a committed stop plan must
+    still count. While starting or recovering the unfinished Attempts
+    belong to an earlier process, so the caller passes
+    ``recovery_complete=False`` and never calls this.
+    """
+    try:
+        rows = connection.execute(
+            "SELECT attempt_id FROM attempts"
+            " WHERE state NOT IN ('finished', 'released')"
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    if len(rows) != 1:
+        return None
+    candidate = rows[0][0]
+    return str(candidate) if candidate is not None else None
+
+
+def _plan_active_attempt(plan: dict[str, Any]) -> str | None:
+    """The Attempt recorded live at the plan's commit, if any.
+
+    Normalises the durable ``active_attempt`` field: anything but a
+    string (including absent data on pre-migration rows) reads as no
+    recorded Attempt.
+    """
+    active_attempt = plan.get("active_attempt")
+    if not isinstance(active_attempt, str):
+        return None
+    return active_attempt
+
+
+def _parse_stored_moment(value: Any) -> datetime | None:
+    """Parse a stored timestamp, or ``None`` where it is missing or corrupt.
+
+    Ledger rows use ``datetime.isoformat()`` (``+00:00``) while command
+    rows use the contract ``Z`` shape; ``datetime.fromisoformat``
+    accepts both. A naive value reads as UTC.
+    """
+    if value is None:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def _claimed_after_plan_commit(
+    connection: sqlite3.Connection, attempt_id: str, plan_request_id: str
+) -> bool:
+    """Whether ``attempt_id`` was claimed after the plan was committed.
+
+    Compares the Attempt's ``created_at`` with the plan command's
+    ``created_at`` in the caller's transaction. ``True`` where the
+    Attempt is as new as the plan or newer, and also ``True`` where the
+    ordering cannot be established (a missing row or an unparseable
+    timestamp): only an Attempt that provably predates the plan reads
+    ``False``, so corrupt history keeps the legacy count-everything
+    behaviour instead of silently stalling a plan.
+    """
+    try:
+        attempt_row = connection.execute(
+            "SELECT created_at FROM attempts WHERE attempt_id = ?", (attempt_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return True
+    try:
+        plan_row = connection.execute(
+            "SELECT created_at FROM operator_commands WHERE request_id = ?",
+            (plan_request_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return True
+    if attempt_row is None or attempt_row[0] is None:
+        return True
+    if plan_row is None or plan_row[0] is None:
+        return True
+    attempt_moment = _parse_stored_moment(attempt_row[0])
+    plan_moment = _parse_stored_moment(plan_row[0])
+    if attempt_moment is None or plan_moment is None:
+        return True
+    # ``>=`` rather than ``>``: the claim boundary commits after the
+    # plan commit in causal order, but a coarse clock may stamp both
+    # with the same moment. A tie still means "claimed for this plan".
+    return attempt_moment >= plan_moment
+
+
 def commit_stop(
     connection: sqlite3.Connection,
     *,
@@ -557,6 +664,7 @@ def commit_stop(
     expect_repo: str,
     target_repository: str,
     after: Any = None,
+    recovery_complete: bool = True,
     registry: Redactable = None,
 ) -> tuple[CommandRecord | None, bool, dict[str, Any] | None]:
     """Commit a ``stop`` in this connection's write transaction.
@@ -573,6 +681,14 @@ def commit_stop(
     a stop plan with ``remaining = N`` instead of closing Intake: the
     Worker takes N more Attempts with a recorded Terminal Outcome and
     then drains. The plan supersedes any earlier plan or pending stop.
+
+    ``recovery_complete`` tells whether the committing process has
+    finished startup recovery: where true, the single unfinished
+    Attempt (if any) is the live one and is recorded on the plan as
+    the active Attempt, so it still counts however it finalizes (even
+    through startup recovery after a process loss). While starting or
+    recovering, unfinished Attempts belong to an earlier process and
+    no active Attempt is recorded, so settling them never counts.
     """
     if expect_repo.lower() != target_repository.lower():
         return (
@@ -599,6 +715,10 @@ def commit_stop(
     intake = read_intake(connection)
     if arguments.get("after") is not None:
         remaining = int(arguments["after"])
+        if recovery_complete:
+            active_attempt = _single_unfinished_attempt(connection)
+        else:
+            active_attempt = None
         superseded_plan_ids = _supersede_intake_commands(
             connection, intake, now=now
         )
@@ -640,6 +760,7 @@ def commit_stop(
             stop_plan_sequence=record.sequence,
             stop_plan_remaining=remaining,
             stop_plan_counted=0,
+            stop_plan_active_attempt=active_attempt,
             now=now,
         )
         return (record, False, None)
@@ -1194,6 +1315,7 @@ def complete_pending_stop(
             stop_plan_sequence=int(plan.get("sequence") or 0),
             stop_plan_remaining=int(plan.get("remaining") or 0),
             stop_plan_counted=int(plan.get("counted") or 0),
+            stop_plan_active_attempt=_plan_active_attempt(plan),
             now=moment,
         )
     else:
@@ -1230,7 +1352,11 @@ def count_stop_plan(
     Called in the same write transaction that moves an Attempt to
     ``finished``. A ``released`` Claim never reaches here, and a
     ``finished`` without a recorded Terminal Outcome does not count.
-    At zero the plan completes: Intake closes and the command becomes
+    Only an Attempt the plan is waiting for counts: the Attempt that
+    was live when the plan was committed (recorded on the plan), or an
+    Attempt claimed after the commit. An Attempt an earlier process
+    left unfinished never counts when startup recovery settles it. At
+    zero the plan completes: Intake closes and the command becomes
     ``completed``, emitting ``command_resolved`` in the same
     transaction. Otherwise Intake stays open with the decremented
     ``remaining`` and incremented ``counted``.
@@ -1240,6 +1366,12 @@ def count_stop_plan(
     if not isinstance(plan, dict) or not plan.get("request_id"):
         return
     if not _has_recorded_outcome(connection, attempt_id):
+        return
+    plan_id = str(plan["request_id"])
+    active_attempt = _plan_active_attempt(plan)
+    if attempt_id != active_attempt and not _claimed_after_plan_commit(
+        connection, attempt_id, plan_id
+    ):
         return
     try:
         remaining = int(plan.get("remaining") or 0)
@@ -1252,7 +1384,6 @@ def count_stop_plan(
     if remaining <= 0:
         return
     moment = now if now is not None else _utc_now_iso()
-    plan_id = str(plan["request_id"])
     new_remaining = remaining - 1
     new_counted = counted + 1
     if new_remaining <= 0:
@@ -1297,6 +1428,7 @@ def count_stop_plan(
             stop_plan_sequence=int(plan.get("sequence") or 0),
             stop_plan_remaining=new_remaining,
             stop_plan_counted=new_counted,
+            stop_plan_active_attempt=active_attempt,
             now=moment,
         )
 
@@ -1372,6 +1504,7 @@ def reconcile_accepted(
                 stop_plan_sequence=int(plan.get("sequence") or 0),
                 stop_plan_remaining=int(plan.get("remaining") or 0),
                 stop_plan_counted=int(plan.get("counted") or 0),
+                stop_plan_active_attempt=_plan_active_attempt(plan),
                 now=now,
             )
         else:
