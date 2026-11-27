@@ -1712,7 +1712,7 @@ def test_a_failed_live_terminal_write_does_not_crash_the_worker(
 
     class _RefusingTerminalCommentTracker(FakeStepTracker):
         def post_comment(
-            self, number: int, input_type: InputType, body: str
+            self, number: int, input_type: InputType, body: str, marker: AttemptMarker
         ) -> Any:
             if "kind=terminal" in body:
                 self._record("post_comment", number, input_type, body)
@@ -1821,7 +1821,7 @@ def test_a_credential_failure_during_finalisation_halts_leaving_recovery(
 
     class _RevokedTracker(FakeStepTracker):
         def post_comment(
-            self, number: int, input_type: InputType, body: str
+            self, number: int, input_type: InputType, body: str, marker: AttemptMarker
         ) -> Any:
             self._record("post_comment", number, input_type, body)
             raise CredentialFailure("POST", f"/repos/o/r/issues/{number}/comments")

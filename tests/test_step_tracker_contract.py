@@ -931,7 +931,9 @@ def test_foreign_marker_review_is_never_ours(harness: TrackerHarness) -> None:
     """§14: a review by another account carrying our marker is not our receipt."""
     if _is_live(harness):
         pytest.skip("live side has no foreign marker review")
-    found = harness.tracker.find_review_by_marker(harness.pr_number, "implement#30/1")
+    found = harness.tracker.find_review_by_marker(
+        harness.pr_number, claim_marker_for("implement#30/1")
+    )
     assert found is not None
     assert found.author_login == AGENT_LOGIN
 
@@ -970,22 +972,26 @@ def test_draft_pull_request_carries_the_draft_reference(
     tracker = harness.tracker
     reference = tracker.delivery_reference(str(harness.issue_number), draft=True)
     assert reference == f"Part of #{harness.issue_number}"
-    marker = step_effect_marker(
-        "implement#30/20", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+    marker = AttemptMarker(
+        attempt="implement#30/20",
         kind="open-pull-request",
+        step=CLAIM_STEP,
+        execution_number=CLAIM_EXECUTION,
+        ordinal=CLAIM_COMMENT_ORDINAL,
     )
-    body = f"{reference}\n\na document\n\n{marker}"
+    body = f"{reference}\n\na document\n\n{format_attempt_marker(marker)}"
     opened = tracker.open_pull_request(
         title="a title",
         head_branch="agent/implement/30/20-slug",
         base_branch="main",
         body=body,
         draft=True,
+        marker=marker,
     )
     assert opened.draft is True
     assert reference in opened.body
     found = tracker.find_pull_request(
-        "agent/implement/30/20-slug", "implement#30/20"
+        "agent/implement/30/20-slug", marker
     )
     assert found is not None
     assert found.number == opened.number

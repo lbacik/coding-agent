@@ -17,9 +17,12 @@ from pathlib import Path
 import pytest
 
 from coding_agent.github.errors import CredentialFailure
+from coding_agent.inputs.claim import claim_marker_for
 from coding_agent.inputs.gates import GateResult
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputComment, InputType, TrackedInput
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.step_finalisation import (
     count_uncommitted_files,
     filter_end_labels,
@@ -45,10 +48,31 @@ from coding_agent.workflow.schema import (
 )
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
+from support.markers import terminal_marker_text
 
 ATTEMPT = "implement#7/1"
 NUMBER = 7
 LABEL = "agent:implement"
+
+
+def _comment_marker() -> AttemptMarker:
+    return AttemptMarker(
+        attempt=ATTEMPT,
+        kind="post-comment",
+        step="handoff-comment",
+        execution_number=1,
+        ordinal=0,
+    )
+
+
+def _pr_marker() -> AttemptMarker:
+    return AttemptMarker(
+        attempt=ATTEMPT,
+        kind="open-pull-request",
+        step="open-pr",
+        execution_number=1,
+        ordinal=0,
+    )
 
 
 def _workflow(workflow_id: str = "implement") -> Workflow:
@@ -149,6 +173,7 @@ def test_terminal_writes_comment_labels_assignment(
     comment = render_terminal_comment(
         attempt_id=ATTEMPT,
         outcome="completed",
+        marker_text=terminal_marker_text(ATTEMPT),
         ending_step="process",
         step_result="done",
         workflow_end="completed",
@@ -184,7 +209,11 @@ def test_terminal_comment_posted_on_closed_input(
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue(is_open=False, assignees=("coding-agent",))
     _open_attempt(ledger)
-    comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="withdrawn")
+    comment = render_terminal_comment(
+        attempt_id=ATTEMPT,
+        outcome="withdrawn",
+        marker_text=terminal_marker_text(ATTEMPT),
+    )
     perform_terminal_writes(
         inputs=tracker, code_host=tracker,
         ledger=ledger,
@@ -210,7 +239,11 @@ def test_assignment_kept_while_another_claim_in_force(
     tracker.seed_comments(["other worker claim kind=claim marker"])
     _open_attempt(ledger)
     _open_attempt(ledger, "implement#7/2")
-    comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="completed")
+    comment = render_terminal_comment(
+        attempt_id=ATTEMPT,
+        outcome="completed",
+        marker_text=terminal_marker_text(ATTEMPT),
+    )
     perform_terminal_writes(
         inputs=tracker, code_host=tracker,
         ledger=ledger,
@@ -239,7 +272,11 @@ def test_perform_never_writes_selection_label(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="completed")
+    comment = render_terminal_comment(
+        attempt_id=ATTEMPT,
+        outcome="completed",
+        marker_text=terminal_marker_text(ATTEMPT),
+    )
     perform_terminal_writes(
         inputs=tracker, code_host=tracker,
         ledger=ledger,
@@ -263,9 +300,10 @@ def test_restart_finds_landed_write_by_key(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
-    body = f"a landed comment\n{marker}"
-    tracker.post_comment(NUMBER, "issue", body)
+    marker = _comment_marker()
+    marker_text = format_attempt_marker(marker)
+    body = f"a landed comment\n{marker_text}"
+    tracker.post_comment(NUMBER, "issue", body, marker)
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, body)
     settled = settle_open_step_effects(
         inputs=tracker, code_host=tracker,
@@ -285,8 +323,9 @@ def test_restart_performs_absent_write_once(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
-    body = f"a fresh comment\n{marker}"
+    marker = _comment_marker()
+    marker_text = format_attempt_marker(marker)
+    body = f"a fresh comment\n{marker_text}"
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, body)
     settled = settle_open_step_effects(
         inputs=tracker, code_host=tracker,
@@ -298,7 +337,7 @@ def test_restart_performs_absent_write_once(ledger: RunLedger) -> None:
     )
     assert settled == {"receipt": 0, "performed": 1, "not-performed": 0}
     assert len(tracker.comments) == 1
-    assert marker in tracker.comments[0].body
+    assert marker_text in tracker.comments[0].body
 
 
 def test_restart_records_not_performed_where_gate_fails(
@@ -308,8 +347,9 @@ def test_restart_records_not_performed_where_gate_fails(
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
-    _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, f"body\n{marker}")
+    marker = _comment_marker()
+    marker_text = format_attempt_marker(marker)
+    _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, f"body\n{marker_text}")
     settled = settle_open_step_effects(
         inputs=tracker, code_host=tracker,
         ledger=ledger,
@@ -347,9 +387,10 @@ def test_receipt_recovered_after_write_before_receipt(
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
-    body = f"written but unreceipted\n{marker}"
-    tracker.post_comment(NUMBER, "issue", body)
+    marker = _comment_marker()
+    marker_text = format_attempt_marker(marker)
+    body = f"written but unreceipted\n{marker_text}"
+    tracker.post_comment(NUMBER, "issue", body, marker)
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, body)
     intent = ledger.get_step_effect(ATTEMPT, "handoff-comment", 1, 0)
     assert intent is not None and intent.status == "intent"
@@ -373,8 +414,9 @@ def test_recovery_publishes_recorded_truncated_body_unchanged(
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
-    truncated = "x" * 100 + "\n[truncated]\n" + marker
+    marker = _comment_marker()
+    marker_text = format_attempt_marker(marker)
+    truncated = "x" * 100 + "\n[truncated]\n" + marker_text
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, truncated)
     assert (
         settle_open_step_effects(
@@ -398,12 +440,11 @@ def test_human_closed_pull_request_never_recreated(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(
-        ATTEMPT, "open-pr", 1, 0, kind="open-pull-request"
-    )
-    body = f"implementing\n{marker}"
+    marker = _pr_marker()
+    body = f"implementing\n{format_attempt_marker(marker)}"
     opened = tracker.open_pull_request(
-        title="t", head_branch="agent/branch", base_branch="main", body=body
+        title="t", head_branch="agent/branch", base_branch="main", body=body,
+        marker=marker,
     )
     tracker.opened_pull_requests[0] = tracker.opened_pull_requests[0].__class__(
         **{**opened.__dict__, "state": "closed"},
@@ -446,12 +487,11 @@ def test_drift_keeps_pull_request_and_lists_it(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(
-        ATTEMPT, "open-pr", 1, 0, kind="open-pull-request"
-    )
-    body = f"implementing\n{marker}"
+    marker = _pr_marker()
+    body = f"implementing\n{format_attempt_marker(marker)}"
     opened = tracker.open_pull_request(
-        title="t", head_branch="agent/branch", base_branch="main", body=body
+        title="t", head_branch="agent/branch", base_branch="main", body=body,
+        marker=marker,
     )
     ledger.record_step_effect_intent(
         ATTEMPT,
@@ -497,7 +537,13 @@ def test_restart_releases_unconfirmed_claim(
 
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     key_text = _key(ATTEMPT, "", 0, 1)
-    tracker.post_claim_comment(NUMBER, "issue", f"stale claim {key_text}")
+    claim_marker = claim_marker_for(ATTEMPT)
+    tracker.post_claim_comment(
+        NUMBER,
+        "issue",
+        f"stale claim {key_text}\n{format_attempt_marker(claim_marker)}",
+        claim_marker,
+    )
     ledger.open_attempt(
         ATTEMPT,
         effective_configuration={"workflow": "implement"},
@@ -573,7 +619,11 @@ def test_recorded_outcome_finished_as_recorded(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     _open_attempt(ledger)
-    comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="failed")
+    comment = render_terminal_comment(
+        attempt_id=ATTEMPT,
+        outcome="failed",
+        marker_text=terminal_marker_text(ATTEMPT),
+    )
     ledger.record_terminal_outcome(
         ATTEMPT,
         outcome="failed",
@@ -604,10 +654,15 @@ def test_failed_attempt_reverts_nothing(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
     tracker.open_pull_request(
-        title="t", head_branch="agent/branch", base_branch="main", body="b"
+        title="t", head_branch="agent/branch", base_branch="main", body="b",
+        marker=_pr_marker(),
     )
-    tracker.post_comment(NUMBER, "issue", "a review note")
-    comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="failed")
+    tracker.post_comment(NUMBER, "issue", "a review note", _comment_marker())
+    comment = render_terminal_comment(
+        attempt_id=ATTEMPT,
+        outcome="failed",
+        marker_text=terminal_marker_text(ATTEMPT),
+    )
     perform_terminal_writes(
         inputs=tracker, code_host=tracker,
         ledger=ledger,
@@ -631,12 +686,12 @@ class _CredentialTracker(FakeStepTracker):
     failing: bool = True
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         self._record("post_comment", number, input_type, body)
         if self.failing:
             raise CredentialFailure("POST", "/repos/o/r/issues/7/comments")
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
 
 def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
@@ -647,9 +702,10 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     tracker = _CredentialTracker()
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     _open_attempt(ledger)
-    marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
+    marker = _comment_marker()
+    marker_text = format_attempt_marker(marker)
     _comment_intent(
-        ledger, ATTEMPT, "handoff-comment", 1, f"a comment\n{marker}"
+        ledger, ATTEMPT, "handoff-comment", 1, f"a comment\n{marker_text}"
     )
     with pytest.raises(CredentialFailure):
         recover_attempt(
@@ -700,7 +756,10 @@ def test_dirty_tree_reported_never_pushed(tmp_path: Path) -> None:
     (repo / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
     assert count_uncommitted_files(repo) == 1
     comment = render_terminal_comment(
-        attempt_id=ATTEMPT, outcome="interrupted", uncommitted_count=1
+        attempt_id=ATTEMPT,
+        outcome="interrupted",
+        marker_text=terminal_marker_text(ATTEMPT),
+        uncommitted_count=1,
     )
     assert "Uncommitted files: 1" in comment
 
