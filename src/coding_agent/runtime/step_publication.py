@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from coding_agent.inputs.errors import CredentialFailure
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import (
     CodeHostPort,
     InputComment,
@@ -46,7 +47,7 @@ from coding_agent.inputs.port import (
     InputType,
 )
 from coding_agent.inputs.profile import GITHUB_PROFILE
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.effects.driver import (
     Failed,
     Landed,
@@ -153,19 +154,6 @@ def pull_request_title_for_issue(issue_title: str) -> str:
     validation, CFG-35): the title is the Target Issue title verbatim.
     """
     return issue_title
-
-
-def closing_keyword_line(issue_number: int, *, draft: bool) -> str:
-    """The runtime-template closing keyword of a pull request (§10.5, OP-17).
-
-    A ready pull request carries the closing line; a draft carries the
-    non-closing line. The vendor text comes from today's host profile —
-    core never formats the keyword itself — and the ``document`` is never
-    rewritten for it (OP-20). New code should call
-    ``code_host.delivery_reference`` and pass the line to
-    :func:`render_open_pull_request_body` instead.
-    """
-    return GITHUB_PROFILE.delivery_reference(str(issue_number), draft=draft)
 
 
 def provenance_footer(
@@ -518,8 +506,12 @@ def run_open_pull_request(
             facts={"tree_id": tree},
             detail=f"error: could not read HEAD: {exc!r}",
         )
-    marker = step_effect_marker(
-        attempt_id, step_id, seq, 0, kind=OPEN_PULL_REQUEST_KIND
+    marker = AttemptMarker(
+        attempt=attempt_id,
+        kind=OPEN_PULL_REQUEST_KIND,
+        step=step_id,
+        execution_number=seq,
+        ordinal=0,
     )
     title = pull_request_title_for_issue(issue_title)
     body = render_open_pull_request_body(
@@ -533,7 +525,7 @@ def run_open_pull_request(
             str(input_number), draft=draft
         ),
         base_revision=base_revision,
-        effect_marker=marker,
+        effect_marker=code_host.format_marker(marker),
         max_body_chars=code_host.profile.max_body_chars,
     )
     outcome = drive_effect(
@@ -708,8 +700,12 @@ def run_publish_review(
             facts={"tree_id": tree, "expected_head": expected_head, "head": head},
             detail="stale-head: the remote head differs from the Input Head",
         )
-    marker = step_effect_marker(
-        attempt_id, step_id, seq, 0, kind=PUBLISH_REVIEW_KIND
+    marker = AttemptMarker(
+        attempt=attempt_id,
+        kind=PUBLISH_REVIEW_KIND,
+        step=step_id,
+        execution_number=seq,
+        ordinal=0,
     )
     body = render_review_body(
         document=document,
@@ -719,7 +715,7 @@ def run_publish_review(
         step_id=step_id,
         config_digest=config_digest,
         input_head=head,
-        effect_marker=marker,
+        effect_marker=code_host.format_marker(marker),
         max_body_chars=code_host.profile.max_body_chars,
     )
     outcome = drive_effect(
@@ -876,8 +872,12 @@ def run_post_comment(
             facts={"tree_id": tree, "with_body": with_body},
             detail=f"error: {exc}",
         )
-    marker = step_effect_marker(
-        attempt_id, step_id, seq, 0, kind=POST_COMMENT_KIND
+    marker = AttemptMarker(
+        attempt=attempt_id,
+        kind=POST_COMMENT_KIND,
+        step=step_id,
+        execution_number=seq,
+        ordinal=0,
     )
     body = render_comment_body(
         document=document,
@@ -886,7 +886,7 @@ def run_post_comment(
         workflow_id=workflow_id,
         step_id=step_id,
         config_digest=config_digest,
-        effect_marker=marker,
+        effect_marker=code_host.format_marker(marker),
         max_body_chars=code_host.profile.max_body_chars,
     )
     outcome = drive_effect(

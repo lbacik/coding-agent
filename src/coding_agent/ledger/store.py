@@ -425,21 +425,6 @@ def step_effect_key(attempt_id: str, step_id: str, execution_number: int, ordina
     return f"{attempt_id}/{step_id or '<claim>'}/{execution_number}/{ordinal}"
 
 
-def step_effect_marker(
-    attempt_id: str, step_id: str, execution_number: int, ordinal: int, *, kind: str
-) -> str:
-    """The Attempt Marker line carrying an Effect Intent key (§14.1, §14.4).
-
-    Additive beside ``runtime.publication.attempt_marker``: the marker keeps
-    the machine-readable Attempt id and write kind, and appends the Effect
-    Intent key so restart settlement can look the write up remotely by key.
-    """
-    return (
-        f"<!-- coding-agent attempt={attempt_id} kind={kind} "
-        f"step={step_id or '-'} n={execution_number} ordinal={ordinal} -->"
-    )
-
-
 @dataclass(frozen=True)
 class AttemptPin:
     """The input state pinned at Claim (step-workflow contract §5.1, §6, §7).

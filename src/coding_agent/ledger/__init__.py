@@ -48,7 +48,6 @@ from coding_agent.ledger.store import (
     StepTransitionRecord,
     digest_effect_payload,
     step_effect_key,
-    step_effect_marker,
 )
 
 __all__ = [
@@ -83,5 +82,4 @@ __all__ = [
     "digest_effect_payload",
     "open_offline_ledger",
     "step_effect_key",
-    "step_effect_marker",
 ]

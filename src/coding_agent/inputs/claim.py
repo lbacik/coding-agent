@@ -63,11 +63,11 @@ from coding_agent.inputs.selection import (
     open_agent_pr_for_issue,
     sort_inputs,
 )
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.ledger.store import (
     STEP_EFFECT_STATUS_RECEIPT,
     RunLedger,
     step_effect_key,
-    step_effect_marker,
 )
 from coding_agent.operator.commands import (
     ACK_NOT_FULFILLED,
@@ -104,25 +104,28 @@ TERMINAL_MARKER_ORDINAL = 0
 """The write ordinal of the terminal comment marker (§14.1)."""
 
 
-def terminal_marker_for(raw_attempt_id: str) -> str:
+def terminal_marker_for(raw_attempt_id: str) -> AttemptMarker:
     """The canonical terminal marker a trusted terminal comment carries (§15.3).
 
-    Rendered by :func:`step_effect_marker` with the finalisation position
-    (``step=- n=0 ordinal=0``) and ``kind=terminal``. Only a comment carrying
-    exactly this marker for the Claim's exact Attempt id counts as trusted
-    terminal evidence; a malformed marker never matches.
+    The structured value at the finalisation position
+    (``step="" n=0 ordinal=0``) with ``kind=terminal``. The adapter renders
+    it to its embedded form; only a comment carrying exactly that rendering
+    for the Claim's exact Attempt id counts as trusted terminal evidence;
+    a malformed marker never matches.
     """
-    return step_effect_marker(
-        raw_attempt_id,
-        TERMINAL_MARKER_STEP,
-        TERMINAL_MARKER_EXECUTION,
-        TERMINAL_MARKER_ORDINAL,
+    return AttemptMarker(
+        attempt=raw_attempt_id,
         kind=TERMINAL_MARKER_KIND,
+        step=TERMINAL_MARKER_STEP,
+        execution_number=TERMINAL_MARKER_EXECUTION,
+        ordinal=TERMINAL_MARKER_ORDINAL,
     )
 
 
 def trusted_terminal_attempt_ids(
-    comments: Sequence[InputComment], agent_id: int | None
+    comments: Sequence[InputComment],
+    agent_id: int | None,
+    format_marker: Callable[[AttemptMarker], str],
 ) -> set[str]:
     """The Attempt ids a trusted terminal comment ends (§6.1, §14).
 
@@ -144,14 +147,17 @@ def trusted_terminal_attempt_ids(
         if parsed is None:
             continue
         raw_attempt_id = str(parsed)
-        if terminal_marker_for(raw_attempt_id) not in comment.body:
+        if format_marker(terminal_marker_for(raw_attempt_id)) not in comment.body:
             continue
         trusted.add(raw_attempt_id)
     return trusted
 
 
 def has_trusted_terminal_comment(
-    comments: Sequence[InputComment], raw_attempt_id: str, agent_id: int | None
+    comments: Sequence[InputComment],
+    raw_attempt_id: str,
+    agent_id: int | None,
+    format_marker: Callable[[AttemptMarker], str],
 ) -> bool:
     """Whether a trusted terminal comment ends ``raw_attempt_id`` (§6.1).
 
@@ -160,7 +166,9 @@ def has_trusted_terminal_comment(
     canonical terminal marker. A forged author, malformed marker or
     mismatched Attempt reads as absent.
     """
-    return raw_attempt_id in trusted_terminal_attempt_ids(comments, agent_id)
+    return raw_attempt_id in trusted_terminal_attempt_ids(
+        comments, agent_id, format_marker
+    )
 
 
 @dataclass(frozen=True)
@@ -242,14 +250,26 @@ class ReleasedClaim:
     reason: str
 
 
-def claim_comment_body(attempt: str, intent_key: str) -> str:
-    """Render the Claim Comment body: the Attempt id and its marker (§6.1)."""
-    marker = step_effect_marker(
-        attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL, kind=CLAIM_KIND
-    )
+def claim_comment_body(attempt: str, intent_key: str, marker_text: str) -> str:
+    """Render the Claim Comment body: the Attempt id and its marker (§6.1).
+
+    ``marker_text`` is the adapter's rendering of the Claim Attempt Marker;
+    core never formats marker text itself.
+    """
     return (
-        f"coding-agent claims {attempt} for the {CLAIM_KIND}.\n\n{marker}\n"
+        f"coding-agent claims {attempt} for the {CLAIM_KIND}.\n\n{marker_text}\n"
         f"<!-- effect-intent {intent_key} -->\n"
+    )
+
+
+def claim_marker_for(attempt: str) -> AttemptMarker:
+    """The structured Claim Comment Attempt Marker (§6.1)."""
+    return AttemptMarker(
+        attempt=attempt,
+        kind=CLAIM_KIND,
+        step=CLAIM_STEP,
+        execution_number=CLAIM_EXECUTION,
+        ordinal=CLAIM_COMMENT_ORDINAL,
     )
 
 
@@ -274,6 +294,7 @@ def in_force_claim_comments(
     comments: Sequence[InputComment],
     ledger: RunLedger,
     agent_id: int | None = None,
+    format_marker: Callable[[AttemptMarker], str] | None = None,
 ) -> list[InputComment]:
     """The Claim Comments still in force: kind=claim, Attempt not over (§6.1).
 
@@ -284,7 +305,11 @@ def in_force_claim_comments(
     (the Agent Identity's numeric author id plus the canonical terminal
     marker). Unknown ids without trusted terminal evidence stay in force.
     """
-    trusted = trusted_terminal_attempt_ids(comments, agent_id)
+    if format_marker is None:
+        from coding_agent.inputs.github import format_attempt_marker as _fmt
+
+        format_marker = _fmt
+    trusted = trusted_terminal_attempt_ids(comments, agent_id, format_marker)
     in_force: list[InputComment] = []
     for comment in comments:
         if f"kind={CLAIM_KIND}" not in comment.body:
@@ -306,9 +331,12 @@ def winning_claim(
     comments: Sequence[InputComment],
     ledger: RunLedger,
     agent_id: int | None = None,
+    format_marker: Callable[[AttemptMarker], str] | None = None,
 ) -> InputComment | None:
     """The winning Claim Comment: the lowest comment id in force (§6.1)."""
-    in_force = in_force_claim_comments(comments, ledger, agent_id)
+    in_force = in_force_claim_comments(
+        comments, ledger, agent_id, format_marker
+    )
     if not in_force:
         return None
     return min(in_force, key=lambda comment: comment.comment_id)
@@ -349,6 +377,7 @@ def _guard_reason(
         inputs.list_comments(candidate.number, candidate.input_type),
         ledger,
         claim_agent_id,
+        inputs.format_marker,
     )
     agent_pr_open = False
     if config.input_type == "issue" and config.skip_open_agent_pr:
@@ -421,7 +450,10 @@ def _release_tracker_state(
     remaining = [
         comment
         for comment in in_force_claim_comments(
-            inputs.list_comments(number, input_type), ledger, inputs.agent_id
+            inputs.list_comments(number, input_type),
+            ledger,
+            inputs.agent_id,
+            inputs.format_marker,
         )
         if comment.comment_id != own_comment_id
     ]
@@ -582,12 +614,14 @@ def _write_claim_writes(
     comment_key = step_effect_key(
         attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
     )
+    marker = claim_marker_for(attempt)
+    marker_text = inputs.format_marker(marker)
     ledger.record_step_effect_intent(
         attempt,
         CLAIM_STEP,
         CLAIM_EXECUTION,
         CLAIM_COMMENT_ORDINAL,
-        rendered_payload=claim_comment_body(attempt, comment_key),
+        rendered_payload=claim_comment_body(attempt, comment_key, marker_text),
         expected_target={
             "input": f"{candidate.input_type}#{candidate.number}",
             "kind": CLAIM_KIND,
@@ -596,7 +630,8 @@ def _write_claim_writes(
     posted = inputs.post_claim_comment(
         candidate.number,
         candidate.input_type,
-        claim_comment_body(attempt, comment_key),
+        claim_comment_body(attempt, comment_key, marker_text),
+        marker,
     )
     _record_claim_receipts(
         ledger, attempt, comment_id=posted.comment_id, agent_login=agent_login
@@ -649,9 +684,11 @@ def _execute_claim(
             candidate.number, candidate.input_type
         )
         for raw_finished in trusted_terminal_attempt_ids(
-            live_comments, claim_agent_id
+            live_comments, claim_agent_id, inputs.format_marker
         ):
-            live_markers.append(terminal_marker_for(raw_finished))
+            live_markers.append(
+                inputs.format_marker(terminal_marker_for(raw_finished))
+            )
     except Exception:
         pass
     n = next_n(
@@ -985,6 +1022,7 @@ def _readback_failure(
         inputs.list_comments(candidate.number, candidate.input_type),
         ledger,
         readback_agent_id,
+        inputs.format_marker,
     )
     if winner is None or winner.comment_id != own_comment_id:
         return "claim-lost"
@@ -1213,14 +1251,9 @@ def recover_unconfirmed_claim(
     in force, and marks the record ``released`` — the shared path with the
     live read-back failure above.
     """
-    own: InputComment | None = None
-    key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL)
-    for comment in inputs.list_comments(number, input_type):
-        if key in comment.body and input_author_matches_comment(
-            inputs, comment
-        ):
-            own = comment
-            break
+    own: InputComment | None = inputs.find_comment_by_marker(
+        number, input_type, claim_marker_for(attempt)
+    )
     release_claim(
         inputs,
         ledger,
