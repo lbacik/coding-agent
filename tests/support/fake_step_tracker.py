@@ -51,6 +51,7 @@ class FakeStepTracker:
     profile: CodeHostProfile = GITHUB_PROFILE
     calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
     fail_on: str | None = None
+    fail_with: BaseException | None = None
     inputs: dict[int, TrackedInput] = field(default_factory=dict)
     labeled_events: dict[tuple[int, str], LabeledEvent] = field(default_factory=dict)
     blockers_open: dict[int, bool] = field(default_factory=dict)
@@ -81,6 +82,8 @@ class FakeStepTracker:
     def _record(self, name: str, *args: object) -> None:
         self.calls.append((name, args))
         if self.fail_on == name:
+            if self.fail_with is not None:
+                raise self.fail_with
             raise RuntimeError(f"fake tracker failure in {name}")
 
     def call_names(self) -> list[str]:

@@ -21,15 +21,23 @@ repository and is opt-in through ``CODING_AGENT_LIVE_TESTS=1`` (plus
 ``GITHUB_TOKEN``) — never on token presence alone. Reads assert reported
 facts; the Claim and Gate tests assert the write order and that selection
 itself never writes.
+
+A future adapter (Jira, GitLab) joins by providing the same
+``TrackerHarness`` — a tracker plus its issue and pull-request numbers —
+and passing this suite unchanged: every case asserts identical behaviour
+on both sides with no per-adapter branches, so a vendor limitation that
+cannot satisfy a rule fails here for the maintainer to decide rather than
+as a carved-out exception.
 """
 
 from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 
@@ -40,8 +48,14 @@ from coding_agent.inputs.claim import (
     CLAIM_STEP,
     claim_comment_body,
 )
+from coding_agent.inputs.errors import (
+    CredentialFailure,
+    HostFailure,
+    PermissionRefusal,
+    RateLimitExhausted,
+)
 from coding_agent.inputs.github import GitHubStepTracker
-from coding_agent.inputs.port import CodeHostPort
+from coding_agent.inputs.port import CodeHostPort, TrackedInput
 from coding_agent.ledger.store import step_effect_key, step_effect_marker
 from support.fake_step_tracker import FakeStepTracker
 
@@ -117,7 +131,45 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
     issue = _issue_payload(ISSUE_NUMBER, ISSUE_LABEL)
     pr_issue = _issue_payload(PR_NUMBER, PR_LABEL)
     pr_issue["pull_request"] = {"url": f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls/31"}
+    pr_issue["issue_dependencies_summary"] = {"blocked_by": 2}
     pull = _pull_payload(PR_NUMBER, marker)
+
+    held_assignees: list[dict[str, Any]] = [{"login": "human"}, {"login": AGENT_LOGIN}]
+
+    def _issue_callback(request: Any, context: Any) -> str:
+        context.status_code = 200
+        return json_module.dumps({**issue, "assignees": held_assignees})
+
+    def _post_assignees_callback(request: Any, context: Any) -> str:
+        posted = json_module.loads(request.text)
+        seen = {entry["login"] for entry in held_assignees}
+        for login in posted.get("assignees", []):
+            if login not in seen:
+                held_assignees.append({"login": login})
+                seen.add(login)
+        context.status_code = 200
+        return json_module.dumps({"assignees": held_assignees})
+
+    def _delete_assignees_callback(request: Any, context: Any) -> str:
+        posted = json_module.loads(request.text or "{}")
+        doomed = set(posted.get("assignees", []))
+        held_assignees[:] = [
+            entry for entry in held_assignees if entry["login"] not in doomed
+        ]
+        context.status_code = 200
+        return json_module.dumps({})
+
+    def _delete_label_callback(request: Any, context: Any) -> str:
+        label = unquote(request.url.split("?")[0].rsplit("/", 1)[-1])
+        names = [
+            entry["name"] for entry in issue.get("labels", []) if isinstance(entry, dict)
+        ]
+        if label not in names:
+            context.status_code = 404
+            return json_module.dumps({"message": "Not Found"})
+        issue["labels"] = [entry for entry in issue["labels"] if entry["name"] != label]
+        context.status_code = 200
+        return json_module.dumps(list(issue["labels"]))
 
     requests_mock.get(f"{TEST_BASE_URL}/user", json={"login": AGENT_LOGIN, "id": AGENT_ID})
     requests_mock.get(
@@ -125,7 +177,8 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
         json={"owner": {"id": OWNER_ID, "login": "octocat"}},
     )
     requests_mock.get(
-        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}", json=issue
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}",
+        text=_issue_callback,
     )
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{PR_NUMBER}", json=pr_issue
@@ -247,11 +300,15 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
     )
     requests_mock.post(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}/assignees",
-        json={"assignees": [{"login": AGENT_LOGIN}]},
+        text=_post_assignees_callback,
     )
     requests_mock.delete(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}/assignees",
-        json={},
+        text=_delete_assignees_callback,
+    )
+    requests_mock.delete(
+        re.compile(r"/repos/octocat/sandbox/issues/\d+/labels/.+"),
+        text=_delete_label_callback,
     )
     held_comments: list[dict[str, Any]] = [
         {
@@ -306,6 +363,12 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
             "id": 599,
             "body": f"a human quoting us: {marker}",
             "user": {"login": "human", "id": 424242},
+            "commit_id": "h" * 40,
+        },
+        {
+            "id": 600,
+            "body": marker,
+            "user": {"login": AGENT_LOGIN, "id": AGENT_ID},
             "commit_id": "h" * 40,
         },
     ]
@@ -371,11 +434,12 @@ def _fake_harness() -> TrackerHarness:
         body="a body",
         is_open=True,
         labels=(ISSUE_LABEL,),
-        assignees=(),
+        assignees=("human", AGENT_LOGIN),
         created_at="2026-10-01T00:00:00Z",
         author_login="human",
         author_id=7,
     )
+    fake.blockers_open[PR_NUMBER] = True
     fake.inputs[PR_NUMBER] = TrackedInput(
         number=PR_NUMBER,
         input_type="pull-request",
@@ -814,6 +878,174 @@ def test_post_comment_published_and_found_by_marker(
     assert found is not None
     assert found.comment_id == posted.comment_id
     assert key in body
+
+
+def test_foreign_marker_review_is_never_ours(harness: TrackerHarness) -> None:
+    """§14: a review by another account carrying our marker is not our receipt."""
+    if _is_live(harness):
+        pytest.skip("live side has no foreign marker review")
+    found = harness.tracker.find_review_by_marker(harness.pr_number, "implement#30/1")
+    assert found is not None
+    assert found.author_login == AGENT_LOGIN
+
+
+def test_remove_absent_label_is_idempotent(harness: TrackerHarness) -> None:
+    """§15.3: removing an absent label succeeds and leaves labels unchanged."""
+    if _is_live(harness):
+        pytest.skip("live side probes issues only")
+    harness.tracker.remove_label(harness.issue_number, "issue", "no-such-label")
+    fetched = harness.tracker.fetch_input(harness.issue_number, "issue")
+    assert ISSUE_LABEL in fetched.labels
+
+
+def test_assign_unassign_touch_only_the_agent_identity(
+    harness: TrackerHarness,
+) -> None:
+    """§6: unassign removes only the Agent Identity; assign re-adds only it."""
+    if _is_live(harness):
+        pytest.skip("live side probes issues only")
+    harness.tracker.unassign_input(harness.issue_number, "issue")
+    fetched = harness.tracker.fetch_input(harness.issue_number, "issue")
+    assert "human" in fetched.assignees
+    assert AGENT_LOGIN not in fetched.assignees
+    harness.tracker.assign_input(harness.issue_number, "issue")
+    fetched = harness.tracker.fetch_input(harness.issue_number, "issue")
+    assert "human" in fetched.assignees
+    assert AGENT_LOGIN in fetched.assignees
+
+
+def test_draft_pull_request_carries_the_draft_reference(
+    harness: TrackerHarness,
+) -> None:
+    """§10.5, OP-14: a draft pull request already carries the draft reference."""
+    if _is_live(harness):
+        pytest.skip("live side probes issues only")
+    tracker = harness.tracker
+    reference = tracker.delivery_reference(str(harness.issue_number), draft=True)
+    assert reference == f"Part of #{harness.issue_number}"
+    marker = step_effect_marker(
+        "implement#30/20", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+        kind="open-pull-request",
+    )
+    body = f"{reference}\n\na document\n\n{marker}"
+    opened = tracker.open_pull_request(
+        title="a title",
+        head_branch="agent/implement/30/20-slug",
+        base_branch="main",
+        body=body,
+        draft=True,
+    )
+    assert opened.draft is True
+    assert reference in opened.body
+    found = tracker.find_pull_request(
+        "agent/implement/30/20-slug", "implement#30/20"
+    )
+    assert found is not None
+    assert found.number == opened.number
+    assert found.draft is True
+
+
+def test_blocker_read_reports_open_blockers(harness: TrackerHarness) -> None:
+    """§5.2: the blocker read reports an open blocker and its absence."""
+    if _is_live(harness):
+        pytest.skip("live side probes issues only")
+    assert harness.tracker.has_open_blocker(harness.issue_number, "issue") is False
+    assert (
+        harness.tracker.has_open_blocker(harness.pr_number, "pull-request") is True
+    )
+
+
+def _fresh_adapter() -> GitHubStepTracker:
+    """The GitHub adapter over no network: failure stubs arrive per test."""
+    return GitHubStepTracker(
+        owner="octocat",
+        repo="sandbox",
+        client=GitHubClient("github_pat_testtoken", base_url=TEST_BASE_URL),
+        agent_login=AGENT_LOGIN,
+        agent_id=AGENT_ID,
+    )
+
+
+def _both_sides(fail_with: BaseException) -> list[Callable[[], TrackedInput]]:
+    """The same failing read on the fake and on the adapter over fake HTTP."""
+    fake = FakeStepTracker(fail_on="fetch_input", fail_with=fail_with)
+    adapter = _fresh_adapter()
+    return [
+        lambda: fake.fetch_input(ISSUE_NUMBER, "issue"),
+        lambda: adapter.fetch_input(ISSUE_NUMBER, "issue"),
+    ]
+
+
+def test_confirmed_credential_failure_maps_to_neutral_on_both_sides(
+    requests_mock: Any,
+) -> None:
+    """§14.4: a confirmed 401 raises neutral ``CredentialFailure`` on both sides."""
+    issue_url = f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}"
+    requests_mock.get(
+        issue_url, status_code=401, json={"message": "Bad credentials"}
+    )
+    requests_mock.get(
+        f"{TEST_BASE_URL}/user",
+        status_code=401,
+        json={"message": "Bad credentials"},
+    )
+    calls = _both_sides(
+        CredentialFailure("GET", f"/repos/octocat/sandbox/issues/{ISSUE_NUMBER}"),
+    )
+    for call in calls:
+        with pytest.raises(CredentialFailure):
+            call()
+    for call in calls:
+        with pytest.raises(HostFailure):
+            call()
+
+
+def test_permission_refusal_maps_to_neutral_on_both_sides(
+    requests_mock: Any,
+) -> None:
+    """§14.4: a permission-shaped 403 raises neutral ``PermissionRefusal``."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}",
+        status_code=403,
+        headers={"x-ratelimit-remaining": "10"},
+        json={"message": "refused"},
+    )
+    calls = _both_sides(
+        PermissionRefusal("GET", f"/repos/octocat/sandbox/issues/{ISSUE_NUMBER}"),
+    )
+    for call in calls:
+        with pytest.raises(PermissionRefusal):
+            call()
+    for call in calls:
+        with pytest.raises(HostFailure):
+            call()
+
+
+def test_rate_limit_exhaustion_maps_to_neutral_on_both_sides(
+    requests_mock: Any,
+) -> None:
+    """§14.4: an exhausted rate limit raises neutral ``RateLimitExhausted``."""
+    requests_mock.get(
+        f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}",
+        status_code=403,
+        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9999999999"},
+        json={"message": "API rate limit exceeded"},
+    )
+    calls = _both_sides(
+        RateLimitExhausted(
+            "GET",
+            f"/repos/octocat/sandbox/issues/{ISSUE_NUMBER}",
+            403,
+            attempts=3,
+            waited_seconds=0.0,
+        ),
+    )
+    for call in calls:
+        with pytest.raises(RateLimitExhausted):
+            call()
+    for call in calls:
+        with pytest.raises(HostFailure):
+            call()
 
 
 def test_live_issue_flow(harness: TrackerHarness) -> None:
