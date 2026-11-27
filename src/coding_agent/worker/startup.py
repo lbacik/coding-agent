@@ -36,7 +36,6 @@ from typing import Any, cast
 
 import requests
 
-from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import (
     Identity,
     StartupCheckFailed,
@@ -90,8 +89,8 @@ from coding_agent.skillbundle.deployment import (
 from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.validate.runner import CredentialStrippedCommandRunner
 from coding_agent.worker.ports import (
+    CodeHostStartupPort,
     WorkerPorts,
-    github_tracker,
 )
 from coding_agent.workflow.effective import (
     build_effective_configuration,
@@ -507,7 +506,8 @@ def _emit_startup_event(
 
 def read_target_repository_profile(
     *,
-    client: GitHubClient,
+    github: CodeHostStartupPort,
+    token: str,
     tracker: StepTrackerPort,
     owner: str,
     repo: str,
@@ -517,11 +517,11 @@ def read_target_repository_profile(
 
     ADR 0037: a Workflow that needs a Validation Contract and names no
     ``target.profile`` reads ``docs/agents/project-profile.yml`` from the
-    Target Repository at the base-branch tip through GitHub. Parse plus
-    schema only — toolchain and service fit stay in ``check-readiness``,
-    which reports them as ``not-ready``. A missing, unreadable or invalid
-    profile raises :class:`StartupRefused` (phase ``project-profile``)
-    naming the searched path and the revision read.
+    Target Repository at the base-branch tip through the code-host adapter.
+    Parse plus schema only — toolchain and service fit stay in
+    ``check-readiness``, which reports them as ``not-ready``. A missing,
+    unreadable or invalid profile raises :class:`StartupRefused` (phase
+    ``project-profile``) naming the searched path and the revision read.
     """
     try:
         tip = tracker.fetch_base_tip(base_branch)
@@ -532,8 +532,8 @@ def read_target_repository_profile(
             f"to read {PROFILE_RELPATH}: {exc}",
         ) from exc
     try:
-        response = client.get(
-            f"/repos/{owner}/{repo}/contents/{PROFILE_RELPATH}?ref={tip}"
+        response = github.fetch_repository_file(
+            token=token, owner=owner, repo=repo, rev=tip, path=PROFILE_RELPATH
         )
     except requests.RequestException as exc:
         raise StartupRefused(
@@ -916,9 +916,8 @@ def start(
                 "github-checks",
                 f"{config}: target.token-env: {token_env} is not set",
             )
-        client = GitHubClient(token)
         try:
-            startup = ports.github.run_checks(client, token, owner, repo)
+            startup = ports.github.run_checks(token, owner, repo)
         except (TokenRejected, StartupCheckFailed, requests.RequestException) as exc:
             raise StartupRefused(
                 "github-checks", f"GitHub startup check failed: {exc}"
@@ -932,7 +931,7 @@ def start(
         tracker = ports.github.make_tracker(
             owner=owner,
             repo=repo,
-            client=client,
+            token=token,
             identity=identity,
         )
         try:
@@ -953,7 +952,8 @@ def start(
             # service fit stay in `check-readiness`.
             live.set_startup_check("project-profile")
             read_target_repository_profile(
-                client=client,
+                github=ports.github,
+                token=token,
                 tracker=tracker,
                 owner=owner,
                 repo=repo,
@@ -1233,7 +1233,7 @@ def start(
             return ports.github.make_tracker(
                 owner=owner,
                 repo=repo,
-                client=GitHubClient(token),
+                token=token,
                 identity=identity,
             )
 
@@ -1320,7 +1320,6 @@ __all__ = [
     "configured_ceilings",
     "configured_pin",
     "credential_env_vars",
-    "github_tracker",
     "read_target_repository_profile",
     "referenced_model_decls",
     "start",

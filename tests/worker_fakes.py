@@ -8,10 +8,10 @@ shared list, so tests assert phase order without patching module globals:
 - :class:`FakeSkillBundlePort` passes verification through
   :func:`support.run_inputs.make_run_inputs`, or returns a configured
   refusal, or raises a configured error.
-- :class:`FakeGitHubPort` passes the §18 checks with a configured identity,
-  hands out a configured :class:`FakeStepTracker`, and resolves the
-  identity mode from the tracker's owner lookup — or refuses/raises where
-  configured. It can also delegate the checks to the real
+- :class:`FakeCodeHostPort` passes the §18 checks with a configured
+  identity, hands out a configured :class:`FakeStepTracker`, and resolves
+  the identity mode from the tracker's owner lookup — or refuses/raises
+  where configured. It can also delegate the checks to the real
   :func:`run_startup_checks` where a test drives live HTTP through a mock.
 - :class:`FakeModelPort` hands out a configured model, delegates gateway
   resolution to the real rules while recording the lookup, and passes the
@@ -30,6 +30,8 @@ from typing import Any, cast
 
 from langchain_core.messages import AIMessage
 
+import requests
+
 from coding_agent.github.client import GitHubClient
 from coding_agent.identity.startup import (
     Identity,
@@ -37,6 +39,9 @@ from coding_agent.identity.startup import (
     run_startup_checks,
 )
 from coding_agent.inputs.authorisation import IdentityMode, detect_identity_mode
+from coding_agent.inputs.github import (
+    fetch_repository_file as _fetch_repository_file,
+)
 from coding_agent.inputs.port import StepTrackerPort
 from coding_agent.provider.capability import (
     CapabilityAssertionResult,
@@ -54,7 +59,7 @@ from coding_agent.skillbundle.deployment import (
     VerifiedRunInputs,
 )
 from coding_agent.worker.ports import (
-    GitHubPort,
+    CodeHostStartupPort,
     ModelPort,
     SkillBundlePort,
     WorkerPorts,
@@ -106,8 +111,8 @@ class FakeSkillBundlePort:
 
 
 @dataclass
-class FakeGitHubPort:
-    """The fake :class:`GitHubPort`: pass, refuse or raise on demand."""
+class FakeCodeHostPort:
+    """The fake :class:`CodeHostStartupPort`: pass, refuse or raise on demand."""
 
     order: list[str] = field(default_factory=list)
     """The shared startup order, appended with ``"github"`` per check run."""
@@ -130,7 +135,6 @@ class FakeGitHubPort:
 
     def run_checks(
         self,
-        client: GitHubClient,
         token: str,
         owner: str,
         repo: str,
@@ -140,7 +144,9 @@ class FakeGitHubPort:
         if self.checks_error is not None:
             raise self.checks_error
         if self.real_checks:
-            return run_startup_checks(client, token, owner, repo)
+            return run_startup_checks(
+                GitHubClient(token), token, owner, repo
+            )
         return StartupCheckResult(
             identity=self.identity,
             push_allowed=self.push_allowed,
@@ -153,17 +159,31 @@ class FakeGitHubPort:
         *,
         owner: str,
         repo: str,
-        client: GitHubClient,
+        token: str,
         identity: Identity,
     ) -> StepTrackerPort:
         """Hand out the configured tracker, recording the startup facts."""
         self.tracker_calls.append(
-            {"owner": owner, "repo": repo, "client": client, "identity": identity}
+            {"owner": owner, "repo": repo, "token": token, "identity": identity}
         )
         if self.tracker is not None:
             return self.tracker
         return FakeStepTracker(
             agent_login=identity.login, agent_id=identity.account_id
+        )
+
+    def fetch_repository_file(
+        self,
+        *,
+        token: str,
+        owner: str,
+        repo: str,
+        rev: str,
+        path: str,
+    ) -> requests.Response:
+        """GET one repository file at a revision; statuses come back to read."""
+        return _fetch_repository_file(
+            token=token, owner=owner, repo=repo, rev=rev, path=path
         )
 
     def resolve_identity_mode(
@@ -254,8 +274,8 @@ class FakeModelPort:
 class WorkerFakes:
     """The three fakes, the shared order and the assembled ports."""
 
-    github: FakeGitHubPort
-    """The fake GitHub port."""
+    github: FakeCodeHostPort
+    """The fake code-host port."""
     model: FakeModelPort
     """The fake model port."""
     skills: FakeSkillBundlePort
@@ -289,7 +309,7 @@ def make_worker_ports(
     local bare remote for offline end-to-end runs.
     """
     order: list[str] = []
-    github = FakeGitHubPort(
+    github = FakeCodeHostPort(
         order=order,
         identity=identity if identity is not None else FAKE_IDENTITY,
         push_allowed=push_allowed,
@@ -314,7 +334,7 @@ def make_worker_ports(
 
 __all__ = [
     "FAKE_IDENTITY",
-    "FakeGitHubPort",
+    "FakeCodeHostPort",
     "FakeModelPort",
     "FakeSkillBundlePort",
     "WorkerFakes",

@@ -7,10 +7,12 @@ itself: every collaborator behind the three ports below is injected through
 adapters. Tests pass the fakes from ``tests/worker_fakes.py`` instead of
 patching module globals.
 
-- :class:`GitHubPort`: the §18 non-mutating checks, the tracker factory and
-  the repository-owner / identity-mode lookup, plus the canonical remote URL
-  derived from the same owner/repo coordinates. Git *operations* (the mirror,
-  the workspace) stay out of scope.
+- :class:`CodeHostStartupPort`: the §18 non-mutating checks, the tracker
+  factory and the repository-owner / identity-mode lookup, plus the
+  canonical remote URL derived from the same owner/repo coordinates. Git
+  *operations* (the mirror, the workspace) stay out of scope. The port owns
+  the code-host transport: callers pass the credential and the Target
+  Repository coordinates, never a client.
 - :class:`ModelPort`: resolving the gateway address, building the chat
   model, and the Provider Capability Assertion. These three always travel
   together.
@@ -25,13 +27,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from coding_agent.github.client import GitHubClient
+import requests
+
 from coding_agent.identity.startup import (
     Identity,
     StartupCheckResult,
-    run_startup_checks,
+    run_startup_checks_for_token,
 )
 from coding_agent.inputs.authorisation import IdentityMode, detect_identity_mode
+from coding_agent.inputs.github import (
+    fetch_repository_file as _fetch_repository_file,
+)
+from coding_agent.inputs.github import (
+    github_step_tracker as _github_step_tracker,
+)
 from coding_agent.inputs.port import StepTrackerPort
 from coding_agent.provider.capability import (
     CapabilityAssertionResult,
@@ -53,17 +62,16 @@ from coding_agent.skillbundle.deployment import (
 from coding_agent.workflow.configuration import LoadedWorkflowConfiguration
 
 
-class GitHubPort(Protocol):
+class CodeHostStartupPort(Protocol):
     """The §18 non-mutating checks and everything derived from owner/repo."""
 
     def run_checks(
         self,
-        client: GitHubClient,
         token: str,
         owner: str,
         repo: str,
     ) -> StartupCheckResult:
-        """Run the non-mutating GitHub startup checks (§18)."""
+        """Run the non-mutating code-host startup checks (§18)."""
         ...
 
     def make_tracker(
@@ -71,10 +79,22 @@ class GitHubPort(Protocol):
         *,
         owner: str,
         repo: str,
-        client: GitHubClient,
+        token: str,
         identity: Identity,
     ) -> StepTrackerPort:
         """Build the Worker's step tracker for the Agent Identity."""
+        ...
+
+    def fetch_repository_file(
+        self,
+        *,
+        token: str,
+        owner: str,
+        repo: str,
+        rev: str,
+        path: str,
+    ) -> requests.Response:
+        """GET one repository file at a revision; statuses come back to read."""
         ...
 
     def resolve_identity_mode(
@@ -147,7 +167,7 @@ class SkillBundlePort(Protocol):
 class WorkerPorts:
     """The startup module's external collaborators, as three ports."""
 
-    github: GitHubPort
+    github: CodeHostStartupPort
     """The §18 checks, the tracker factory and the owner/mode lookup."""
     model: ModelPort
     """The gateway address, the chat model and the Capability Assertion."""
@@ -155,53 +175,48 @@ class WorkerPorts:
     """The Skill Bundle run verification."""
 
 
-def github_tracker(
-    *,
-    owner: str,
-    repo: str,
-    client: GitHubClient,
-    identity: Identity,
-) -> StepTrackerPort:
-    """The production tracker: the GitHub step adapter (§5, §14, §18).
-
-    No configuration can select a fake: production always builds this one.
-    """
-    from coding_agent.inputs.github import GitHubStepTracker
-
-    return GitHubStepTracker(
-        owner=owner,
-        repo=repo,
-        client=client,
-        agent_login=identity.login,
-        agent_id=identity.account_id,
-    )
-
-
 @dataclass(frozen=True)
-class ProductionGitHubPort:
-    """The production :class:`GitHubPort`: live GitHub, no seam."""
+class ProductionCodeHostPort:
+    """The production :class:`CodeHostStartupPort`: live code host, no seam."""
 
     def run_checks(
         self,
-        client: GitHubClient,
         token: str,
         owner: str,
         repo: str,
     ) -> StartupCheckResult:
-        """Run the non-mutating GitHub startup checks (§18)."""
-        return run_startup_checks(client, token, owner, repo)
+        """Run the non-mutating code-host startup checks (§18)."""
+        return run_startup_checks_for_token(token, owner, repo)
 
     def make_tracker(
         self,
         *,
         owner: str,
         repo: str,
-        client: GitHubClient,
+        token: str,
         identity: Identity,
     ) -> StepTrackerPort:
-        """Build the production GitHub step tracker."""
-        return github_tracker(
-            owner=owner, repo=repo, client=client, identity=identity
+        """Build the production step tracker for the Agent Identity."""
+        return _github_step_tracker(
+            owner=owner,
+            repo=repo,
+            token=token,
+            agent_login=identity.login,
+            agent_id=identity.account_id,
+        )
+
+    def fetch_repository_file(
+        self,
+        *,
+        token: str,
+        owner: str,
+        repo: str,
+        rev: str,
+        path: str,
+    ) -> requests.Response:
+        """GET one repository file at a revision; statuses come back to read."""
+        return _fetch_repository_file(
+            token=token, owner=owner, repo=repo, rev=rev, path=path
         )
 
     def resolve_identity_mode(
@@ -275,20 +290,19 @@ class ProductionSkillBundlePort:
 def production_ports() -> WorkerPorts:
     """The production adapters: what ``agent run`` uses (§4)."""
     return WorkerPorts(
-        github=ProductionGitHubPort(),
+        github=ProductionCodeHostPort(),
         model=ProductionModelPort(),
         skills=ProductionSkillBundlePort(),
     )
 
 
 __all__ = [
-    "GitHubPort",
+    "CodeHostStartupPort",
     "ModelPort",
-    "ProductionGitHubPort",
+    "ProductionCodeHostPort",
     "ProductionModelPort",
     "ProductionSkillBundlePort",
     "SkillBundlePort",
     "WorkerPorts",
-    "github_tracker",
     "production_ports",
 ]
