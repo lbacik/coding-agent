@@ -27,6 +27,7 @@ from coding_agent.runtime.ceilings import (
     OriginCell,
     origin_cell_from_readable,
 )
+from coding_agent.workflow.effective import effective_ceiling
 
 if TYPE_CHECKING:
     from coding_agent.ledger.store import StepEffectRecord, StepExecutionRecord, StepTransitionRecord
@@ -380,42 +381,6 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-def ceiling_from_effective_configuration(
-    effective_configuration: Mapping[str, Any] | None,
-) -> dict[str, Any]:
-    """The Attempt Ceiling from the pinned Effective Configuration (§11.2).
-
-    Reads the pinned ``workflow.ceiling`` (``cost_usd``, ``effective_tokens``,
-    ``tool_calls``, ``wall_clock_minutes`` → seconds), falling back to the
-    legacy ``workflow.limits`` shape and the pre-v4 ``tokens`` meter rows from
-    older releases carry; a missing or non-numeric meter reads as ``None``
-    rather than zero so an absent ceiling is never mistaken for a spent one.
-    """
-    effective_configuration = effective_configuration or {}
-    workflow = effective_configuration.get("workflow")
-    workflow_map: Mapping[str, Any] = (
-        workflow if isinstance(workflow, Mapping) else {}
-    )
-    raw_ceiling: Any = workflow_map.get("ceiling")
-    if not isinstance(raw_ceiling, Mapping):
-        raw_ceiling = workflow_map.get("limits")
-    limits: Mapping[str, Any] = (
-        raw_ceiling if isinstance(raw_ceiling, Mapping) else {}
-    )
-    wall_minutes = _as_float(limits.get("wall_clock_minutes"))
-    effective = _as_int(limits.get("effective_tokens"))
-    if effective is None:
-        effective = _as_int(limits.get("tokens"))
-    return {
-        "cost_usd": _as_float(limits.get("cost_usd")),
-        "effective_tokens": effective,
-        "tool_calls": _as_int(limits.get("tool_calls")),
-        "wall_clock_seconds": (
-            wall_minutes * 60.0 if wall_minutes is not None else None
-        ),
-    }
-
-
 def spend_from_executions(
     executions: Sequence[Any] | None,
 ) -> dict[str, Any]:
@@ -603,7 +568,7 @@ def project_attempt(
     A released Claim (or an Attempt without a recorded outcome) carries
     no outcome and never requires attention.
     """
-    ceiling = ceiling_from_effective_configuration(effective_configuration)
+    ceiling = effective_ceiling(effective_configuration)
     spend = spend_from_executions(executions)
     budget = budget_for(ceiling=ceiling, spend=spend)
     delivery = delivery_for(step_effects=step_effects, executions=executions)

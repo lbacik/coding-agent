@@ -49,6 +49,7 @@ from coding_agent.runtime.step_limits import (
     build_budgets,
     restore_budgets_from_usage,
 )
+from coding_agent.workflow.effective import make_test_record
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -97,21 +98,24 @@ def _effective_config(
     ``context_threshold`` (the Usable Threshold) publishes the configured
     value, never the usable one smuggled into the window figure.
     """
-    config: dict[str, Any] = {
-        "workflow": {
-            "ceiling": {
-                "wall_clock_minutes": 60,
-                "cost_usd": 5.0,
-                "effective_tokens": 100_000,
-                "tool_calls": 200,
+    if threshold is None:
+        # The documented partial-record tolerance path: no pinned model, so
+        # the tolerant readers report "no pinned context window".
+        return {
+            "workflow": {
+                "ceiling": {
+                    "wall_clock_minutes": 60,
+                    "cost_usd": 5.0,
+                    "effective_tokens": 100_000,
+                    "tool_calls": 200,
+                }
             }
         }
-    }
-    if threshold is not None:
-        config["pinned_model"] = {
+    return make_test_record(
+        pin={
             "key": "anthropic:claude-test",
             "provider": "anthropic",
-            "model_context_window_tokens": MODEL_WINDOW,
+            "model": "claude-test",
             "context_threshold_tokens": threshold,
             "context_window": {
                 "threshold_tokens": threshold,
@@ -119,7 +123,7 @@ def _effective_config(
                 "request_overhead_tokens": overhead,
             },
         }
-    return config
+    )
 
 
 def _ledger(tmp_path: Path) -> RunLedger:

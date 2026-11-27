@@ -1180,26 +1180,13 @@ def resolve_max_parallel_subagents(
 ) -> int:
     """The Attempt's ``max_parallel_subagents`` (§2.1, §8, ADR 0020).
 
-    Reads ``workflow.max_parallel_subagents`` from the Effective
-    Configuration record where present (falling back to the legacy
-    ``workflow.limits.max_parallel_subagents`` rows from older releases
-    carry), else the contract default of 2. A missing, non-integer or
-    ``< 1`` value falls back to 2: the strict parser refuses such files
-    before any Attempt runs (C-CFG-4), so a fallback here only covers
-    scripted tests and older records.
+    Asks the one canonical record question
+    (:func:`coding_agent.workflow.effective.max_parallel_subagents`), so
+    the parallelism limit cannot drift from the record module's
+    legacy-placement rule again.
     """
-    from coding_agent.workflow.schema import DEFAULT_MAX_PARALLEL_SUBAGENTS
+    from coding_agent.workflow.effective import (
+        max_parallel_subagents as _max_parallel_subagents,
+    )
 
-    if effective_configuration is None:
-        return DEFAULT_MAX_PARALLEL_SUBAGENTS
-    workflow = effective_configuration.get("workflow")
-    if not isinstance(workflow, Mapping):
-        return DEFAULT_MAX_PARALLEL_SUBAGENTS
-    value = workflow.get("max_parallel_subagents")
-    if value is None:
-        limits = workflow.get("limits")
-        if isinstance(limits, Mapping):
-            value = limits.get("max_parallel_subagents")
-    if isinstance(value, bool) or type(value) is not int or value < 1:
-        return DEFAULT_MAX_PARALLEL_SUBAGENTS
-    return value
+    return _max_parallel_subagents(effective_configuration)

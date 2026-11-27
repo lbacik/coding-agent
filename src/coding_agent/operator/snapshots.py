@@ -36,8 +36,12 @@ from coding_agent.operator.contract import (
 )
 from coding_agent.operator.native_events import native_events_for_attempt
 from coding_agent.operator.live import LiveView
-from coding_agent.operator.step_projection import (
-    ceiling_from_effective_configuration,
+from coding_agent.workflow.effective import (
+    effective_ceiling,
+    is_operation_step,
+    model_context_window_tokens,
+    round_handoff_policy,
+    selected_usable_thresholds,
 )
 from coding_agent.operator.store import (
     OPERATOR_BACKEND,
@@ -567,11 +571,8 @@ def _budget_for_attempt(
             effective_fig = figure(effective, "tokens", "measured")
     else:
         effective_fig = figure(None, "tokens", "unavailable")
-    pinned = (
-        ceiling_from_effective_configuration(detail.get("effective_configuration"))
-        if detail is not None
-        else {}
-    )
+    record = detail.get("effective_configuration") if detail is not None else None
+    pinned = effective_ceiling(record)
     configured_effective = pinned.get("effective_tokens")
     configured_cost = pinned.get("cost_usd")
     configured_wall = pinned.get("wall_clock_seconds")
@@ -624,172 +625,6 @@ def _budget_for_attempt(
         "limits": limits,
         "by_origin": _by_origin_for_attempt(by_origin_source),
     }
-
-
-def _pinned_model_section(detail: dict[str, Any] | None) -> dict[str, Any]:
-    """The Attempt's pinned-model section, or ``{}`` where none is pinned."""
-    if not isinstance(detail, dict):
-        return {}
-    effective = detail.get("effective_configuration")
-    if not isinstance(effective, dict):
-        return {}
-    pinned = effective.get("pinned_model")
-    return pinned if isinstance(pinned, dict) else {}
-
-
-def _pinned_context_window(detail: dict[str, Any] | None) -> dict[str, Any]:
-    """The pinned ``context_window`` triple, or ``{}`` where none is pinned."""
-    window = _pinned_model_section(detail).get("context_window")
-    return window if isinstance(window, dict) else {}
-
-
-def _model_window_from(detail: dict[str, Any] | None) -> Any:
-    """The Pinned Model's Model Context Window, or ``None`` where unpinned.
-
-    The pin's ``model_context_window_tokens`` (§16): the largest request
-    the model accepts, published as ``context_window``.
-    """
-    value = _pinned_model_section(detail).get("model_context_window_tokens")
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return value
-    return None
-
-
-def _context_threshold_from(detail: dict[str, Any] | None) -> Any:
-    """The pinned Context Threshold, or ``None`` where none is pinned.
-
-    The ``context_window.threshold_tokens`` from the Attempt's Effective
-    Configuration (mirrored as ``pinned_model.context_threshold_tokens``).
-    Retained for the pin-default fallback; the legacy
-    ``native.handoff_threshold_tokens`` figure is no longer projected
-    (§16 v1.2.1).
-    """
-    window = _pinned_context_window(detail)
-    threshold: Any = window.get("threshold_tokens")
-    if threshold is None:
-        threshold = _pinned_model_section(detail).get("context_threshold_tokens")
-    if isinstance(threshold, bool):
-        return None
-    if isinstance(threshold, (int, float)):
-        return threshold
-    return None
-
-
-def _margins_from(detail: dict[str, Any] | None) -> tuple[Any, Any]:
-    """The safety margin and request overhead in force, with code defaults."""
-    from coding_agent.runtime.context_budget import code_owned_margins
-
-    default_safety, default_overhead = code_owned_margins()
-    window = _pinned_context_window(detail)
-    safety: Any = window.get("safety_margin_tokens")
-    if isinstance(safety, bool) or not isinstance(safety, (int, float)):
-        safety = default_safety
-    overhead: Any = window.get("request_overhead_tokens")
-    if isinstance(overhead, bool) or not isinstance(overhead, (int, float)):
-        overhead = default_overhead
-    return safety, overhead
-
-
-def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
-    """The pin-default Usable Threshold, or ``None`` where unpinned.
-
-    The pin's Context Threshold less the safety margin and the request
-    overhead (§16), published as ``context_threshold`` for steps without
-    their own policy. Steps with a policy resolve through
-    :func:`_selected_usable_thresholds`.
-    """
-    from coding_agent.runtime.context_budget import pin_usable_threshold
-
-    threshold = _context_threshold_from(detail)
-    if threshold is None:
-        return None
-    safety, overhead = _margins_from(detail)
-    return pin_usable_threshold(threshold, safety, overhead)
-
-
-def _effective_steps(detail: dict[str, Any] | None) -> dict[str, Any]:
-    """The Effective Configuration's ``workflow.steps`` mapping, if any."""
-    if not isinstance(detail, dict):
-        return {}
-    effective = detail.get("effective_configuration")
-    if not isinstance(effective, dict):
-        return {}
-    workflow = effective.get("workflow")
-    if not isinstance(workflow, dict):
-        return {}
-    steps = workflow.get("steps")
-    return steps if isinstance(steps, dict) else {}
-
-
-def _step_policy_for(
-    detail: dict[str, Any] | None, step_id: str | None
-) -> dict[str, Any] | None:
-    """The step's ``context_thresholds`` policy record, if configured."""
-    if not step_id:
-        return None
-    steps = _effective_steps(detail)
-    entry = steps.get(step_id)
-    if not isinstance(entry, dict):
-        return None
-    policy = entry.get("context_thresholds")
-    return policy if isinstance(policy, dict) else None
-
-
-def _as_usable_number(value: Any) -> int | float | None:
-    """``value`` as a usable token count, or ``None`` where not numeric."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return value
-    return None
-
-
-def _selected_usable_thresholds(
-    detail: dict[str, Any] | None, step_id: str | None
-) -> tuple[Any, Any]:
-    """The selected and optional hard Usable Thresholds (§16 v1.2.1).
-
-    Returns ``(selected, hard_or_None)`` where ``selected`` is the current
-    agent Step Execution's soft Usable Threshold where the step configures
-    one, else its hard or the pin-default Usable Threshold. Where a step
-    configures both soft and hard thresholds, the hard Usable Threshold is
-    also returned for ``native.context_hard_usable_threshold_tokens``.
-    Threshold figures use configured tokens.
-    """
-    from coding_agent.runtime.context_budget import (
-        hard_usable_threshold,
-        select_usable_threshold,
-        soft_usable_threshold,
-    )
-
-    safety, overhead = _margins_from(detail)
-    policy = _step_policy_for(detail, step_id)
-    if policy is not None:
-        hard_raw = _as_usable_number(policy.get("hard_tokens"))
-        soft_raw = _as_usable_number(policy.get("soft_tokens"))
-        hard_usable = (
-            hard_usable_threshold(hard_raw, safety, overhead)
-            if hard_raw is not None
-            else None
-        )
-        soft_usable = (
-            soft_usable_threshold(soft_raw, safety, overhead)
-            if soft_raw is not None
-            else None
-        )
-        if hard_raw is not None and soft_raw is not None:
-            return (
-                select_usable_threshold(soft_usable, hard_usable, None),
-                hard_usable,
-            )
-        if hard_raw is not None:
-            return (hard_usable, None)
-        if soft_raw is not None:
-            # Defensive: validation requires hard alongside soft.
-            return (soft_usable, None)
-    return (_usable_threshold_from(detail), None)
 
 
 def _current_step_id(
@@ -860,27 +695,6 @@ def _current_step_seq(
     return latest
 
 
-def _effective_step_entry(
-    detail: dict[str, Any] | None, step_id: str | None
-) -> dict[str, Any]:
-    """The Effective Configuration entry for ``step_id``, if a mapping."""
-    if not step_id:
-        return {}
-    steps = _effective_steps(detail)
-    entry = steps.get(step_id)
-    return entry if isinstance(entry, dict) else {}
-
-
-def _is_operation_step(detail: dict[str, Any] | None, step_id: str | None) -> bool:
-    """Whether the current step is an operation (non-agent) step."""
-    entry = _effective_step_entry(detail, step_id)
-    if not entry:
-        return False
-    if entry.get("operation") is not None:
-        return True
-    return entry.get("agent") is None
-
-
 def _omit_context_pair(
     reader: RunLedgerReader,
     attempt_id: str,
@@ -893,7 +707,8 @@ def _omit_context_pair(
     while the current step is an operation step, or once the Attempt has
     recorded its Terminal Outcome and finalisation owns the ledger.
     """
-    if _is_operation_step(detail, step_id):
+    record = detail.get("effective_configuration") if isinstance(detail, dict) else None
+    if is_operation_step(record, step_id):
         return True
     try:
         if reader.get_outcome(attempt_id) is not None:
@@ -1195,20 +1010,6 @@ def _turns_figure_from_cell(cell: Any) -> dict[str, Any]:
     return figure(responses, "count", "measured")
 
 
-def _round_handoff_section(detail: dict[str, Any] | None) -> dict[str, Any]:
-    """The Effective Configuration's ``workflow.round_handoff`` section, if any."""
-    if not isinstance(detail, dict):
-        return {}
-    effective = detail.get("effective_configuration")
-    if not isinstance(effective, dict):
-        return {}
-    workflow = effective.get("workflow")
-    if not isinstance(workflow, dict):
-        return {}
-    section = workflow.get("round_handoff")
-    return section if isinstance(section, dict) else {}
-
-
 def _pickup_figures(
     reader: RunLedgerReader, attempt_id: str, detail: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -1222,16 +1023,10 @@ def _pickup_figures(
     pickup. Both are Attempt-level counts, never ``unavailable`` placeholders.
     """
     figures: dict[str, Any] = {}
-    section = _round_handoff_section(detail)
-    label = section.get("pickup_label")
-    limit = section.get("max_automatic_pickups")
-    if (
-        isinstance(label, str)
-        and label
-        and isinstance(limit, int)
-        and not isinstance(limit, bool)
-        and limit >= 1
-    ):
+    record = detail.get("effective_configuration") if isinstance(detail, dict) else None
+    policy = round_handoff_policy(record)
+    if policy is not None:
+        _, limit = policy
         figures["native.pickup_limit"] = figure(
             limit, "count", "configured", _PICKUP_LIMIT_REASON
         )
@@ -1299,7 +1094,8 @@ def _figures_for_attempt(
     context_peak_fig = _context_peak_figure(
         reader, attempt_id, usage_payload, partial=partial
     )
-    model_window = _model_window_from(detail)
+    record = detail.get("effective_configuration") if isinstance(detail, dict) else None
+    model_window = model_context_window_tokens(record)
     if isinstance(model_window, (int, float)) and not isinstance(model_window, bool):
         context_window_fig = figure(
             model_window, "tokens", "configured", _CONTEXT_WINDOW_REASON
@@ -1321,7 +1117,7 @@ def _figures_for_attempt(
         pair_figures["context_used"] = _context_used_figure(
             usage_payload, expected_conversation=expected
         )
-        selected, hard = _selected_usable_thresholds(detail, step_id)
+        selected, hard = selected_usable_thresholds(record, step_id)
         if isinstance(selected, (int, float)) and not isinstance(selected, bool):
             pair_figures["context_threshold"] = figure(
                 selected, "tokens", "configured", _CONTEXT_THRESHOLD_REASON

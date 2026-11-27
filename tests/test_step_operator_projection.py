@@ -34,6 +34,7 @@ from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.graph.agent_step import store_step_artifacts
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from support.scripted_executor import ScriptedStepExecutor
+from coding_agent.workflow.effective import make_test_record
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -46,16 +47,7 @@ from coding_agent.workflow.schema import (
 
 
 def _effective_config() -> dict[str, Any]:
-    return {
-        "workflow": {
-            "ceiling": {
-                "cost_usd": 20.0,
-                "effective_tokens": 100_000,
-                "tool_calls": 200,
-                "wall_clock_minutes": 60,
-            }
-        }
-    }
+    return make_test_record(ceiling={"cost_usd": 20.0})
 
 
 def _ledger(tmp_path: Path) -> RunLedger:

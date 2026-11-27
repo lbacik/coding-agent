@@ -25,6 +25,7 @@ from coding_agent.conformance.schemas import (
     validate_result,
 )
 from coding_agent.operator.paths import STATE_DIR_ENV_VAR
+from coding_agent.workflow.effective import make_test_record
 
 
 def _run(argv: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[int, dict[str, Any]]:
@@ -262,16 +263,7 @@ def test_status_states_and_attempts_pages_validate(
         live = _fresh_live()
         ledger.open_attempt(
             "#40/1",
-            effective_configuration={
-                "workflow": {
-                    "ceiling": {
-                        "wall_clock_minutes": 60,
-                        "cost_usd": 5.0,
-                        "effective_tokens": 100_000,
-                        "tool_calls": 200,
-                    }
-                }
-            },
+            effective_configuration=make_test_record(),
         )
         ledger.record_usage(
             "#40/1",
@@ -383,16 +375,7 @@ def test_status_states_and_attempts_pages_validate(
         # Re-open for the stop-after plan check.
         ledger.open_attempt(
             "#41/2",
-            effective_configuration={
-                "workflow": {
-                    "ceiling": {
-                        "wall_clock_minutes": 60,
-                        "cost_usd": 5.0,
-                        "effective_tokens": 100_000,
-                        "tool_calls": 200,
-                    }
-                }
-            },
+            effective_configuration=make_test_record(),
         )
         live.set_claim("#41/2", 41, "Second attempt")
         _commit_stop("req-after-plan-1", after=2)

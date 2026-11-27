@@ -38,6 +38,7 @@ from coding_agent.runtime.round_handoff import (
 )
 from coding_agent.runtime.step_finalisation import render_terminal_comment
 from coding_agent.runtime.transcript import work_conversation
+from coding_agent.workflow.effective import make_test_record
 
 ATTEMPT_ID = "implement#7/1"
 PIN_THRESHOLD = 50_000
@@ -89,25 +90,14 @@ def _effective_config(
     steps: dict[str, Any] | None = None,
     round_handoff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """A hand-written pinned Effective Configuration for the mapping tests."""
-    workflow: dict[str, Any] = {
-        "ceiling": {
-            "wall_clock_minutes": 60,
-            "cost_usd": 5.0,
-            "effective_tokens": 100_000,
-            "tool_calls": 200,
-        }
-    }
-    if steps is not None:
-        workflow["steps"] = steps
-    if round_handoff is not None:
-        workflow["round_handoff"] = round_handoff
-    return {
-        "workflow": workflow,
-        "pinned_model": {
+    """A pinned Effective Configuration for the mapping tests."""
+    return make_test_record(
+        steps=steps,
+        round_handoff=round_handoff,
+        pin={
             "key": "anthropic:claude-test",
             "provider": "anthropic",
-            "model_context_window_tokens": MODEL_WINDOW,
+            "model": "claude-test",
             "context_threshold_tokens": PIN_THRESHOLD,
             "context_window": {
                 "threshold_tokens": PIN_THRESHOLD,
@@ -115,7 +105,7 @@ def _effective_config(
                 "request_overhead_tokens": OVERHEAD,
             },
         },
-    }
+    )
 
 
 def _agent_steps(

@@ -289,6 +289,12 @@ def pinned_handoff_eligibility(
         from coding_agent.workflow.effective import (
             is_full_effective_configuration as _is_full,
         )
+        from coding_agent.workflow.effective import (
+            route_round_handoff_kind as _route_kind,
+        )
+        from coding_agent.workflow.effective import (
+            round_handoff_policy as _round_handoff_policy,
+        )
     except Exception:
         return None
     try:
@@ -296,38 +302,17 @@ def pinned_handoff_eligibility(
             return None
         if not isinstance(record, Mapping):
             return None
-        workflow = record.get("workflow")
-        if not isinstance(workflow, Mapping):
-            return None
-        section = workflow.get("round_handoff")
-        if not isinstance(section, Mapping):
-            return None
-        pickup_label = section.get("pickup_label")
-        limit = section.get("max_automatic_pickups")
-        if not isinstance(pickup_label, str) or not pickup_label:
-            return None
-        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        policy = _round_handoff_policy(record)
+        if policy is None:
             return None
         if not ending_step or not step_result:
             return None
-        steps = workflow.get("steps")
-        if not isinstance(steps, Mapping):
+        if _route_kind(record, ending_step, step_result) not in (
+            "ai-assisted",
+            "hard",
+        ):
             return None
-        step = steps.get(ending_step)
-        if not isinstance(step, Mapping):
-            return None
-        routes = step.get("routes")
-        if not isinstance(routes, Mapping):
-            return None
-        route = routes.get(step_result)
-        if not isinstance(route, Mapping):
-            return None
-        annotation = route.get("round_handoff")
-        if not isinstance(annotation, Mapping):
-            return None
-        if annotation.get("kind") not in ("ai-assisted", "hard"):
-            return None
-        return pickup_label, limit
+        return policy
     except Exception:
         return None
 

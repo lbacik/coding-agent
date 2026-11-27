@@ -26,6 +26,7 @@ from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
 from coding_agent.runtime.ceilings import UsageTotals
+from coding_agent.workflow.effective import make_test_record
 
 SNAPSHOT_LIMIT_BYTES = 256 * 1024
 
@@ -41,16 +42,7 @@ def _live() -> LiveView:
 
 
 def _effective_config() -> dict[str, Any]:
-    return {
-        "workflow": {
-            "ceiling": {
-                "wall_clock_minutes": 60,
-                "cost_usd": 5.0,
-                "effective_tokens": 100_000,
-                "tool_calls": 200,
-            }
-        }
-    }
+    return make_test_record()
 
 
 def _ledger(tmp_path: Path) -> RunLedger:
@@ -177,9 +169,10 @@ def test_budget_matches_ledger_usage_record(tmp_path: Path) -> None:
         assert figures["context_peak"]["reason"] == (
             "covers only requests recorded since upgrade"
         )
-        assert figures["context_window"]["basis"] == "unavailable"
-        assert figures["context_threshold"]["basis"] == "unavailable"
-        assert figures["context_threshold"]["value"] is None
+        assert figures["context_window"]["basis"] == "configured"
+        assert figures["context_window"]["value"] == 200_000
+        assert figures["context_threshold"]["basis"] == "configured"
+        assert figures["context_threshold"]["value"] == 78_500
         assert "native.context_estimate_tokens" not in figures
         assert "native.handoff_threshold_tokens" not in figures
         ended = figures["subagents_ended"]

@@ -39,6 +39,7 @@ from coding_agent.runtime.step_limits import (
     build_budgets,
     restore_budgets_from_usage,
 )
+from coding_agent.workflow.effective import make_test_record
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -68,16 +69,7 @@ def _usage_dict(
 
 
 def _effective_config() -> dict[str, Any]:
-    return {
-        "workflow": {
-            "ceiling": {
-                "wall_clock_minutes": 60,
-                "cost_usd": 5.0,
-                "effective_tokens": 100_000,
-                "tool_calls": 200,
-            }
-        }
-    }
+    return make_test_record()
 
 
 def _ledger(tmp_path: Path) -> RunLedger:
