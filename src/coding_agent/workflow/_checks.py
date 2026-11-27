@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -1151,12 +1151,17 @@ def check_graph_compilation(
 
 def validate_input(
     problems: Problems, workflow_where: str, raw: Any
-) -> tuple[str | None, str | None]:
-    """Returns (input_type, label); each None when unusable."""
+) -> InputDecl | None:
+    """Validate one Workflow's input selector and read its typed form (§2.2, §5).
+
+    Shape-only parsing directly into the typed ``InputDecl``: the single parse
+    of the input block. Every fault names its YAML path. Returns the typed
+    input, or ``None`` where it is unusable (a fault is recorded).
+    """
     input_where = f"{workflow_where}.input"
     mapping = check_keys(problems, input_where, raw, INPUT_FIELDS, INPUT_REQUIRED)
     if mapping is None:
-        return None, None
+        return None
     descs = described_map(InputDecl)
     # `type` is a `custom` leaf: its closed-membership check stays
     # hand-written here (in today's position). The generic leaves go through
@@ -1169,16 +1174,19 @@ def validate_input(
         )
         input_type = None
     label = check_leaf(problems, mapping, input_where, descs["label"])
+    filters: dict[str, tuple[str, ...]] = {}
     for field_name in ("require-all", "require-any", "exclude"):
         entries = check_leaf(problems, mapping, input_where, descs[field_name])
+        filters[field_name] = tuple(entries) if entries is not None else ()
         if entries is not None and label is not None and label in entries:
             problems.add(
                 f"{workflow_where}.input.{field_name}",
                 f"the Selection Label {label!r} cannot also be a filter",
             )
+    drafts: str | None = None
     if "drafts" in mapping:
-        drafts = mapping["drafts"]
-        if drafts not in INPUT_DRAFTS:
+        raw_drafts = mapping["drafts"]
+        if raw_drafts not in INPUT_DRAFTS:
             problems.add(
                 f"{workflow_where}.input.drafts", "`drafts` is `include` or `exclude`"
             )
@@ -1187,20 +1195,39 @@ def validate_input(
                 f"{workflow_where}.input.drafts",
                 "`drafts` applies only to pull-request inputs",
             )
+        else:
+            drafts = raw_drafts
     skip = check_leaf(problems, mapping, input_where, descs["skip-open-agent-pr"])
     if skip is not None and input_type is not None and input_type != "issue":
         problems.add(
             f"{workflow_where}.input.skip-open-agent-pr",
             "`skip-open-agent-pr` applies only to issue inputs",
         )
+        skip = None
     if not isinstance(input_type, str):
         input_type = None
-    return input_type, label
+    if input_type is None or label is None:
+        return None
+    return InputDecl(
+        type=input_type,
+        label=label,
+        require_all=filters["require-all"],
+        require_any=filters["require-any"],
+        exclude=filters["exclude"],
+        drafts=drafts,
+        skip_open_agent_pr=skip,
+    )
 
 
 def validate_ceiling(
     problems: Problems, workflow_where: str, raw: Any
-) -> dict[str, float] | None:
+) -> AttemptCeiling | None:
+    """Validate one Workflow's Attempt Ceiling and read its typed form (§2.2).
+
+    Shape-only parsing directly into the typed ``AttemptCeiling``: the single
+    parse of the limits block. Every fault names its YAML path. Returns the
+    typed ceiling, or ``None`` where it is unusable (a fault is recorded).
+    """
     mapping = check_keys(
         problems,
         f"{workflow_where}.limits",
@@ -1219,7 +1246,12 @@ def validate_ceiling(
     )
     if checked is None:
         return None
-    return {meter: float(checked[meter]) for meter in METERS}
+    return AttemptCeiling(
+        cost_usd=float(checked["cost-usd"]),
+        effective_tokens=float(checked["effective-tokens"]),
+        tool_calls=float(checked["tool-calls"]),
+        wall_clock_minutes=float(checked["wall-clock-minutes"]),
+    )
 
 
 def validate_outcomes(
@@ -2077,45 +2109,59 @@ def validate_workflow(
     problems: Problems,
     workflow_id: str,
     workflow_raw: Any,
-    models: Mapping[str, Mapping[str, Any]] | None,
+    models: Mapping[str, ModelDecl] | None,
     base: Path,
     bundle_names: frozenset[str],
-    facts: WorkflowFacts,
     *,
     undeclared_skill_label: str | None = None,
-) -> None:
+) -> Workflow | None:
+    """Validate one Workflow and read its typed form: the single read (§2.2, §3).
+
+    Shape-only parsing directly into the typed ``Workflow``: the input, the
+    ceiling, outcomes, round-handoff enablement, ``defaults`` and every step
+    each parse exactly once here. Every fault names its YAML path. Returns the
+    typed ``Workflow``, or ``None`` where it is unusable — the mapping, the
+    steps, the input or the ceiling unusable (a fault is recorded; phase 2
+    skips that Workflow). Steps are always validated for their own faults
+    before that gating, so no phase-1 fault is lost.
+    """
     workflow_where = f"workflows.{workflow_id}"
     mapping = check_keys(
         problems, workflow_where, workflow_raw, WORKFLOW_FIELDS, WORKFLOW_REQUIRED
     )
     if mapping is None:
-        return
+        return None
     if models is not None and mapping.get("model") not in models:
         problems.add(
             f"{workflow_where}.model",
             f"unknown model {mapping.get('model')!r}: "
             f"available: {', '.join(sorted(models))}",
         )
-    input_type, label = validate_input(problems, workflow_where, mapping.get("input"))
-    facts.input_type = input_type
-    facts.label = label
+    model_raw = mapping.get("model")
+    model = model_raw if isinstance(model_raw, str) else ""
+    input_decl = validate_input(problems, workflow_where, mapping.get("input"))
+    input_type = input_decl.type if input_decl is not None else None
     ceiling = validate_ceiling(problems, workflow_where, mapping.get("limits"))
-    facts.ceiling = ceiling
-    check_leaf(
+    max_parallel_raw = check_leaf(
         problems,
         mapping,
         workflow_where,
         described_map(Workflow)["max-parallel-subagents"],
     )
-    facts.outcomes = validate_outcomes(
+    max_parallel = (
+        int(max_parallel_raw)
+        if isinstance(max_parallel_raw, int) and not isinstance(max_parallel_raw, bool)
+        else DEFAULT_MAX_PARALLEL_SUBAGENTS
+    )
+    outcomes = validate_outcomes(
         problems, workflow_where, mapping.get("outcomes")
     )
+    enabled: tuple[str, int] | None = None
     if "round-handoff" in mapping:
         enabled = validate_round_handoff_enablement(
             problems, workflow_where, mapping.get("round-handoff"), input_type
         )
-        facts.round_handoff = enabled
-        if enabled is not None and label is not None:
+        if enabled is not None and input_decl is not None:
             pickup_label, _ = enabled
             raw_input = mapping.get("input")
             if isinstance(raw_input, dict):
@@ -2130,7 +2176,7 @@ def validate_workflow(
     steps_raw = mapping.get("steps")
     if not isinstance(steps_raw, dict) or not steps_raw:
         problems.add(f"{workflow_where}.steps", "a mapping of step id -> step is required")
-        return
+        return None
     for step_id in steps_raw:
         if check_id(step_id, f"{workflow_where}.steps.{step_id}", problems, "step") is None:
             continue
@@ -2141,23 +2187,24 @@ def validate_workflow(
                 "input and cannot be a step id",
             )
             continue
-    start = mapping.get("start")
-    if start not in steps_raw:
-        problems.add(f"{workflow_where}.start", f"{start!r} is not a step id")
+    start_raw = mapping.get("start")
+    if start_raw not in steps_raw:
+        problems.add(f"{workflow_where}.start", f"{start_raw!r} is not a step id")
+        start = ""
     else:
-        facts.start = str(start)
+        start = str(start_raw)
 
     defaults_max, defaults_routes = validate_defaults(
         problems, workflow_where, mapping.get("defaults"), steps_raw
     )
-    facts.routes_all["__defaults__"] = defaults_routes
 
+    typed_steps: dict[str, WorkflowStep] = {}
     for step_id, step_raw in steps_raw.items():
         if not isinstance(step_id, str) or ID_RE.fullmatch(step_id) is None:
             continue
         if step_id == "input":
             continue
-        validate_step(
+        typed = validate_step(
             problems,
             workflow_where,
             step_id,
@@ -2165,27 +2212,63 @@ def validate_workflow(
             steps_raw,
             input_type,
             defaults_max,
+            defaults_routes,
             base,
             bundle_names,
-            facts,
             undeclared_skill_label=undeclared_skill_label,
             models=models,
         )
+        if typed is not None:
+            typed_steps[str(step_id)] = typed
+
+    if input_decl is None or ceiling is None:
+        return None
+    round_handoff: RoundHandoffConfig | None = None
+    if enabled is not None:
+        pickup_label, limit = enabled
+        round_handoff = RoundHandoffConfig(
+            max_automatic_pickups=limit,
+            pickup_label=pickup_label,
+        )
+    return Workflow(
+        id=workflow_id,
+        model=model,
+        input=input_decl,
+        ceiling=ceiling,
+        max_parallel_subagents=max_parallel,
+        outcomes=outcomes,
+        start=start,
+        defaults_max_executions=(
+            defaults_max
+            if isinstance(defaults_max, int) and not isinstance(defaults_max, bool)
+            else 1
+        ),
+        defaults_routes=defaults_routes,
+        round_handoff=round_handoff,
+        steps=typed_steps,
+    )
 
 
 # --- Workflow phase 2: limits, graph, required inputs ------------------------------
 
 
 def check_limits_arithmetic(
-    problems: Problems, workflow_where: str, facts: WorkflowFacts
+    problems: Problems, workflow_where: str, workflow: Workflow
 ) -> None:
-    if facts.ceiling is None:
-        return
-    ceiling = facts.ceiling
-    if any(meter not in ceiling for meter in METERS):
-        return
+    """Proves the Attempt Ceiling covers the Reserved Steps (§3, §11).
+
+    Runs over the typed ``Workflow``: the Reserved Step allowances plus the
+    Work Pool hold the Attempt Ceiling, and every non-reserved agent Step
+    Allowance fits the Work Pool. The single read already parsed every limit.
+    """
+    ceiling = workflow.ceiling.by_meter()
+    reserved_allow = {
+        step_id: step.limits
+        for step_id, step in workflow.steps.items()
+        if step.reserved
+    }
     pool = {
-        meter: ceiling[meter] - sum(allow.get(meter, 0.0) for allow in facts.reserved_allow.values())
+        meter: ceiling[meter] - sum(allow.get(meter, 0.0) for allow in reserved_allow.values())
         for meter in METERS
     }
     for meter in METERS:
@@ -2197,8 +2280,10 @@ def check_limits_arithmetic(
             )
     if any(pool[meter] <= 0 for meter in METERS):
         return
-    for step_id, allow in facts.plain_allow.items():
-        for meter, value in allow.items():
+    for step_id, step in workflow.steps.items():
+        if step.agent is None or step.reserved:
+            continue
+        for meter, value in step.limits.items():
             if value > pool[meter]:
                 problems.add(
                     f"{workflow_where}.steps.{step_id}.limits.{meter}",
@@ -2354,10 +2439,8 @@ def _floor_minima(floor: AdmissionFloor) -> dict[str, float]:
 def check_admission_floor(
     problems: Problems,
     workflow_where: str,
-    workflow_id: str,
-    facts: WorkflowFacts,
-    models: Mapping[str, Mapping[str, Any]] | None,
-    workflow_raw: Mapping[str, Any],
+    workflow: Workflow,
+    models: Mapping[str, ModelDecl] | None,
 ) -> None:
     """Refuse any limit below one maximal Admission hold (§3, decision 5).
 
@@ -2372,12 +2455,13 @@ def check_admission_floor(
     Sub-agents — plus the pin's full output cap (priced at the pin's
     prices for `cost-usd`). A limit that does not declare the meter is not
     checked for it. The guarantee is one full-context request per fresh limit.
+
+    Runs over the typed ``Workflow``: thresholds, allowances, Advisor pins
+    and the subagents tool group all come from the single read.
     """
-    if facts.ceiling is None:
-        return
-    if any(meter not in facts.ceiling for meter in METERS):
-        return
-    pin = _pin_for_workflow(models, workflow_raw)
+    workflow_id = workflow.id
+    ceiling = workflow.ceiling.by_meter()
+    pin = _pin_for_workflow(models, workflow.model)
     if pin is None:
         return
     pin_floor = admission_floor_for(pin)
@@ -2392,9 +2476,13 @@ def check_admission_floor(
     floors: dict[str, AdmissionFloor] = {}
     floors_minima: dict[str, dict[str, float]] = {}
     floors_bits: dict[str, dict[str, str]] = {}
-    for step_id in sorted(facts.agent_steps):
-        hard = facts.thresholds.get(step_id)
-        soft = facts.soft_thresholds.get(step_id)
+    for step_id in sorted(workflow.steps):
+        step = workflow.steps[step_id]
+        if step.agent is None:
+            continue
+        policy = step.context_thresholds
+        hard = policy.hard_tokens if policy is not None else None
+        soft = policy.soft_tokens if policy is not None else None
         hard_usable = (
             usable_from_raw(hard, safety, overhead) if hard is not None else None
         )
@@ -2405,7 +2493,7 @@ def check_admission_floor(
             soft_usable, hard_usable, pin_floor.usable_threshold
         )
         assert usable is not None
-        if step_id in facts.subagent_steps:
+        if "subagents" in step.agent.tools:
             usable = max(usable, pin_floor.usable_threshold)
         floor = admission_floor_with_usable(pin, usable)
         if floor is None:
@@ -2413,11 +2501,11 @@ def check_admission_floor(
         floors[step_id] = floor
         minima = _floor_minima(floor)
         bits = _floor_bits(floor)
-        advisor_id = facts.advisor_pins.get(step_id)
+        advisor_id = step.agent.advisor.model if step.agent.advisor is not None else None
         advisor_pin = models.get(advisor_id) if models is not None and advisor_id is not None else None
         advisor_floor = (
             admission_floor_for(advisor_pin)
-            if isinstance(advisor_pin, Mapping)
+            if advisor_pin is not None
             else None
         )
         if advisor_floor is not None:
@@ -2434,7 +2522,7 @@ def check_admission_floor(
     if not floors:
         return
     ceiling_id = max(floors, key=lambda item: floors_minima[item]["effective-tokens"])
-    pool_ids = [step_id for step_id in floors if step_id not in facts.reserved_allow]
+    pool_ids = [step_id for step_id in floors if not workflow.steps[step_id].reserved]
     pool_id = (
         max(pool_ids, key=lambda item: floors_minima[item]["effective-tokens"])
         if pool_ids
@@ -2443,7 +2531,7 @@ def check_admission_floor(
     ceiling_bits = floors_bits[ceiling_id]
     ceiling_minima = floors_minima[ceiling_id]
     for meter in FLOOR_METERS:
-        value = facts.ceiling.get(meter)
+        value = ceiling.get(meter)
         if value is not None and value < ceiling_minima[meter]:
             problems.add(
                 f"{workflow_where}.limits.{meter}",
@@ -2451,9 +2539,14 @@ def check_admission_floor(
                 f"in workflow {workflow_id!r}: {meter!r} minimum {ceiling_minima[meter]} "
                 f"({ceiling_bits[meter]})",
             )
+    reserved_allow = {
+        step_id: step.limits
+        for step_id, step in workflow.steps.items()
+        if step.reserved
+    }
     pool = {
-        meter: facts.ceiling[meter]
-        - sum(allow.get(meter, 0.0) for allow in facts.reserved_allow.values())
+        meter: ceiling[meter]
+        - sum(allow.get(meter, 0.0) for allow in reserved_allow.values())
         for meter in METERS
     }
     if pool_id is not None:
@@ -2467,8 +2560,8 @@ def check_admission_floor(
                     f"in workflow {workflow_id!r}: {meter!r} minimum {pool_minima[meter]} "
                     f"({pool_bits[meter]})",
                 )
-    for step_id in sorted(facts.reserved_allow):
-        allow = facts.reserved_allow[step_id]
+    for step_id in sorted(reserved_allow):
+        allow = reserved_allow[step_id]
         step_bits = floors_bits.get(step_id, ceiling_bits)
         step_minima = floors_minima.get(step_id, ceiling_minima)
         for meter in FLOOR_METERS:
@@ -2479,8 +2572,11 @@ def check_admission_floor(
                     f"one maximal Admission hold in workflow {workflow_id!r}: "
                     f"{meter!r} minimum {step_minima[meter]} ({step_bits[meter]})",
                 )
-    for step_id in sorted(facts.plain_allow):
-        allow = facts.plain_allow[step_id]
+    for step_id in sorted(workflow.steps):
+        step = workflow.steps[step_id]
+        if step.agent is None or step.reserved:
+            continue
+        allow = step.limits
         step_bits = floors_bits.get(step_id, ceiling_bits)
         step_minima = floors_minima.get(step_id, ceiling_minima)
         for meter in FLOOR_METERS:
@@ -2494,13 +2590,18 @@ def check_admission_floor(
 
 
 def check_reachability(
-    problems: Problems, workflow_where: str, facts: WorkflowFacts
+    problems: Problems, workflow_where: str, workflow: Workflow
 ) -> None:
-    if facts.start is None:
+    """Every step is reachable from `start` over the effective Routes (§3).
+
+    Runs over the typed ``Workflow``: the shared ``effective_routes``
+    implementation supplies the step's Routes after ``defaults.routes``.
+    """
+    if workflow.start not in workflow.steps:
         return
-    routes = {sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"}
+    routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
     seen: set[str] = set()
-    todo = [facts.start]
+    todo = [workflow.start]
     while todo:
         step = todo.pop()
         if step in seen:
@@ -2517,9 +2618,13 @@ def check_reachability(
 
 
 def check_limit_exceeded_acyclic(
-    problems: Problems, workflow_where: str, facts: WorkflowFacts
+    problems: Problems, workflow_where: str, workflow: Workflow
 ) -> None:
-    routes = {sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"}
+    """The `limit-exceeded` Routes form no cycle (§3).
+
+    Runs over the typed ``Workflow`` and its effective Routes.
+    """
+    routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
     for step_id in routes:
         chain = [step_id]
         target = routes[step_id].get("limit-exceeded")
@@ -2544,9 +2649,8 @@ HARD_HANDOFF_ENDS = frozenset({"unfinished", "failed"})
 def check_step_thresholds(
     problems: Problems,
     workflow_where: str,
-    facts: WorkflowFacts,
-    models: Mapping[str, Mapping[str, Any]] | None,
-    workflow_raw: Mapping[str, Any],
+    workflow: Workflow,
+    models: Mapping[str, ModelDecl] | None,
 ) -> None:
     """Pin-dependent bounds for every opted-in step (§3, decision 5).
 
@@ -2555,10 +2659,10 @@ def check_step_thresholds(
     Context Window. Where a soft bound is configured it must sit strictly
     between the safety margin plus overhead and the hard bound. Faults name
     the offending `context-thresholds` leaf.
+
+    Runs over the typed ``Workflow``: the policies come from the single read.
     """
-    if not facts.thresholds:
-        return
-    pin = _pin_for_workflow(models, workflow_raw)
+    pin = _pin_for_workflow(models, workflow.model)
     if pin is None:
         return
     output_and_window = _pin_output_and_window(pin)
@@ -2567,8 +2671,11 @@ def check_step_thresholds(
     output_cap, window = output_and_window
     _, _, safety, overhead, _ = gateway_code_owned()
     floor_sum = safety + overhead
-    for step_id in sorted(facts.thresholds):
-        hard = facts.thresholds[step_id]
+    for step_id in sorted(workflow.steps):
+        policy = workflow.steps[step_id].context_thresholds
+        if policy is None:
+            continue
+        hard = policy.hard_tokens
         step_where = f"{workflow_where}.steps.{step_id}.context-thresholds"
         if hard <= floor_sum:
             problems.add(
@@ -2583,7 +2690,7 @@ def check_step_thresholds(
                 f"({output_cap}) must not exceed 'context-window-tokens' "
                 f"({window})",
             )
-        soft = facts.soft_thresholds.get(step_id)
+        soft = policy.soft_tokens
         if soft is not None and (soft <= floor_sum or soft >= hard):
             problems.add(
                 f"{step_where}.soft-tokens",
@@ -2596,8 +2703,7 @@ def check_step_thresholds(
 def check_hard_handoff_routes(
     problems: Problems,
     workflow_where: str,
-    facts: WorkflowFacts,
-    steps_raw: Mapping[str, Any],
+    workflow: Workflow,
 ) -> None:
     """Every Hard Handoff branch stays model-free through Runtime Operations.
 
@@ -2609,23 +2715,21 @@ def check_hard_handoff_routes(
     cycle — including one bounded by an Execution Ceiling — are refused. A
     direct permitted Workflow End is valid; an unrouted result is the routes
     phase's fault, not this traversal's.
+
+    Runs over the typed ``Workflow`` and its effective Routes.
     """
-    if not facts.thresholds:
-        return
-    routes = {
-        sid: targets
-        for sid, targets in facts.routes_all.items()
-        if sid != "__defaults__"
-    }
-    for step_id in sorted(facts.thresholds):
+    routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
+    for step_id in sorted(workflow.steps):
+        if workflow.steps[step_id].context_thresholds is None:
+            continue
         start_target = routes.get(step_id, {}).get(HARD_CONTEXT_RESULT)
         if start_target is None or start_target.end is not None:
             continue
         first = start_target.step
         assert first is not None
-        first_raw = steps_raw.get(first)
-        if not isinstance(first_raw, dict) or "agent" in first_raw:
-            if isinstance(first_raw, dict):
+        first_step = workflow.steps.get(first)
+        if first_step is None or first_step.agent is not None:
+            if first_step is not None:
                 problems.add(
                     f"{workflow_where}.steps.{step_id}"
                     f".routes.{HARD_CONTEXT_RESULT}",
@@ -2635,15 +2739,14 @@ def check_hard_handoff_routes(
             continue
         done: set[str] = set()
         _visit_handoff_operation(
-            problems, workflow_where, facts, steps_raw, routes, first, [step_id, first], done
+            problems, workflow_where, workflow, routes, first, [step_id, first], done
         )
 
 
 def _visit_handoff_operation(
     problems: Problems,
     workflow_where: str,
-    facts: WorkflowFacts,
-    steps_raw: Mapping[str, Any],
+    workflow: Workflow,
     routes: Mapping[str, Mapping[str, RouteTarget]],
     step_id: str,
     path: list[str],
@@ -2653,11 +2756,10 @@ def _visit_handoff_operation(
     if step_id in done:
         return
     done.add(step_id)
-    raw = steps_raw.get(step_id)
-    if not isinstance(raw, dict):
+    if step_id not in workflow.steps:
         return
     targets = routes.get(step_id, {})
-    for result in step_results(raw, facts.input_type):
+    for result in workflow.result_names(step_id):
         target = targets.get(result)
         if target is None:
             continue
@@ -2671,10 +2773,10 @@ def _visit_handoff_operation(
             continue
         assert target.step is not None
         nxt = target.step
-        nxt_raw = steps_raw.get(nxt)
-        if not isinstance(nxt_raw, dict):
+        nxt_step = workflow.steps.get(nxt)
+        if nxt_step is None:
             continue
-        if "agent" in nxt_raw:
+        if nxt_step.agent is not None:
             problems.add(
                 f"{workflow_where}.steps.{step_id}.routes.{result}",
                 f"hard handoff cannot enter agent step {nxt!r}: "
@@ -2689,15 +2791,14 @@ def _visit_handoff_operation(
             )
             continue
         _visit_handoff_operation(
-            problems, workflow_where, facts, steps_raw, routes, nxt, [*path, nxt], done
+            problems, workflow_where, workflow, routes, nxt, [*path, nxt], done
         )
 
 
 def check_soft_handoff_routes(
     problems: Problems,
     workflow_where: str,
-    facts: WorkflowFacts,
-    steps_raw: Mapping[str, Any],
+    workflow: Workflow,
 ) -> None:
     """Every soft Route enters a Reserved hard-only receiver; the receiver's
     failure Routes stay model-free through Runtime Operations.
@@ -2714,16 +2815,14 @@ def check_soft_handoff_routes(
     Operation outcome routes through operation steps only to an `unfinished`
     or `failed` Workflow End. An agent successor and any reachable cycle are
     refused; a direct permitted Workflow End is valid.
+
+    Runs over the typed ``Workflow`` and its effective Routes.
     """
-    if not facts.soft_thresholds:
-        return
-    routes = {
-        sid: targets
-        for sid, targets in facts.routes_all.items()
-        if sid != "__defaults__"
-    }
-    defaults = facts.routes_all.get("__defaults__", {})
-    for step_id in sorted(facts.soft_thresholds):
+    routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
+    for step_id in sorted(workflow.steps):
+        policy = workflow.steps[step_id].context_thresholds
+        if policy is None or policy.soft_tokens is None:
+            continue
         soft_target = routes.get(step_id, {}).get(SOFT_CONTEXT_RESULT)
         if soft_target is None:
             continue
@@ -2747,22 +2846,23 @@ def check_soft_handoff_routes(
             continue
         receiver = soft_target.step
         assert receiver is not None
-        receiver_raw = steps_raw.get(receiver)
-        if not isinstance(receiver_raw, dict) or "agent" not in receiver_raw:
+        receiver_step = workflow.steps.get(receiver)
+        if receiver_step is None or receiver_step.agent is None:
             problems.add(
                 route_where,
                 f"soft handoff cannot enter {receiver!r}: "
                 "the receiver is an agent Reserved Step",
             )
             continue
-        if receiver not in facts.reserved_allow:
+        if not receiver_step.reserved:
             problems.add(
                 route_where,
                 f"soft handoff cannot enter {receiver!r}: "
                 "the receiver is a Reserved Step declaring all four meters",
             )
             continue
-        if receiver not in facts.thresholds or receiver in facts.soft_thresholds:
+        receiver_policy = receiver_step.context_thresholds
+        if receiver_policy is None or receiver_policy.soft_tokens is not None:
             problems.add(
                 route_where,
                 f"soft handoff cannot enter {receiver!r}: "
@@ -2772,17 +2872,17 @@ def check_soft_handoff_routes(
             continue
         receiver_routes = routes.get(receiver, {})
         for result in ("error", "limit-exceeded"):
-            target = receiver_routes.get(result, defaults.get(result))
+            target = receiver_routes.get(result)
             if target is None:
                 continue
             if target.end is not None:
                 continue
             assert target.step is not None
             nxt = target.step
-            nxt_raw = steps_raw.get(nxt)
-            if not isinstance(nxt_raw, dict):
+            nxt_step = workflow.steps.get(nxt)
+            if nxt_step is None:
                 continue
-            if "agent" in nxt_raw:
+            if nxt_step.agent is not None:
                 problems.add(
                     f"{workflow_where}.steps.{receiver}.routes.{result}",
                     f"hard handoff cannot enter agent step {nxt!r}: "
@@ -2793,8 +2893,7 @@ def check_soft_handoff_routes(
             _visit_handoff_operation(
                 problems,
                 workflow_where,
-                facts,
-                steps_raw,
+                workflow,
                 routes,
                 nxt,
                 [receiver, nxt],
@@ -2804,7 +2903,7 @@ def check_soft_handoff_routes(
 
 def must_analysis(
     start: str,
-    steps: Mapping[str, Any],
+    steps: Mapping[str, WorkflowStep],
     routes: Mapping[str, Mapping[str, RouteTarget]],
 ) -> dict[str, dict[str, set[str]]]:
     """Entry facts: possible latest results of each step when `start` is entered.
@@ -2844,17 +2943,80 @@ def must_analysis(
     return entry
 
 
+def _resolve_required_ref(
+    workflow: Workflow, ref: str
+) -> tuple[str, str, str | None] | None:
+    """Re-resolve a declared required input against the typed ``Workflow``.
+
+    Phase 1 already proved every reference with :func:`check_ref`; phase 2
+    re-derives the ``(step, result, field)`` triple purely from the typed
+    model so the required-input proof shares the single read. ``None`` where
+    the reference no longer resolves (its phase-1 fault stands alone, with no
+    cascading proof fault).
+    """
+    parsed = parse_ref(ref)
+    if parsed is None:
+        return None
+    named, result, field_name = parsed
+    target = workflow.steps.get(named)
+    if target is None:
+        return None
+    if result == "facts":
+        return parsed
+    if target.agent is None:
+        return None
+    fields = target.agent.results.get(result)
+    if fields is None or field_name not in fields:
+        return None
+    return parsed
+
+
+def required_inputs_for(
+    workflow: Workflow,
+) -> dict[str, list[tuple[str, tuple[str, str, str | None]]]]:
+    """Every required declared input by step: ``(reference, parsed)`` (§2.5).
+
+    Agent ``inputs`` that are required (neither the always-present
+    ``input.comments`` nor the note input constrain a path), plus each
+    operation ``with.body``. The single implementation the phase-2 proof
+    reads from the typed ``Workflow``.
+    """
+    resolved: dict[str, list[tuple[str, tuple[str, str, str | None]]]] = {}
+    for step_id, step in workflow.steps.items():
+        required: list[tuple[str, tuple[str, str, str | None]]] = []
+        if step.agent is not None:
+            for declared in step.agent.inputs:
+                if declared.optional:
+                    continue
+                if declared.reference in (ROUND_HANDOFF_NOTE_REF, INPUT_COMMENTS_REF):
+                    continue
+                parsed = _resolve_required_ref(workflow, declared.reference)
+                if parsed is not None:
+                    required.append((declared.reference, parsed))
+        if step.with_body is not None:
+            parsed = _resolve_required_ref(workflow, step.with_body)
+            if parsed is not None:
+                required.append((step.with_body, parsed))
+        if required:
+            resolved[step_id] = required
+    return resolved
+
+
 def check_required_inputs(
     problems: Problems,
     workflow_where: str,
-    steps_raw: Mapping[str, Any],
-    facts: WorkflowFacts,
+    workflow: Workflow,
 ) -> None:
-    if facts.start is None:
+    """Every required declared input is proven on every path to its step (§3).
+
+    Runs over the typed ``Workflow``: the required inputs resolve from the
+    single read, and the entry facts flow over the effective Routes.
+    """
+    if workflow.start not in workflow.steps:
         return
-    routes = {sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"}
-    entry = must_analysis(facts.start, steps_raw, routes)
-    for step_id, required in facts.required_inputs.items():
+    routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
+    entry = must_analysis(workflow.start, workflow.steps, routes)
+    for step_id, required in required_inputs_for(workflow).items():
         for ref, (named, result, field) in required:
             got = entry.get(step_id, {}).get(named, {"<absent>"})
             if result == "facts":
@@ -2872,9 +3034,30 @@ def check_required_inputs(
                 )
 
 
+def note_inputs_for(workflow: Workflow) -> dict[str, list[str]]:
+    """Where the Round Handoff note input is declared: step id -> item paths.
+
+    Derived purely from the typed ``Workflow``: the single implementation the
+    phase-2 note checks read. Item paths enumerate the typed inputs in order,
+    which match the file order on every Workflow these checks run on (they
+    are skipped where the Workflow already carries faults).
+    """
+    workflow_where = f"workflows.{workflow.id}"
+    note_inputs: dict[str, list[str]] = {}
+    for step_id, step in workflow.steps.items():
+        if step.agent is None:
+            continue
+        for index, declared in enumerate(step.agent.inputs):
+            if declared.reference == ROUND_HANDOFF_NOTE_REF:
+                item_where = (
+                    f"{workflow_where}.steps.{step_id}.agent.inputs[{index}]"
+                )
+                note_inputs.setdefault(step_id, []).append(item_where)
+    return note_inputs
+
+
 def first_agent_steps(
-    start: str,
-    steps_raw: Mapping[str, Any],
+    workflow: Workflow,
     routes: Mapping[str, Mapping[str, RouteTarget]],
 ) -> set[str]:
     """Every step that can open a Continuation: the first agent step of a path.
@@ -2887,22 +3070,22 @@ def first_agent_steps(
     """
     first: set[str] = set()
     visited: set[str] = set()
-    todo = [start]
+    todo = [workflow.start]
     while todo:
         current = todo.pop()
         if current in visited:
             continue
         visited.add(current)
-        raw = steps_raw.get(current)
-        if not isinstance(raw, dict):
+        step = workflow.steps.get(current)
+        if step is None:
             continue
-        if "agent" in raw:
+        if step.agent is not None:
             first.add(current)
             continue
-        if "operation" not in raw:
+        if step.operation is None:
             continue
         for target in routes.get(current, {}).values():
-            if target.step is not None and target.step in steps_raw:
+            if target.step is not None and target.step in workflow.steps:
                 todo.append(target.step)
     return first
 
@@ -2910,29 +3093,27 @@ def first_agent_steps(
 def check_round_handoff_notes(
     problems: Problems,
     workflow_where: str,
-    steps_raw: Mapping[str, Any],
-    facts: WorkflowFacts,
+    workflow: Workflow,
 ) -> None:
     """Accept ``optional: round-handoff.note`` only on possible first agent steps.
 
     Skipped where the Workflow already carries faults: a broken graph would
-    otherwise name innocent declarations.
+    otherwise name innocent declarations. Runs over the typed ``Workflow``.
     """
-    if facts.start is None or not facts.note_inputs:
+    note_inputs = note_inputs_for(workflow)
+    if workflow.start not in workflow.steps or not note_inputs:
         return
     if any(
         fault.path == workflow_where or fault.path.startswith(workflow_where + ".")
         for fault in problems.items
     ):
         return
-    routes = {
-        sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"
-    }
-    first = first_agent_steps(facts.start, steps_raw, routes)
-    for step_id in sorted(facts.note_inputs):
+    routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
+    first = first_agent_steps(workflow, routes)
+    for step_id in sorted(note_inputs):
         if step_id in first:
             continue
-        for item_where in facts.note_inputs[step_id]:
+        for item_where in note_inputs[step_id]:
             problems.add(
                 item_where,
                 f"'{ROUND_HANDOFF_NOTE_REF}' may only be declared on a possible "
@@ -2943,295 +3124,53 @@ def check_round_handoff_notes(
 def check_round_handoff_enablement(
     problems: Problems,
     workflow_where: str,
-    steps_raw: Mapping[str, Any],
-    facts: WorkflowFacts,
+    workflow: Workflow,
 ) -> None:
     """Prove an enabled Workflow can publish and every Continuation reads the note.
 
     Requires at least one annotated publishing Route when `round-handoff` is
     present, at least one possible first agent step, and the optional note on
-    every such step. Skipped where the Workflow already carries faults.
+    every such step. Skipped where the Workflow already carries faults. Runs
+    over the typed ``Workflow``.
     """
-    if facts.round_handoff is None:
+    if workflow.round_handoff is None:
         return
     if any(
         fault.path == workflow_where or fault.path.startswith(workflow_where + ".")
         for fault in problems.items
     ):
         return
-    if not facts.round_handoff_annotations:
+    annotations = [
+        (step_id, result)
+        for step_id, step in workflow.steps.items()
+        for result, target in workflow.effective_routes(step_id).items()
+        if target.round_handoff is not None
+    ]
+    if not annotations:
         problems.add(
             f"{workflow_where}.round-handoff",
             "an enabled Workflow needs at least one reachable publishing Route "
             "(`round-handoff` on a `pushed`/`no-changes` Route)",
         )
         return
-    routes = {
-        sid: targets for sid, targets in facts.routes_all.items() if sid != "__defaults__"
-    }
-    if facts.start is None:
+    routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
+    if workflow.start not in workflow.steps:
         return
-    first = first_agent_steps(facts.start, steps_raw, routes)
+    first = first_agent_steps(workflow, routes)
     if not first:
         problems.add(
             f"{workflow_where}.round-handoff",
             "an enabled Workflow needs at least one possible first agent step",
         )
         return
+    note_inputs = note_inputs_for(workflow)
     for step_id in sorted(first):
-        if step_id not in facts.note_inputs:
+        if step_id not in note_inputs:
             problems.add(
                 f"{workflow_where}.steps.{step_id}.agent.inputs",
                 f"'{ROUND_HANDOFF_NOTE_REF}' must be declared on every possible "
                 "first agent step of an enabled Workflow",
             )
-
-
-# --- Build the typed config ----------------------------------------------------------
-
-
-def build_field_type(raw: Any) -> FieldType:
-    if isinstance(raw, str):
-        return raw
-    if isinstance(raw, dict) and set(raw) == {"list"}:
-        return ListType(item=str(raw["list"]))
-    values = raw.get("enum", []) if isinstance(raw, dict) else []
-    return EnumType(values=tuple(str(entry) for entry in values))
-
-
-def build_config(
-    data: Mapping[str, Any],
-    source: Path,
-    target: Mapping[str, Any],
-    models: Mapping[str, Mapping[str, Any]],
-    worker: WorkerSettings,
-    skills: tuple[SkillBundleRequirement, ...],
-) -> WorkflowConfiguration:
-    typed_models: dict[str, ModelDecl] = {}
-    for model_id, entry in models.items():
-        prices = entry["prices"]
-        assert isinstance(prices, dict)
-        provider_raw = entry.get("provider")
-        gateway_kind_raw = entry.get("gateway_kind")
-        gateway_url_raw = entry.get("gateway_url")
-        gateway_url_env_raw = entry.get("gateway_url_env")
-        output_cap_raw = entry.get("output_cap_tokens")
-        threshold_raw = entry.get("context_threshold_tokens")
-        window_raw = entry.get("context_window_tokens")
-        typed_models[model_id] = ModelDecl(
-            id=model_id,
-            provider=str(provider_raw) if provider_raw is not None else None,
-            model=str(entry["model"]),
-            endpoint=str(entry["endpoint"]),
-            effort=str(entry["effort"]),
-            api_key_env=str(entry["api_key_env"]),
-            prices=ModelPrices(
-                input=float(prices["input"]),
-                output=float(prices["output"]),
-                cache_read=float(prices["cache-read"]),
-                cache_write=float(prices["cache-write"]),
-            ),
-            gateway_kind=(
-                str(gateway_kind_raw) if gateway_kind_raw is not None else None
-            ),
-            gateway_url=str(gateway_url_raw) if gateway_url_raw is not None else None,
-            gateway_url_env=(
-                str(gateway_url_env_raw) if gateway_url_env_raw is not None else None
-            ),
-            output_cap_tokens=int(output_cap_raw) if output_cap_raw is not None else None,
-            context_threshold_tokens=(
-                int(threshold_raw) if threshold_raw is not None else None
-            ),
-            context_window_tokens=(
-                int(window_raw) if window_raw is not None else None
-            ),
-        )
-    typed_workflows: dict[str, Workflow] = {}
-    raw_workflows = data["workflows"]
-    assert isinstance(raw_workflows, dict)
-    for workflow_id, workflow_raw in raw_workflows.items():
-        assert isinstance(workflow_raw, dict)
-        raw_input = workflow_raw["input"]
-        assert isinstance(raw_input, dict)
-        raw_limits = workflow_raw["limits"]
-        assert isinstance(raw_limits, dict)
-        raw_steps = workflow_raw["steps"]
-        assert isinstance(raw_steps, dict)
-        typed_steps: dict[str, WorkflowStep] = {}
-        for step_id, step_raw in raw_steps.items():
-            assert isinstance(step_raw, dict)
-            agent: Agent | None = None
-            if "agent" in step_raw:
-                agent_raw = step_raw["agent"]
-                assert isinstance(agent_raw, dict)
-                instructions: list[Instruction] = []
-                for item in agent_raw.get("instructions") or []:
-                    assert isinstance(item, dict)
-                    if "skill" in item:
-                        instructions.append(Instruction(skill=str(item["skill"])))
-                    else:
-                        instructions.append(Instruction(prompt=str(item["prompt"])))
-                inputs: list[InputRef] = []
-                for item in agent_raw.get("inputs") or []:
-                    if isinstance(item, dict) and set(item) == {"optional"}:
-                        inputs.append(InputRef(reference=str(item["optional"]), optional=True))
-                    else:
-                        inputs.append(InputRef(reference=str(item)))
-                results: dict[str, dict[str, FieldType]] = {}
-                results_raw = agent_raw.get("results") or {}
-                assert isinstance(results_raw, dict)
-                for result_name, fields_raw in results_raw.items():
-                    fields: dict[str, FieldType] = {}
-                    for field_name, field_raw in (fields_raw or {}).items():
-                        fields[str(field_name)] = build_field_type(field_raw)
-                    results[str(result_name)] = fields
-                advisor_raw = agent_raw.get("advisor")
-                advisor: Advisor | None = None
-                if isinstance(advisor_raw, dict):
-                    advisor_model = advisor_raw.get("model")
-                    advisor = Advisor(
-                        prompt=str(advisor_raw.get("prompt", "")),
-                        model=str(advisor_model) if advisor_model is not None else None,
-                    )
-                agent = Agent(
-                    instructions=tuple(instructions),
-                    tools=tuple(str(tool) for tool in agent_raw.get("tools") or []),
-                    inputs=tuple(inputs),
-                    results=results,
-                    advisor=advisor,
-                )
-            with_raw = step_raw.get("with") or {}
-            assert isinstance(with_raw, dict)
-            requires: list[tuple[str, str]] = []
-            for item in with_raw.get("requires") or []:
-                assert isinstance(item, dict) and len(item) == 1
-                key, value = next(iter(item.items()))
-                requires.append((str(key), str(value)))
-            routes: dict[str, RouteTarget] = {}
-            routes_raw = step_raw.get("routes") or {}
-            assert isinstance(routes_raw, dict)
-            for result_name, target_raw in routes_raw.items():
-                if isinstance(target_raw, dict):
-                    if "step" in target_raw:
-                        routes[str(result_name)] = RouteTarget(
-                            step=str(target_raw["step"]),
-                            inherit_conversation=target_raw.get("inherit-conversation") is True,
-                        )
-                    else:
-                        raw_annotation = target_raw.get("round-handoff")
-                        annotation: RoundHandoffAnnotation | None = None
-                        if isinstance(raw_annotation, dict):
-                            annotation = RoundHandoffAnnotation(
-                                kind=str(raw_annotation["kind"]),
-                                note=str(raw_annotation["note"])
-                                if "note" in raw_annotation
-                                else None,
-                            )
-                        routes[str(result_name)] = RouteTarget(
-                            end=str(target_raw["end"]), round_handoff=annotation
-                        )
-                else:
-                    routes[str(result_name)] = RouteTarget(step=str(target_raw))
-            context_thresholds: ContextThresholds | None = None
-            policy_raw = step_raw.get("context-thresholds")
-            if isinstance(policy_raw, dict):
-                soft_raw = policy_raw.get("soft-tokens")
-                context_thresholds = ContextThresholds(
-                    hard_tokens=int(policy_raw["hard-tokens"]),
-                    soft_tokens=int(soft_raw) if soft_raw is not None else None,
-                )
-            typed_steps[str(step_id)] = WorkflowStep(
-                id=str(step_id),
-                agent=agent,
-                operation=str(step_raw["operation"]) if "operation" in step_raw else None,
-                with_body=str(with_raw["body"]) if "body" in with_raw else None,
-                with_draft=bool(with_raw["draft"]) if "draft" in with_raw else None,
-                with_requires=tuple(requires),
-                context_thresholds=context_thresholds,
-                max_executions=int(
-                    step_raw.get(
-                        "max-executions",
-                        (workflow_raw.get("defaults") or {}).get("max-executions", 1),
-                    )
-                ),
-                limits={
-                    str(meter): float(value)
-                    for meter, value in (step_raw.get("limits") or {}).items()
-                },
-                reserved=step_raw.get("reserved") is True,
-                routes=routes,
-            )
-        defaults_raw = workflow_raw.get("defaults") or {}
-        assert isinstance(defaults_raw, dict)
-        defaults_routes: dict[str, RouteTarget] = {}
-        for result_name, target_raw in (defaults_raw.get("routes") or {}).items():
-            if isinstance(target_raw, dict):
-                defaults_routes[str(result_name)] = RouteTarget(end=str(target_raw["end"]))
-            else:
-                defaults_routes[str(result_name)] = RouteTarget(step=str(target_raw))
-        outcomes: dict[str, tuple[str, ...]] = {}
-        for outcome, entry in (workflow_raw.get("outcomes") or {}).items():
-            assert isinstance(entry, dict)
-            outcomes[str(outcome)] = tuple(str(label) for label in entry["labels"])
-        raw_handoff = workflow_raw.get("round-handoff")
-        round_handoff: RoundHandoffConfig | None = None
-        if isinstance(raw_handoff, dict):
-            raw_limit = raw_handoff["max-automatic-pickups"]
-            assert isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
-            raw_label = raw_handoff.get(
-                "pickup-label", DEFAULT_ROUND_HANDOFF_PICKUP_LABEL
-            )
-            assert isinstance(raw_label, str) and raw_label
-            round_handoff = RoundHandoffConfig(
-                max_automatic_pickups=raw_limit,
-                pickup_label=raw_label,
-            )
-        raw_ceiling = workflow_raw["limits"]
-        assert isinstance(raw_ceiling, dict)
-        typed_workflows[str(workflow_id)] = Workflow(
-            id=str(workflow_id),
-            model=str(workflow_raw["model"]),
-            input=InputDecl(
-                type=str(raw_input["type"]),
-                label=str(raw_input["label"]),
-                require_all=tuple(str(e) for e in raw_input.get("require-all") or []),
-                require_any=tuple(str(e) for e in raw_input.get("require-any") or []),
-                exclude=tuple(str(e) for e in raw_input.get("exclude") or []),
-                drafts=str(raw_input["drafts"]) if "drafts" in raw_input else None,
-                skip_open_agent_pr=bool(raw_input["skip-open-agent-pr"])
-                if "skip-open-agent-pr" in raw_input
-                else None,
-            ),
-            ceiling=AttemptCeiling(
-                cost_usd=float(raw_limits["cost-usd"]),
-                effective_tokens=float(raw_limits["effective-tokens"]),
-                tool_calls=float(raw_limits["tool-calls"]),
-                wall_clock_minutes=float(raw_limits["wall-clock-minutes"]),
-            ),
-            max_parallel_subagents=int(workflow_raw.get("max-parallel-subagents", 2)),
-            outcomes=outcomes,
-            start=str(workflow_raw["start"]),
-            defaults_max_executions=int(defaults_raw.get("max-executions", 1)),
-            defaults_routes=defaults_routes,
-            round_handoff=round_handoff,
-            steps=typed_steps,
-        )
-    profile_raw = target.get("profile")
-    return WorkflowConfiguration(
-        version=4,
-        target=TargetRepository(
-            kind=str(target["kind"]),
-            repository=str(target["repository"]),
-            base_branch=str(target["base_branch"]),
-            token_env=str(target["token_env"]),
-            profile=str(profile_raw) if profile_raw is not None else None,
-        ),
-        models=typed_models,
-        worker=worker,
-        workflows=typed_workflows,
-        skills=skills,
-        source=source,
-    )
 
 
 # --- `skills` declaration (one more phase, same orchestration) ---------------
@@ -3363,24 +3302,26 @@ def validate_configuration_text(
     if workflows_mapping is not None and not workflows_mapping:
         problems.add("workflows", "'workflows' must declare at least one workflow")
         workflows_mapping = None
-    facts_by_workflow: dict[str, tuple[dict[str, Any], WorkflowFacts]] = {}
+    # The single read: each Workflow parses exactly once into its typed form.
+    # A Workflow that is unusable (its mapping, steps, input or ceiling
+    # unusable) yields no typed form; its phase-1 faults stand and phase 2
+    # skips it.
+    typed_workflows: dict[str, Workflow] = {}
     if workflows_mapping is not None:
         for wid in workflows_mapping:
             if check_id(wid, f"workflows.{wid}", problems, "workflow") is None:
                 continue
-            facts = WorkflowFacts()
-            validate_workflow(
+            typed = validate_workflow(
                 problems,
                 str(wid),
                 workflows_mapping[wid],
                 models,
                 base,
                 declared_names,
-                facts,
                 undeclared_skill_label=UNDECLARED_SKILL_LABEL,
             )
-            if isinstance(workflows_mapping[wid], dict):
-                facts_by_workflow[str(wid)] = (workflows_mapping[wid], facts)
+            if typed is not None:
+                typed_workflows[str(wid)] = typed
 
     if workflow_id is not None and (
         workflows_mapping is None or workflow_id not in workflows_mapping
@@ -3395,43 +3336,34 @@ def validate_configuration_text(
         pairs, endpoints = code_owned_tables()
         check_model_table(problems, models, pairs, endpoints)
 
-    # Phase 2 runs per Workflow whose phase 1 left no faults behind.
-    for wid, (workflow_raw, facts) in facts_by_workflow.items():
+    # Phase 2 proves the graph-wide rules over the typed Workflows. A
+    # Workflow the single read refused carries its phase-1 faults already and
+    # is skipped here. Every fault names its YAML path; there is no
+    # re-parse and no "does not parse" fallback.
+    for wid, workflow in typed_workflows.items():
         workflow_where = f"workflows.{wid}"
         before = len(problems)
-        steps_raw = workflow_raw.get("steps")
-        if not isinstance(steps_raw, dict) or not steps_raw:
-            continue
-        check_limits_arithmetic(problems, workflow_where, facts)
-        check_step_thresholds(
-            problems, workflow_where, facts, models, workflow_raw
-        )
-        check_admission_floor(
-            problems, workflow_where, str(wid), facts, models, workflow_raw
-        )
-        check_reachability(problems, workflow_where, facts)
-        check_limit_exceeded_acyclic(problems, workflow_where, facts)
-        if isinstance(steps_raw, Mapping):
-            check_hard_handoff_routes(problems, workflow_where, facts, steps_raw)
-            check_soft_handoff_routes(problems, workflow_where, facts, steps_raw)
+        check_limits_arithmetic(problems, workflow_where, workflow)
+        check_step_thresholds(problems, workflow_where, workflow, models)
+        check_admission_floor(problems, workflow_where, workflow, models)
+        check_reachability(problems, workflow_where, workflow)
+        check_limit_exceeded_acyclic(problems, workflow_where, workflow)
+        check_hard_handoff_routes(problems, workflow_where, workflow)
+        check_soft_handoff_routes(problems, workflow_where, workflow)
         if len(problems) != before:
             continue
-        check_required_inputs(problems, workflow_where, steps_raw, facts)
-        check_round_handoff_notes(problems, workflow_where, steps_raw, facts)
-        if isinstance(steps_raw, Mapping):
-            check_round_handoff_enablement(
-                problems, workflow_where, steps_raw, facts
-            )
+        check_required_inputs(problems, workflow_where, workflow)
+        check_round_handoff_notes(problems, workflow_where, workflow)
+        check_round_handoff_enablement(problems, workflow_where, workflow)
 
     # End labels never equal a Selection Label in the same file (§3).
-    selection_labels: dict[str, str] = {}
-    for wid, (raw, facts) in facts_by_workflow.items():
-        if facts.label is not None:
-            selection_labels[wid] = facts.label
+    selection_labels: dict[str, str] = {
+        wid: workflow.input.label for wid, workflow in typed_workflows.items()
+    }
     if selection_labels:
         claimed = set(selection_labels.values())
-        for wid, (raw, facts) in facts_by_workflow.items():
-            for outcome, labels in facts.outcomes.items():
+        for wid, workflow in typed_workflows.items():
+            for outcome, labels in workflow.outcomes.items():
                 for label in labels:
                     if label in claimed:
                         owner = next(
@@ -3446,10 +3378,11 @@ def validate_configuration_text(
                             "a Selection Label",
                         )
     # A Pickup Label never equals a Selection Label or end label (§8).
-    pickup_labels: dict[str, str] = {}
-    for wid, (raw, facts) in facts_by_workflow.items():
-        if facts.round_handoff is not None:
-            pickup_labels[wid] = facts.round_handoff[0]
+    pickup_labels: dict[str, str] = {
+        wid: workflow.round_handoff.pickup_label
+        for wid, workflow in typed_workflows.items()
+        if workflow.round_handoff is not None
+    }
     if pickup_labels:
         claimed_selection = set(selection_labels.values())
         for wid, pickup in pickup_labels.items():
@@ -3460,8 +3393,8 @@ def validate_configuration_text(
                         f"pickup label {pickup!r} equals the Selection Label of "
                         f"workflow {owner_id!r}",
                     )
-        for wid, (raw, facts) in facts_by_workflow.items():
-            for outcome, labels in facts.outcomes.items():
+        for wid, workflow in typed_workflows.items():
+            for outcome, labels in workflow.outcomes.items():
                 for label in labels:
                     for owner_id, pickup in pickup_labels.items():
                         if label == pickup:
@@ -3475,11 +3408,15 @@ def validate_configuration_text(
         return None, problems.items
     if workflows_mapping is None or skills is None:
         return None, problems.items
-    try:
-        config = build_config(data, source, target, models, worker, skills)
-    except (KeyError, TypeError, ValueError, AssertionError) as exc:
-        problems.add("(root)", f"does not parse: {exc}")
-        return None, problems.items
+    config = WorkflowConfiguration(
+        version=4,
+        target=target,
+        models=models,
+        worker=worker,
+        workflows=typed_workflows,
+        skills=skills,
+        source=source,
+    )
     check_graph_compilation(problems, config)
     if problems:
         return None, problems.items
