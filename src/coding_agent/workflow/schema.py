@@ -653,6 +653,21 @@ class RouteTarget:
     """
 
 
+def threshold_results_for_policy(policy: ContextThresholds | None) -> tuple[str, ...]:
+    """The threshold Step Results a ``context-thresholds`` policy selects (§3).
+
+    The single spelling of the soft-tokens rule: the hard spelling wherever
+    a policy is present, plus the soft spelling where the policy configures
+    ``soft-tokens``; no policy selects none. Steps without the policy keep
+    both spellings as ordinary business result spellings.
+    """
+    if policy is None:
+        return ()
+    if policy.soft_tokens is not None:
+        return (HARD_CONTEXT_RESULT, SOFT_CONTEXT_RESULT)
+    return (HARD_CONTEXT_RESULT,)
+
+
 def result_names_for_step(
     agent: Agent | None,
     thresholds: ContextThresholds | None,
@@ -665,17 +680,14 @@ def result_names_for_step(
     The single implementation the static validator and the workflow-graph
     builder share: an ``agent`` step's declared results, plus the threshold
     spellings wherever the step carries a ``context-thresholds`` policy
-    (soft only where the policy configures ``soft-tokens``); an
-    ``operation`` step's catalog results (with the conditional ``stale-head``
-    and ``requirement-unmet`` where they apply); then the runtime-reserved
+    (via :func:`threshold_results_for_policy`); an ``operation`` step's
+    catalog results (with the conditional ``stale-head`` and
+    ``requirement-unmet`` where they apply); then the runtime-reserved
     ``error`` and ``limit-exceeded`` every step can produce.
     """
     if agent is not None:
         names = list(agent.results)
-        if thresholds is not None:
-            names.append(HARD_CONTEXT_RESULT)
-            if thresholds.soft_tokens is not None:
-                names.append(SOFT_CONTEXT_RESULT)
+        names.extend(threshold_results_for_policy(thresholds))
     else:
         spec = OPERATIONS.get(operation or "")
         names = list(spec.business) if spec is not None else []
@@ -693,11 +705,16 @@ def default_routes_for_step(
 ) -> dict[str, RouteTarget]:
     """The ``defaults.routes`` entries applying to one step's results (§8.1).
 
-    ``defaults.routes`` names only runtime-reserved results, so only the
-    entries naming one of the step's own result names apply; the step's own
-    Route for a result always wins over its default.
+    ``defaults.routes`` names only runtime-reserved results (enforced here as
+    well as by validation, so directly-constructed Workflows agree): only
+    the entries naming a reserved result the step can itself produce apply;
+    the step's own Route for a result always wins over its default.
     """
-    return {key: target for key, target in defaults_routes.items() if key in names}
+    return {
+        key: target
+        for key, target in defaults_routes.items()
+        if key in names and key in RESERVED_RESULTS
+    }
 
 
 @dataclass(frozen=True)
@@ -772,19 +789,6 @@ class WorkflowStep:
         description="Routes by result name.",
         factory=dict,
     )
-
-    def threshold_results(self) -> tuple[str, ...]:
-        """The threshold Step Results this step's policy selects (§3).
-
-        The hard spelling wherever the step carries a ``context-thresholds``
-        policy, plus the soft spelling where the policy configures
-        ``soft-tokens``; steps without the policy select none here.
-        """
-        if self.agent is None or self.context_thresholds is None:
-            return ()
-        if self.context_thresholds.soft_tokens is not None:
-            return (HARD_CONTEXT_RESULT, SOFT_CONTEXT_RESULT)
-        return (HARD_CONTEXT_RESULT,)
 
     def result_names(self, input_type: str | None) -> list[str]:
         """Every result name this step can produce (§3).

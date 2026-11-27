@@ -101,6 +101,7 @@ from coding_agent.workflow.schema import (
     SkillBundleRequirement,
     default_routes_for_step,
     result_names_for_step,
+    threshold_results_for_policy,
 )
 
 ROUND_HANDOFF_FIELDS = frozenset({"pickup-label", "max-automatic-pickups"})
@@ -1887,11 +1888,7 @@ def validate_step(
                 f"{key!r} is not a possible result of this step "
                 f"(results: {', '.join(result_names)})",
             )
-    explicit_thresholds: set[str] = set()
-    if policy is not None:
-        explicit_thresholds.add(HARD_CONTEXT_RESULT)
-        if policy.soft_tokens is not None:
-            explicit_thresholds.add(SOFT_CONTEXT_RESULT)
+    explicit_thresholds = set(threshold_results_for_policy(policy))
     for result in result_names:
         if result in explicit_thresholds:
             continue
