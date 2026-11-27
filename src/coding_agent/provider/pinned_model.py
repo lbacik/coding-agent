@@ -312,9 +312,10 @@ class PinnedModel:
             and self.context_threshold_tokens is None
             and self.context_window_tokens is None
         ):
-            # The code-owned (provider, model) pair table carries no token
-            # budget: it admits the pair and endpoint only. Every pin the
-            # Worker runs carries all three fields (the validator proves it).
+            # The code-owned provider-to-endpoint table carries no token
+            # budget: it admits one endpoint per provider only, and the model
+            # is free-form. Every pin the Worker runs carries all three
+            # fields (the validator proves it).
             return
         _check_pin_token_fields(
             "direct",

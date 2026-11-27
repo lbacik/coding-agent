@@ -42,10 +42,10 @@ from coding_agent.provider.capability import (
     redact_report,
 )
 from coding_agent.provider.config import (
-    PINNED_MODELS,
     policy_for_pin,
 )
 from coding_agent.provider.pinned_model import (
+    PROVIDER_ENDPOINTS,
     REQUEST_OVERHEAD_TOKENS,
     SAFETY_MARGIN_TOKENS,
     PinnedModel,
@@ -160,9 +160,8 @@ def test_build_chat_model_uses_the_given_api_key_for_either_provider() -> None:
     assert getattr(openai, "openai_api_key").get_secret_value() == "configured-openai-key"
 
 
-def test_configured_pins_are_forced_onto_the_right_endpoint() -> None:
-    assert PINNED_MODELS["anthropic"].endpoint == "messages"
-    assert PINNED_MODELS["openai"].endpoint == "responses"
+def test_configured_providers_are_forced_onto_the_right_endpoint() -> None:
+    assert PROVIDER_ENDPOINTS == {"anthropic": "messages", "openai": "responses"}
 
 
 # --- Gateway pins -------------------------------------------------------------
@@ -479,13 +478,13 @@ def test_policy_for_pin_resolves_a_gateway_pin_from_the_pin_itself() -> None:
     assert policy.model_context_window_tokens == 1000000
 
 
-def test_code_owned_pair_table_carries_no_token_budget() -> None:
-    for pin in PINNED_MODELS.values():
-        assert pin.output_cap_tokens is None
-        assert pin.context_threshold_tokens is None
-        assert pin.context_window_tokens is None
+def test_code_owned_provider_table_carries_no_token_budget() -> None:
+    """The only closed code-owned table for direct pins is provider →
+    endpoint: no code-owned window, output-cap or price table remains."""
+    assert PROVIDER_ENDPOINTS == {"anthropic": "messages", "openai": "responses"}
     import coding_agent.provider.config as provider_config
 
+    assert not hasattr(provider_config, "PINNED_MODELS")
     assert not hasattr(provider_config, "DEFAULT_CONTEXT_WINDOWS")
     assert not hasattr(provider_config, "DEFAULT_OUTPUT_CAPS")
     assert not hasattr(provider_config, "DEFAULT_PRICE_TABLE")
@@ -500,15 +499,27 @@ def test_price_for_missing_pin_is_none() -> None:
 
 
 def test_price_for_configured_pins_in_default_table() -> None:
+    pins = [
+        PinnedModel(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            endpoint="messages",
+            effort="medium",
+        ),
+        PinnedModel(
+            provider="openai",
+            model="gpt-5.6-luna",
+            endpoint="responses",
+            effort="medium",
+        ),
+    ]
     table = {
-        PINNED_MODELS["anthropic"].key: TokenPrices(
+        pin.key: TokenPrices(
             input=1.0, output=1.0, cache_read=1.0, cache_write=1.0
-        ),
-        PINNED_MODELS["openai"].key: TokenPrices(
-            input=1.0, output=1.0, cache_read=1.0, cache_write=1.0
-        ),
+        )
+        for pin in pins
     }
-    for pin in PINNED_MODELS.values():
+    for pin in pins:
         assert price_for(table, pin) is not None
 
 

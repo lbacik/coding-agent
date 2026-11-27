@@ -10,8 +10,8 @@ payload field types and the ``skills`` declaration shape.
 
 The schema is built in code from the same validator vocabulary (field sets
 in ``coding_agent.workflow._checks``, catalog constants in
-``coding_agent.workflow.schema`` and the pair table), never edited by
-hand, so the two cannot drift apart. The CLI command
+``coding_agent.workflow.schema`` and the provider-to-endpoint table), never
+edited by hand, so the two cannot drift apart. The CLI command
 ``agent config schema`` prints it; the committed copy is
 ``schemas/workflow-v4.schema.json``.
 
@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from coding_agent.provider.config import PINNED_MODELS
 from coding_agent.workflow.schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
@@ -132,26 +131,29 @@ def _forbidden_results() -> list[str]:
 
 
 def _model_combos() -> list[dict[str, Any]]:
-    """One ``properties`` const-triple per pinned (provider, model, endpoint).
+    """One ``properties`` constraint per admissible provider and endpoint.
 
-    Direct pins must match one triple; the gateway branch below admits a
+    A direct pin names any non-empty model for a known provider; the branch
+    constrains ``provider`` and ``endpoint`` only and leaves ``model`` a free
+    string (the validator proves the rest). The gateway branch below admits a
     ``litellm`` gateway with the ``responses`` endpoint and a free-form model
-    name (the validator proves the rest).
+    name.
     """
-    from coding_agent.provider.pinned_model import GATEWAY_ENDPOINTS
+    from coding_agent.provider.pinned_model import GATEWAY_ENDPOINTS, PROVIDER_ENDPOINTS
 
-    pins = sorted(
-        PINNED_MODELS.values(), key=lambda pin: (pin.provider, pin.model, pin.endpoint)
-    )
     combos: list[dict[str, Any]] = []
-    for pin in pins:
+    for provider, endpoint in sorted(PROVIDER_ENDPOINTS.items()):
         combos.append(
             {
                 "properties": {
-                    "provider": {"const": pin.provider},
-                    "model": {"const": pin.model},
-                    "endpoint": {"const": pin.endpoint},
-                }
+                    "provider": {"const": provider},
+                    "model": {"type": "string", "minLength": 1},
+                    "endpoint": {"const": endpoint},
+                },
+                # A branch matches only a pin of its own kind: without the
+                # presence guard a `properties`-only gateway branch would
+                # vacuously match a direct pin carrying the same endpoint.
+                "required": ["provider"],
             }
         )
     for kind, endpoint in sorted(GATEWAY_ENDPOINTS.items()):
@@ -163,7 +165,8 @@ def _model_combos() -> list[dict[str, Any]]:
                         "required": ["kind"],
                     },
                     "endpoint": {"const": endpoint},
-                }
+                },
+                "required": ["gateway"],
             }
         )
     return combos
@@ -607,8 +610,9 @@ def build_workflow_json_schema() -> dict[str, Any]:
 
     The schema is assembled from the validator's own vocabulary (field sets
     in ``coding_agent.workflow._checks``, catalog constants in
-    ``coding_agent.workflow.schema`` and the pair table), so the two
-    cannot drift apart. It is offline and reads no environment variables.
+    ``coding_agent.workflow.schema`` and the provider-to-endpoint table), so
+    the two cannot drift apart. It is offline and reads no environment
+    variables.
     """
     forbidden = _forbidden_results()
     assert forbidden
@@ -797,8 +801,9 @@ def build_workflow_json_schema() -> dict[str, Any]:
         "type": "object",
         "description": (
             "One `models.<id>` entry: a Pinned Model (§2.1) — either a direct "
-            "`provider` pin, whose (provider, model, endpoint) triple must be "
-            "code-owned, or a `gateway` pin. Every pin carries its own "
+            "`provider` pin, whose provider and endpoint must be "
+            "code-owned while `model` is free-form, or a `gateway` pin. "
+            "Every pin carries its own "
             "Model Context Window, output cap and context-window "
             "threshold. See "
             f"{GUIDE}."
