@@ -12,7 +12,6 @@ contract will pin:
 - ``finish_attempt_with_outcome`` releases the gate with an outcome;
 - ``crash_process`` SIGKILLs a real OS process (not a thread);
 - ``stop_container`` SIGTERMs one (the ``docker stop`` analogue).
-
 The Docker halves — ``docker exec`` / ``docker run`` invocation, the
 read-only root filesystem, the discovery labels and the socket
 permissions — are built here as command constructors so the in-repo
@@ -84,7 +83,7 @@ class PhaseGate:
 
 @dataclass
 class ConformanceHarness:
-    """The five-operation harness over the fake tracker and scripted model."""
+    """The five-operation harness over the step-workflow fake and scripted model."""
 
     gate: PhaseGate = field(default_factory=PhaseGate)
 
@@ -106,18 +105,18 @@ class ConformanceHarness:
         """
         from coding_agent.inputs.port import TrackedInput
 
-        candidate = TrackedInput(
+        tracked_input = TrackedInput(
             number=number,
             input_type="issue",
             title=title,
             body=body,
             is_open=True,
-            assignees=(),
             labels=labels,
+            assignees=(),
             created_at=created_at,
         )
-        tracker.inputs[number] = candidate
-        return candidate
+        tracker.inputs[number] = tracked_input
+        return tracked_input
 
     def hold_attempt_at_phase(self, phase: str) -> PhaseGate:
         """Park the Attempt at ``phase``; the model unblocks on finish."""

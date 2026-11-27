@@ -57,13 +57,29 @@ def test_make_issue_eligible_is_claimable() -> None:
     """A planted issue is open, unassigned and carries the Selection Label."""
     harness = ConformanceHarness()
     tracker = FakeStepTracker()
-    candidate = harness.make_issue_eligible(tracker, 42)
-    assert tracker.inputs[42] is candidate
-    assert candidate.is_open is True
-    assert candidate.assignees == ()
-    assert "ready-for-agent" in candidate.labels
-    assert "ready-for-human" not in candidate.labels
-    assert "wontfix" not in candidate.labels
+    tracked = harness.make_issue_eligible(tracker, 42)
+    assert tracker.inputs[42] is tracked
+    assert tracked.input_type == "issue"
+    assert tracked.is_open is True
+    assert tracked.assignees == ()
+    assert "ready-for-agent" in tracked.labels
+    assert "ready-for-human" not in tracked.labels
+    assert "wontfix" not in tracked.labels
+
+
+def test_make_issue_eligible_is_claimed_first_in_order() -> None:
+    """A planted issue sorts first in ``(created_at, number)`` order."""
+    harness = ConformanceHarness()
+    tracker = FakeStepTracker()
+    harness.make_issue_eligible(
+        tracker, 43, created_at="2026-10-02T00:00:00Z"
+    )
+    earliest = harness.make_issue_eligible(
+        tracker, 42, created_at="2026-10-01T00:00:00Z"
+    )
+    listed = tracker.list_issue_candidates("ready-for-agent")
+    assert [tracked.number for tracked in listed] == [42, 43]
+    assert listed[0] is earliest
 
 
 def test_hold_and_finish_attempt_roundtrip() -> None:
