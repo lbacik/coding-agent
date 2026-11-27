@@ -221,7 +221,7 @@ def redact_text(text: str, redact: Redactable = None) -> str:
 def format_exception_redacted(exc: BaseException, redact: Redactable = None) -> str:
     """One exception as redacted text: no secret in the message (§18).
 
-    Adapter errors embed response bodies (``GitHubTrackerError``,
+    Adapter errors embed response bodies (``GitHubFailure``,
     ``IssueFetchFailed``), so the message that reaches a log stream, a tool
     result or a ledger reason passes through the registry first.
     """

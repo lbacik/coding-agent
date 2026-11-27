@@ -3,8 +3,8 @@
 Contract: ``agent-operator-contract`` major 1 at ``06ee46c`` (parent
 #245). The upstream ``v1.0.0`` harness API does not exist yet, so this
 module implements the five operations the issue names over the
-existing test doubles — the fake tracker
-(``tests/support/fake_tracker.py``) and the scripted model
+existing test doubles — the step-workflow fake tracker
+(``tests/support/fake_step_tracker.py``) and the scripted model
 (``tests/support/scripted_model.py``) — in the same shape the future
 contract will pin:
 
@@ -13,7 +13,6 @@ contract will pin:
 - ``finish_attempt_with_outcome`` releases the gate with an outcome;
 - ``crash_process`` SIGKILLs a real OS process (not a thread);
 - ``stop_container`` SIGTERMs one (the ``docker stop`` analogue).
-
 The Docker halves — ``docker exec`` / ``docker run`` invocation, the
 read-only root filesystem, the discovery labels and the socket
 permissions — are built here as command constructors so the in-repo
@@ -85,7 +84,7 @@ class PhaseGate:
 
 @dataclass
 class ConformanceHarness:
-    """The five-operation harness over the fake tracker and scripted model."""
+    """The five-operation harness over the step-workflow fake and scripted model."""
 
     gate: PhaseGate = field(default_factory=PhaseGate)
 
@@ -105,19 +104,20 @@ class ConformanceHarness:
         no exclusion label, so the Worker's guards pass and the next sweep
         claims it first in ``(created_at, number)`` order.
         """
-        from coding_agent.tracker.port import CandidateIssue
+        from coding_agent.inputs.port import TrackedInput
 
-        candidate = CandidateIssue(
+        tracked_input = TrackedInput(
             number=number,
+            input_type="issue",
             title=title,
             body=body,
             is_open=True,
-            assignees=(),
             labels=labels,
+            assignees=(),
             created_at=created_at,
         )
-        tracker.candidates[number] = candidate
-        return candidate
+        tracker.inputs[number] = tracked_input
+        return tracked_input
 
     def hold_attempt_at_phase(self, phase: str) -> PhaseGate:
         """Park the Attempt at ``phase``; the model unblocks on finish."""
