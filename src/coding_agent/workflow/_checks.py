@@ -1154,9 +1154,11 @@ def check_model_table(
                 f"(one of {', '.join(sorted(endpoints))})",
             )
         elif endpoint not in endpoints.get(provider, frozenset()):
+            admissible = ", ".join(sorted(endpoints.get(provider, frozenset())))
             problems.add(
                 f"models.{model_id}.endpoint",
-                f"unknown endpoint {endpoint!r} for provider {provider!r}",
+                f"unknown endpoint {endpoint!r} for provider {provider!r}: "
+                f"must be {admissible!r}",
             )
 
 
