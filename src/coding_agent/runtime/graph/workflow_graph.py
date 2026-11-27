@@ -65,9 +65,6 @@ from coding_agent.runtime.step_limits import AttemptBudgets
 from coding_agent.runtime.step_operations import GateFailed
 from coding_agent.workflow.schema import (
     END_NODE_PREFIX,
-    HARD_CONTEXT_RESULT,
-    OPERATIONS,
-    SOFT_CONTEXT_RESULT,
     RouteTarget,
     WorkflowStep,
     Workflow,
@@ -182,46 +179,26 @@ class WorkflowResult:
 def step_result_names(workflow: Workflow, step: WorkflowStep) -> list[str]:
     """Every result name a step can produce: business results plus reserved.
 
-    Mirrors the validator's per-step result set (§3): an ``agent`` step's
-    declared results, or the catalog results of an ``operation`` step (with
-    the conditional ``stale-head`` and ``requirement-unmet`` where they
-    apply), plus the runtime-reserved ``error`` and ``limit-exceeded``. An
-    opted-in agent step also produces ``hard-context-threshold``, and one
-    whose policy configures ``soft-tokens`` also produces
-    ``soft-context-threshold``.
+    Delegates to :meth:`Workflow.result_names`, the single implementation
+    the static validator shares (§3): an ``agent`` step's declared results,
+    or the catalog results of an ``operation`` step (with the conditional
+    ``stale-head`` and ``requirement-unmet`` where they apply), plus the
+    threshold spellings wherever the step carries a
+    ``context-thresholds`` policy and the runtime-reserved ``error`` and
+    ``limit-exceeded``.
     """
-    if step.agent is not None:
-        names = list(step.agent.results)
-        if step.context_thresholds is not None:
-            names.append(HARD_CONTEXT_RESULT)
-            if step.context_thresholds.soft_tokens is not None:
-                names.append(SOFT_CONTEXT_RESULT)
-    else:
-        spec = OPERATIONS.get(step.operation or "")
-        names = list(spec.business) if spec is not None else []
-        if step.operation == "commit-and-push" and workflow.input.type == "pull-request":
-            names.append("stale-head")
-        if step.with_requires:
-            names.append("requirement-unmet")
-    names.extend(["error", "limit-exceeded"])
-    return names
+    return workflow.result_names(step.id)
 
 
 def effective_routes(workflow: Workflow, step: WorkflowStep) -> dict[str, RouteTarget]:
     """The step's Routes after applying ``defaults.routes`` (§8.1).
 
-    A step's own Route wins over the default. ``defaults.routes`` names
-    only the runtime-reserved results, so business results always come
-    from the step itself (proven by static validation, §3).
+    Delegates to :meth:`Workflow.effective_routes`, the single
+    implementation the static validator shares: a step's own Route wins
+    over the default, and ``defaults.routes`` entries naming no result of
+    the step never apply.
     """
-    names = step_result_names(workflow, step)
-    merged: dict[str, RouteTarget] = {
-        key: target
-        for key, target in workflow.defaults_routes.items()
-        if key in names
-    }
-    merged.update(step.routes)
-    return merged
+    return workflow.effective_routes(step.id)
 
 
 def end_node_name(category: str) -> str:

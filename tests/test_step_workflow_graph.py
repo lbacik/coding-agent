@@ -34,6 +34,7 @@ from coding_agent.runtime.graph.workflow_graph import (
     effective_routes,
     end_node_name,
     run_workflow,
+    step_result_names,
     workflow_recursion_limit,
 )
 from support.scripted_executor import ScriptExhausted, ScriptedStepExecutor
@@ -41,6 +42,7 @@ from support.workflow_config import load_config
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
+    ContextThresholds,
     FieldType,
     InputDecl,
     RouteTarget,
@@ -201,6 +203,83 @@ def test_compiled_graph_shape_matches_the_validated_workflow(
         expected_edges.add((end_node, "__end__"))
     assert edges == expected_edges
     assert graph.checkpointer is None
+
+
+def test_derived_facts_agree_between_validator_and_graph_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§3/§8.1: one implementation names results and merges `defaults.routes`.
+
+    The static validator and the graph builder must share the typed model's
+    derived facts: changing a result-naming or defaults-merging rule requires
+    exactly one code change. Every validated example step plus synthetic
+    threshold/operation corners prove both callers agree.
+    """
+    cases: list[Workflow] = [
+        _example_workflow(monkeypatch, "implement"),
+        _example_workflow(monkeypatch, "review"),
+    ]
+    hard_only = WorkflowStep(
+        id="hard-only",
+        agent=Agent(results={"done": {}}),
+        context_thresholds=ContextThresholds(hard_tokens=60000),
+        routes={
+            "done": _end("completed"),
+            "hard-context-threshold": _end("unfinished"),
+            "error": _end("failed"),
+            "limit-exceeded": _end("unfinished"),
+        },
+    )
+    soft = WorkflowStep(
+        id="soft",
+        agent=Agent(results={"done": {}}),
+        context_thresholds=ContextThresholds(hard_tokens=60000, soft_tokens=50000),
+        routes={
+            "done": _end("completed"),
+            "hard-context-threshold": _end("unfinished"),
+            "soft-context-threshold": _end("unfinished"),
+            "error": _end("failed"),
+            "limit-exceeded": _end("unfinished"),
+        },
+    )
+    cases.append(
+        _workflow(
+            "synthetic-issue",
+            {"hard-only": hard_only, "soft": soft},
+            start="hard-only",
+            defaults_routes=_defaults(),
+        )
+    )
+    op_step = WorkflowStep(
+        id="push",
+        operation="commit-and-push",
+        with_requires=(("run-validation", "passed"),),
+        routes={
+            "pushed": _end("completed"),
+            "no-changes": _end("completed"),
+            "stale-head": _end("failed"),
+            "requirement-unmet": _end("failed"),
+            "error": _end("failed"),
+            "limit-exceeded": _end("unfinished"),
+        },
+    )
+    cases.append(
+        _workflow(
+            "synthetic-pr",
+            {"push": op_step},
+            start="push",
+            input_type="pull-request",
+            defaults_routes=_defaults(),
+        )
+    )
+    for workflow in cases:
+        for step_id, step in workflow.steps.items():
+            assert workflow.result_names(step_id) == step_result_names(
+                workflow, step
+            ), step_id
+            assert workflow.effective_routes(step_id) == effective_routes(
+                workflow, step
+            ), step_id
 
 
 def test_compiled_graph_uses_no_send_command_or_interrupt() -> None:
