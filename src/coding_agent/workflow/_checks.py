@@ -51,12 +51,12 @@ from coding_agent.workflow.instance_profile import (
 )
 from coding_agent.workflow.parser import WorkflowConfigError, strict_load_yaml
 from coding_agent.workflow.prompt_files import PromptFileError, read_prompt_text
+from coding_agent.provider.pinned_model import DEFAULT_MAX_ROUNDS
 from coding_agent.workflow.schema import (
     ALL_OUTCOMES,
     ALWAYS_PRESENT_TOOLS,
     CONDITIONAL_RESULTS,
     DEFAULT_MAX_PARALLEL_SUBAGENTS,
-    DEFAULT_MAX_ROUNDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_ROUND_HANDOFF_PICKUP_LABEL,
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
@@ -1005,6 +1005,7 @@ def validate_models(
                 output_cap_tokens=output_cap,
                 context_threshold_tokens=threshold,
                 context_window_tokens=window,
+                max_rounds=max_rounds,
             )
         else:
             if provider is None:
@@ -1030,6 +1031,7 @@ def validate_models(
                 output_cap_tokens=output_cap,
                 context_threshold_tokens=threshold,
                 context_window_tokens=window,
+                max_rounds=max_rounds,
             )
     return parsed
 

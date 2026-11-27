@@ -44,7 +44,11 @@ if TYPE_CHECKING:
     from coding_agent.skillbundle.deployment import VerifiedRunInputs
 
 from coding_agent.provider.config import PinPolicy, policy_for_pin
-from coding_agent.provider.pinned_model import PinnedModel
+from coding_agent.provider.pinned_model import (
+    DEFAULT_MAX_ROUNDS,
+    MAX_ROUNDS_CAP,
+    PinnedModel,
+)
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.skillbundle.activation import ActivationRegistry
 from coding_agent.skillbundle.member_identity import (  # re-exported
@@ -492,6 +496,7 @@ def _pinned_model_record(
         "model": pin.model,
         "endpoint": pin.endpoint,
         "effort": pin.effort,
+        "max_rounds": pin.max_rounds,
         "api_key_env": api_key_env,
         "prices": {
             "input": prices.input,
@@ -1041,6 +1046,15 @@ def _is_valid_pin_section(value: object) -> bool:
             or not gateway_url_source[len("env:") :]
         ):
             return False
+    if "max_rounds" not in value:
+        return True
+    max_rounds = value.get("max_rounds")
+    if (
+        type(max_rounds) is not int
+        or max_rounds < 1
+        or max_rounds > MAX_ROUNDS_CAP
+    ):
+        return False
     return True
 
 
@@ -1719,6 +1733,7 @@ def make_test_record(
         "model": model,
         "endpoint": "test",
         "effort": "medium",
+        "max_rounds": DEFAULT_MAX_ROUNDS,
         "api_key_env": "TEST_API_KEY",
         "prices": {
             "input": 2.00,

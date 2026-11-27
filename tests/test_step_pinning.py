@@ -291,6 +291,7 @@ def test_cfg41_literal_gateway_pin_record_carries_no_source_key() -> None:
         "model": "muse-spark-1.3-contributor",
         "endpoint": "responses",
         "effort": "medium",
+        "max_rounds": 8,
         "api_key_env": "LITELLM_PROXY_API_KEY",
         "prices": {
             "input": 2.00,

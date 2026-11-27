@@ -44,6 +44,7 @@ from coding_agent.provider.observed_identity import (
     last_reported_model,
     observed_response_model,
 )
+from coding_agent.provider.pinned_model import DEFAULT_MAX_ROUNDS
 from coding_agent.provider.pin_witness import PinWitness
 from coding_agent.runtime.ceilings import OriginCell, response_usage
 from coding_agent.runtime.conversation_context import ConversationContextState
@@ -501,7 +502,7 @@ def refused_subagent_ended_payload(
     step_id: str,
     seq: int,
     call_id: str,
-    max_rounds: int,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
 ) -> dict[str, object]:
     """Derive the ``subagent_ended`` payload for a refused member.
 
@@ -536,7 +537,7 @@ def pin_violation_subagent_ended_payload(
     member_cell: OriginCell,
     duration_seconds: float,
     peak: Any,
-    max_rounds: int,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
 ) -> dict[str, object]:
     """Derive the ``subagent_ended`` payload for a pin-violating member.
 

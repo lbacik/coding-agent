@@ -188,13 +188,13 @@ def test_custom_leaves_are_pinned() -> None:
 
 
 def test_custom_total_is_reported() -> None:
-    """Running custom total after slice 4: 14 of the file's 45 leaves.
+    """Running custom total after slice 4: 14 of the file's 46 leaves.
 
     The #466 tripwire fires past about a quarter; byte-identity (the
     committed schema must stay byte-identical) and the bespoke contract
     fault texts (§2.9 pins every refusal, including the `got`-less
     `reserved` text and the `minLength`-less direct-pin identity) force
-    14/45. Each custom above carries its reason; any growth fails here and
+    14/46. Each custom above carries its reason; any growth fails here and
     in the pinned set — report back on #466 instead of adding more customs.
 
     The 43rd leaf is the ``context-window-tokens`` Model Context Window
@@ -202,11 +202,13 @@ def test_custom_total_is_reported() -> None:
     generic ``positive_int`` leaf, so the custom count stays 14. Slice 4
     adds the 44th and 45th leaves — ``max-automatic-pickups``
     (``positive_int``) and ``pickup-label`` (``nonempty_str``) — both
-    generic, so the custom count still stays 14.
+    generic, so the custom count still stays 14. The 46th leaf is the
+    ``max-rounds`` pin round bound (``int_1_32``) — generic, so the custom
+    count still stays 14.
     """
     found = _custom_leaves()
     assert len(found) == 14, f"custom set changed: {sorted(found)}"
-    assert _leaf_total() == 45, f"leaf total changed: {_leaf_total()}"
+    assert _leaf_total() == 46, f"leaf total changed: {_leaf_total()}"
 
 
 def test_containers_are_pinned() -> None:
@@ -251,17 +253,18 @@ def test_containers_are_pinned() -> None:
 def test_custom_share_stays_small() -> None:
     """Custom leaves stay near a quarter of the file's leaves (#466).
 
-    The denominator is the whole file's leaf total (45 after the Round
-    Handoff enablement leaves), not a slice subtotal. Byte-identity and the
-    bespoke contract fault texts force 14/45 — past a strict quarter, so this
-    bound documents the deliberate exception rather than the original
-    tripwire: any growth past it fails here and in the pinned set above. If
-    that happens, stop and report back on #466 instead of adding more
-    customs: the descriptor language may need a new generic kind.
+    The denominator is the whole file's leaf total (46 after the Round
+    Handoff enablement leaves and the ``max-rounds`` pin leaf), not a slice
+    subtotal. Byte-identity and the bespoke contract fault texts force
+    14/46 — past a strict quarter, so this bound documents the deliberate
+    exception rather than the original tripwire: any growth past it fails
+    here and in the pinned set above. If that happens, stop and report back
+    on #466 instead of adding more customs: the descriptor language may
+    need a new generic kind.
     """
     customs = len(_custom_leaves())
     total = _leaf_total()
-    assert total == 45, f"leaf total changed: {total}"
+    assert total == 46, f"leaf total changed: {total}"
     assert customs / total <= 0.35, (
         f"{customs}/{total} leaves are custom: report back on #466"
     )
@@ -314,6 +317,7 @@ def test_derived_vocabulary_matches_literals() -> None:
         "output-cap-tokens",
         "context-threshold-tokens",
         "context-window-tokens",
+        "max-rounds",
     }
     assert MODEL_FIELDS == section_keys(ModelDecl)
     assert MODEL_REQUIRED_COMMON == {
@@ -431,6 +435,7 @@ def test_described_map_preserves_declaration_order() -> None:
         "output-cap-tokens",
         "context-threshold-tokens",
         "context-window-tokens",
+        "max-rounds",
     ]
     assert list(described_map(InputDecl)) == [
         "type",
@@ -480,7 +485,7 @@ def _valid_value(kind: str) -> object:
         return True
     if kind == "positive_number":
         return 1.5
-    if kind in ("positive_int", "int_ge_1"):
+    if kind in ("positive_int", "int_ge_1", "int_1_32"):
         return 2
     if kind == "str_list":
         return ["a"]
