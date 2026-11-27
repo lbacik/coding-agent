@@ -74,6 +74,27 @@ def check_rate_limit_headroom(
     return remaining_i, limit_i
 
 
+def run_startup_checks_for_token(
+    token: str,
+    owner: str,
+    repo: str,
+    *,
+    rate_limit_minimum: int = DEFAULT_RATE_LIMIT_MINIMUM,
+) -> StartupCheckResult:
+    """Build the code-host transport from the credential and run the checks.
+
+    The worker startup port owns the transport: callers pass only the
+    credential and the Target Repository coordinates, never a client.
+    """
+    return run_startup_checks(
+        GitHubClient(token),
+        token,
+        owner,
+        repo,
+        rate_limit_minimum=rate_limit_minimum,
+    )
+
+
 def run_startup_checks(
     client: GitHubClient,
     token: str,

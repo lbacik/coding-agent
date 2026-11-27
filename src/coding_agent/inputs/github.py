@@ -75,6 +75,44 @@ def _write_error(method: str, path: str, response: requests.Response) -> StepTra
     )
 
 
+def github_step_tracker(
+    *,
+    owner: str,
+    repo: str,
+    token: str,
+    agent_login: str,
+    agent_id: int | None = None,
+) -> GitHubStepTracker:
+    """Build the production step tracker, owning its transport (§5, §14, §18).
+
+    The worker startup port owns the transport: callers pass only the
+    credential and the Target Repository coordinates, never a client.
+    """
+    return GitHubStepTracker(
+        owner=owner,
+        repo=repo,
+        client=GitHubClient(token),
+        agent_login=agent_login,
+        agent_id=agent_id,
+    )
+
+
+def fetch_repository_file(
+    *,
+    token: str,
+    owner: str,
+    repo: str,
+    rev: str,
+    path: str,
+) -> requests.Response:
+    """GET one repository file at a revision; statuses come back to read.
+
+    The worker startup port owns the transport: callers pass only the
+    credential and the Target Repository coordinates, never a client.
+    """
+    return GitHubClient(token).get(f"/repos/{owner}/{repo}/contents/{path}?ref={rev}")
+
+
 @dataclass(frozen=True)
 class GitHubStepTracker:
     """A ``StepTrackerPort`` over the GitHub REST API.
