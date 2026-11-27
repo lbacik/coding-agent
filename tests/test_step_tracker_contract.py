@@ -24,10 +24,13 @@ itself never writes.
 
 A future adapter (Jira, GitLab) joins by providing the same
 ``TrackerHarness`` — a tracker plus its issue and pull-request numbers —
-and passing this suite unchanged: every case asserts identical behaviour
-on both sides with no per-adapter branches, so a vendor limitation that
-cannot satisfy a rule fails here for the maintainer to decide rather than
-as a carved-out exception.
+and passing this suite unchanged: every harness case asserts identical
+behaviour on both sides with no per-adapter branches. The failure-mapping
+cases drive each side through its own injection point instead — HTTP stubs
+on the adapter side, injected neutral failures on the fake side — and
+assert the identical neutral types, so a vendor limitation that cannot
+satisfify a rule fails here for the maintainer to decide rather than as
+a carved-out exception.
 """
 
 from __future__ import annotations
@@ -989,15 +992,15 @@ def test_confirmed_credential_failure_maps_to_neutral_on_both_sides(
         status_code=401,
         json={"message": "Bad credentials"},
     )
-    calls = _both_sides(
+    reads = _both_sides(
         CredentialFailure("GET", f"/repos/octocat/sandbox/issues/{ISSUE_NUMBER}"),
     )
-    for call in calls:
+    for read in reads:
         with pytest.raises(CredentialFailure):
-            call()
-    for call in calls:
+            read()
+    for read in reads:
         with pytest.raises(HostFailure):
-            call()
+            read()
 
 
 def test_permission_refusal_maps_to_neutral_on_both_sides(
@@ -1010,42 +1013,50 @@ def test_permission_refusal_maps_to_neutral_on_both_sides(
         headers={"x-ratelimit-remaining": "10"},
         json={"message": "refused"},
     )
-    calls = _both_sides(
+    reads = _both_sides(
         PermissionRefusal("GET", f"/repos/octocat/sandbox/issues/{ISSUE_NUMBER}"),
     )
-    for call in calls:
+    for read in reads:
         with pytest.raises(PermissionRefusal):
-            call()
-    for call in calls:
+            read()
+    for read in reads:
         with pytest.raises(HostFailure):
-            call()
+            read()
 
 
+@pytest.mark.parametrize(
+    ("status_code", "headers"),
+    [
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9999999999"}),
+        (429, {"retry-after": "600"}),
+    ],
+    ids=["primary-403", "secondary-429"],
+)
 def test_rate_limit_exhaustion_maps_to_neutral_on_both_sides(
-    requests_mock: Any,
+    requests_mock: Any, status_code: int, headers: dict[str, str]
 ) -> None:
     """§14.4: an exhausted rate limit raises neutral ``RateLimitExhausted``."""
     requests_mock.get(
         f"{TEST_BASE_URL}/repos/octocat/sandbox/issues/{ISSUE_NUMBER}",
-        status_code=403,
-        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "9999999999"},
+        status_code=status_code,
+        headers=headers,
         json={"message": "API rate limit exceeded"},
     )
-    calls = _both_sides(
+    reads = _both_sides(
         RateLimitExhausted(
             "GET",
             f"/repos/octocat/sandbox/issues/{ISSUE_NUMBER}",
-            403,
+            status_code,
             attempts=3,
             waited_seconds=0.0,
         ),
     )
-    for call in calls:
+    for read in reads:
         with pytest.raises(RateLimitExhausted):
-            call()
-    for call in calls:
+            read()
+    for read in reads:
         with pytest.raises(HostFailure):
-            call()
+            read()
 
 
 def test_live_issue_flow(harness: TrackerHarness) -> None:
