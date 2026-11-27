@@ -679,17 +679,16 @@ def _context_threshold_from(detail: dict[str, Any] | None) -> Any:
 
 def _margins_from(detail: dict[str, Any] | None) -> tuple[Any, Any]:
     """The safety margin and request overhead in force, with code defaults."""
+    from coding_agent.runtime.context_budget import code_owned_margins
+
+    default_safety, default_overhead = code_owned_margins()
     window = _pinned_context_window(detail)
     safety: Any = window.get("safety_margin_tokens")
     if isinstance(safety, bool) or not isinstance(safety, (int, float)):
-        from coding_agent.provider.pinned_model import SAFETY_MARGIN_TOKENS
-
-        safety = SAFETY_MARGIN_TOKENS
+        safety = default_safety
     overhead: Any = window.get("request_overhead_tokens")
     if isinstance(overhead, bool) or not isinstance(overhead, (int, float)):
-        from coding_agent.provider.pinned_model import REQUEST_OVERHEAD_TOKENS
-
-        overhead = REQUEST_OVERHEAD_TOKENS
+        overhead = default_overhead
     return safety, overhead
 
 
@@ -701,11 +700,13 @@ def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
     their own policy. Steps with a policy resolve through
     :func:`_selected_usable_thresholds`.
     """
+    from coding_agent.runtime.context_budget import pin_usable_threshold
+
     threshold = _context_threshold_from(detail)
     if threshold is None:
         return None
     safety, overhead = _margins_from(detail)
-    return threshold - safety - overhead
+    return pin_usable_threshold(threshold, safety, overhead)
 
 
 def _effective_steps(detail: dict[str, Any] | None) -> dict[str, Any]:
@@ -757,18 +758,37 @@ def _selected_usable_thresholds(
     also returned for ``native.context_hard_usable_threshold_tokens``.
     Threshold figures use configured tokens.
     """
+    from coding_agent.runtime.context_budget import (
+        hard_usable_threshold,
+        select_usable_threshold,
+        soft_usable_threshold,
+    )
+
     safety, overhead = _margins_from(detail)
     policy = _step_policy_for(detail, step_id)
     if policy is not None:
         hard_raw = _as_usable_number(policy.get("hard_tokens"))
         soft_raw = _as_usable_number(policy.get("soft_tokens"))
+        hard_usable = (
+            hard_usable_threshold(hard_raw, safety, overhead)
+            if hard_raw is not None
+            else None
+        )
+        soft_usable = (
+            soft_usable_threshold(soft_raw, safety, overhead)
+            if soft_raw is not None
+            else None
+        )
         if hard_raw is not None and soft_raw is not None:
-            return (soft_raw - safety - overhead, hard_raw - safety - overhead)
+            return (
+                select_usable_threshold(soft_usable, hard_usable, None),
+                hard_usable,
+            )
         if hard_raw is not None:
-            return (hard_raw - safety - overhead, None)
+            return (hard_usable, None)
         if soft_raw is not None:
             # Defensive: validation requires hard alongside soft.
-            return (soft_raw - safety - overhead, None)
+            return (soft_usable, None)
     return (_usable_threshold_from(detail), None)
 
 

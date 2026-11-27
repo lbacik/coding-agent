@@ -53,7 +53,13 @@ class ContextWindowConfig:
 
     @property
     def usable_threshold(self) -> int:
-        return self.threshold_tokens - self.safety_margin_tokens - self.request_overhead_tokens
+        from coding_agent.runtime.context_budget import usable_from_raw
+
+        return usable_from_raw(
+            self.threshold_tokens,
+            self.safety_margin_tokens,
+            self.request_overhead_tokens,
+        )
 
 
 

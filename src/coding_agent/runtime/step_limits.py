@@ -188,19 +188,30 @@ def worst_case_bound(
     A gateway pin prices its context estimate at max(input, cache-write)
     (step-workflow contract §11.4), so Admission and settlement agree: the
     estimate may include an unreported cache write. Direct pins price the
-    estimate at the plain input rate, unchanged.
+    estimate at the plain input rate, unchanged. The arithmetic lives in
+    :mod:`coding_agent.runtime.context_budget` (the single pricing core);
+    this keeps the ``TokenPrices | None`` seam.
     """
-    bound_tokens = max(0, estimate_tokens) + max(0, output_cap)
+    from coding_agent.runtime.context_budget import priced_bound
+
     if prices is None:
+        bound_tokens, _ = priced_bound(
+            estimate_tokens,
+            output_cap,
+            input_price=0.0,
+            output_price=0.0,
+            cache_write_price=0.0,
+            is_gateway=False,
+        )
         return bound_tokens, 0.0
-    input_rate = (
-        max(prices.input, prices.cache_write) if is_gateway else prices.input
+    return priced_bound(
+        estimate_tokens,
+        output_cap,
+        input_price=prices.input,
+        output_price=prices.output,
+        cache_write_price=prices.cache_write,
+        is_gateway=is_gateway,
     )
-    bound_cost = (
-        max(0, estimate_tokens) / 1_000_000 * input_rate
-        + max(0, output_cap) / 1_000_000 * prices.output
-    )
-    return bound_tokens, bound_cost
 
 
 def effective_model_timeout(
