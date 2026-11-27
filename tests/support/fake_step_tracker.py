@@ -23,6 +23,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import (
     AgentFacts,
     InputComment,
@@ -78,6 +80,10 @@ class FakeStepTracker:
     def delivery_reference(self, ref: str, *, draft: bool = False) -> str:
         """The pull-request-to-issue link line for issue ``ref``."""
         return self.profile.delivery_reference(ref, draft=draft)
+
+    def format_marker(self, marker: AttemptMarker) -> str:
+        """Render an Attempt Marker the GitHub way (byte-identical)."""
+        return format_attempt_marker(marker)
 
     def _record(self, name: str, *args: object) -> None:
         self.calls.append((name, args))
@@ -195,7 +201,7 @@ class FakeStepTracker:
             )
 
     def post_claim_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         """Post the Claim Comment bearing the Attempt Marker."""
         self._record("post_claim_comment", number, input_type, body)

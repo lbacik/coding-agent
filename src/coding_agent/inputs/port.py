@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from typing import Literal, Protocol
 
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.profile import CodeHostProfile
 
 InputType = Literal["issue", "pull-request"]
@@ -263,8 +264,17 @@ class InputPort(AgentIdentityPort, Protocol):
         """Remove the Agent Identity's assignment, only the Worker's own (§6)."""
         ...
 
+    def format_marker(self, marker: AttemptMarker) -> str:
+        """Render an Attempt Marker to its embedded text form (§14.1).
+
+        The GitHub adapter returns today's HTML comment line; another
+        vendor renders its own embedding. Core renders bodies through this
+        method and never formats marker text itself.
+        """
+        ...
+
     def post_claim_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         """Post the Claim Comment bearing the Attempt Marker (§6.1)."""
         ...
@@ -276,14 +286,14 @@ class InputPort(AgentIdentityPort, Protocol):
         ...
 
     def find_comment_by_marker(
-        self, number: int, input_type: InputType, marker: str
+        self, number: int, input_type: InputType, marker: AttemptMarker
     ) -> InputComment | None:
         """Find our comment by Attempt Marker (§14).
 
-        Scans the full list and returns the one whose body carries
-        ``marker`` and whose author is the Agent Identity — filtered by the
-        numeric id where it is known, otherwise by login. ``None`` where no
-        such comment exists.
+        Scans the full list and returns the one carrying ``marker`` and
+        whose author is the Agent Identity — filtered by the numeric id
+        where it is known, otherwise by login. ``None`` where no such
+        comment exists.
         """
         ...
 
@@ -296,7 +306,7 @@ class InputPort(AgentIdentityPort, Protocol):
         ...
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         """Post one comment on the input, body already rendered (§10.7)."""
         ...
@@ -372,7 +382,7 @@ class CodeHostPort(IssueTrackerPort, Protocol):
         ...
 
     def publish_review(
-        self, number: int, *, commit_id: str, body: str
+        self, number: int, *, commit_id: str, body: str, marker: AttemptMarker
     ) -> InputReview:
         """Publish a COMMENT-event review against ``commit_id`` (§10.6).
 
@@ -385,7 +395,9 @@ class CodeHostPort(IssueTrackerPort, Protocol):
         """List the pull request's reviews, oldest first (§14)."""
         ...
 
-    def find_review_by_marker(self, number: int, marker: str) -> InputReview | None:
+    def find_review_by_marker(
+        self, number: int, marker: AttemptMarker
+    ) -> InputReview | None:
         """Find our review by Attempt Marker (§14).
 
         The same authorship rule as comments: a review by another account
@@ -401,6 +413,7 @@ class CodeHostPort(IssueTrackerPort, Protocol):
         base_branch: str,
         body: str,
         draft: bool = False,
+        marker: AttemptMarker,
     ) -> InputPullRequest:
         """Open one pull request from ``head_branch`` (§10.5, §14).
 
@@ -411,7 +424,7 @@ class CodeHostPort(IssueTrackerPort, Protocol):
         ...
 
     def find_pull_request(
-        self, head_branch: str, marker: str
+        self, head_branch: str, marker: AttemptMarker
     ) -> InputPullRequest | None:
         """Find our pull request by head branch and Attempt Marker (§14).
 
@@ -422,6 +435,7 @@ class CodeHostPort(IssueTrackerPort, Protocol):
 __all__ = [
     "AgentFacts",
     "AgentIdentityPort",
+    "AttemptMarker",
     "CodeHostPort",
     "InputComment",
     "InputPort",
