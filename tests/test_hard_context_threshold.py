@@ -1212,7 +1212,8 @@ _OLD_V4_NO_THRESHOLDS_BYTES = (
     '"pinned_model":{"api_key_env":"ANTHROPIC_API_KEY","context_threshold_tokens":80000,'
     '"context_window":{"request_overhead_tokens":1000,"safety_margin_tokens":1000,'
     '"threshold_tokens":80000},"effort":"medium","endpoint":"messages","gateway_kind":null,'
-    '"gateway_url":null,"key":"anthropic:claude-sonnet-5@messages","model":"claude-sonnet-5",'
+    '"gateway_url":null,"key":"anthropic:claude-sonnet-5@messages","max_rounds":8,'
+    '"model":"claude-sonnet-5",'
     '"model_context_window_tokens":1000000,"output_cap_tokens":32000,'
     '"prices":{"cache_read":0.2,"cache_write":2.5,"input":2.0,"output":10.0},'
     '"provider":"anthropic"},"prompts":{},"skill_bundle":{"members":{}},"version":4,'
@@ -1231,7 +1232,7 @@ _OLD_V4_NO_THRESHOLDS_BYTES = (
 `context-thresholds`, recorded before #606 so later changes prove they keep
 old bytes stable."""
 
-_OLD_V4_NO_THRESHOLDS_DIGEST = "7f51802ed8e31e0f4d824414852ad64be5dec21e1daf3c7e2d0f6c1696755454"
+_OLD_V4_NO_THRESHOLDS_DIGEST = "2412f192590a4ebb806021f35e11019b93a051ca6b3a9c0fd961486b6156d739"
 """The SHA-256 of the golden bytes above."""
 
 

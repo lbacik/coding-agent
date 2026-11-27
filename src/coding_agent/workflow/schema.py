@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union
 
+from coding_agent.provider.pinned_model import DEFAULT_MAX_ROUNDS, MAX_ROUNDS_CAP
 from coding_agent.workflow._fields import GUIDE, ID_PATTERN, described
 
 # --- Vocabulary shared with the validator (and later slices) -----------------
@@ -353,6 +354,19 @@ class ModelDecl:
         "positive_int",
         required=True,
         description="The Model Context Window (every pin).",
+        default=None,
+    )
+    max_rounds: int | None = described(
+        "max-rounds",
+        "int_1_32",
+        required=False,
+        description=(
+            "The round bound for Advisor calls and Sub-agent runs this pin "
+            f"answers (default {DEFAULT_MAX_ROUNDS}, at most "
+            f"{MAX_ROUNDS_CAP}). A round is one model response plus its tool "
+            "results; reaching the bound without a report ends the run "
+            "`no-report` / `round-limit`."
+        ),
         default=None,
     )
 

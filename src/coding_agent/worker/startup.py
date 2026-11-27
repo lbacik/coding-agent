@@ -70,6 +70,7 @@ from coding_agent.provider.capability import (
 )
 from coding_agent.provider.config import policy_for_pin
 from coding_agent.provider.pinned_model import (
+    DEFAULT_MAX_ROUNDS,
     Effort,
     Endpoint,
     GatewayKind,
@@ -196,6 +197,11 @@ def configured_pin(
             output_cap_tokens=model.output_cap_tokens,
             context_threshold_tokens=model.context_threshold_tokens,
             context_window_tokens=model.context_window_tokens,
+            max_rounds=(
+                model.max_rounds
+                if model.max_rounds is not None
+                else DEFAULT_MAX_ROUNDS
+            ),
         )
     else:
         assert model.provider is not None
@@ -207,6 +213,11 @@ def configured_pin(
             output_cap_tokens=model.output_cap_tokens,
             context_threshold_tokens=model.context_threshold_tokens,
             context_window_tokens=model.context_window_tokens,
+            max_rounds=(
+                model.max_rounds
+                if model.max_rounds is not None
+                else DEFAULT_MAX_ROUNDS
+            ),
         )
     prices = TokenPrices(
         input=model.prices.input,

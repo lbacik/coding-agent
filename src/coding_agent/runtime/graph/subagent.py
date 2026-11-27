@@ -33,7 +33,11 @@ from langchain_core.exceptions import ModelError as _ModelError
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 
-from coding_agent.provider.pinned_model import InvokableToolModel
+from coding_agent.provider.pinned_model import (
+    DEFAULT_MAX_ROUNDS,
+    MAX_ROUNDS_CAP,
+    InvokableToolModel,
+)
 from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.ceilings import (
     OriginCell,
@@ -170,13 +174,20 @@ SUBAGENT_INSTRUCTIONS_MAX_CHARS = 64 * 1024
 SUBAGENT_REPORT_MAX_CHARS = 32 * 1024
 """A Sub-agent report over 32 KiB is returned once for shortening (§8)."""
 
-MAX_SUBAGENT_ROUNDS = 8
-"""Upper bound on model rounds per Sub-agent (contract §8, code-owned).
+MAX_SUBAGENT_ROUNDS = DEFAULT_MAX_ROUNDS
+"""Default bound on model rounds per Sub-agent (contract §8).
 
-A round is one model response plus its tool results. The run ends early as
-soon as ``report_subagent`` records a report, or at the first response with
-no tool calls. Reaching the bound without a report ends ``no-report`` /
-``round-limit``.
+Kept for scripted tests and old records: the bound in force is the
+answering pin's ``max_rounds`` (``max-rounds`` in the Workflow
+Configuration, defaulting to this value), threaded into
+:func:`run_subagent` as a parameter.
+"""
+
+MAX_SUBAGENT_ROUNDS_CAP = MAX_ROUNDS_CAP
+"""Code-owned maximum round bound (defect guard, §8).
+
+The static validator refuses a pin ``max-rounds`` above this cap; the
+bound in force never exceeds it.
 """
 
 SUBAGENT_FRAMING = (
@@ -599,6 +610,15 @@ class SubagentResult:
     it on every ending the run returns (a run that raises instead of returning
     — a pin violation — is timed by the caller).
     """
+    max_rounds: int = MAX_SUBAGENT_ROUNDS
+    """The round bound in force for this run (§8).
+
+    The answering pin's ``max_rounds`` (the Workflow Configuration's
+    ``max-rounds``, defaulting to 8): reaching it without a report ends the
+    run ``no-report`` / ``round-limit``. The caller records it on
+    ``subagent_ended`` (and ``advisor_ended``), so a ``round-limit`` ending
+    shows which limit it hit.
+    """
 
     @property
     def completed(self) -> bool:
@@ -651,7 +671,7 @@ def subagent_tool_result_text(result: SubagentResult) -> str:
         )
     return (
         f"Sub-agent {result.description!r}: no-report (round-limit). "
-        f"The Sub-agent reached the {MAX_SUBAGENT_ROUNDS}-round bound "
+        f"The Sub-agent reached the {result.max_rounds}-round bound "
         "without calling report_subagent."
     )
 
@@ -759,6 +779,7 @@ def run_subagent(
     opening_text: str | None = None,
     tool_set: tuple[BaseTool, ...] | None = None,
     shared_record: SubagentRecord | None = None,
+    max_rounds: int = MAX_SUBAGENT_ROUNDS,
 ) -> SubagentResult:
     """Run one Sub-agent conversation to its report (contract §8, §11).
 
@@ -767,7 +788,10 @@ def run_subagent(
     requested calls. ``report_subagent`` with an accepted report ends the run
     as ``reported``; a response with no tool calls ends it ``no-report`` /
     ``silent``, and the round bound without a report ends it ``no-report`` /
-    ``round-limit``. A call to any other name returns "no such tool". Every
+    ``round-limit``. The bound in force is ``max_rounds`` — the answering
+    pin's ``max_rounds`` in production (the Workflow Configuration's
+    ``max-rounds``, defaulting to 8) — and every returned result carries it.
+    A call to any other name returns "no such tool". Every
     tool result is redacted and capped through the caller's registry, limit
     and store — the spawn result carrying the report to the caller is not
     capped here (the report carries its own 32 KiB bound). The returned
@@ -880,6 +904,7 @@ def run_subagent(
             limit_fact=limit_fact,
             peak_context=state.peak,
             duration_seconds=time.monotonic() - started,
+            max_rounds=max_rounds,
         )
 
     def _stopped_result(current: list[BaseMessage]) -> SubagentResult:
@@ -969,7 +994,7 @@ def run_subagent(
     tool_list = list(tools)
     send_request = request_model if request_model is not None else _direct_request
     response_index = 0
-    for _ in range(MAX_SUBAGENT_ROUNDS):
+    for _ in range(max_rounds):
         if _stop():
             return _stopped_result(messages)
         if _over_context(messages, tool_list):
@@ -1036,6 +1061,7 @@ def run_subagent(
                 billable_tool_calls=billable_total,
                 peak_context=state.peak,
                 duration_seconds=time.monotonic() - started,
+                max_rounds=max_rounds,
             )
         billable_calls = [
             call
@@ -1111,6 +1137,7 @@ def run_subagent(
                 billable_tool_calls=billable_total,
                 peak_context=state.peak,
                 duration_seconds=time.monotonic() - started,
+                max_rounds=max_rounds,
             )
     if _stop():
         return _stopped_result(messages)
@@ -1125,6 +1152,7 @@ def run_subagent(
         billable_tool_calls=billable_total,
         peak_context=state.peak,
         duration_seconds=time.monotonic() - started,
+        max_rounds=max_rounds,
     )
 
 

@@ -159,6 +159,12 @@
             ],
             "type": "object"
           },
+          "max-rounds": {
+            "description": "The round bound for Advisor calls and Sub-agent runs this pin answers (default 8, at most 32). A round is one model response plus its tool results; reaching the bound without a report ends the run `no-report` / `round-limit`.",
+            "maximum": 32,
+            "minimum": 1,
+            "type": "integer"
+          },
           "model": {
             "description": "The pinned model id (the gateway's own name on a gateway pin).",
             "type": "string"

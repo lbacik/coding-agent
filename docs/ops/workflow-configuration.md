@@ -73,10 +73,17 @@ worker: {...}      # optional: poll interval and shutdown grace
   environment variable holding the GitHub token.
 - `models.<id>` pins `provider`, `model`, `endpoint`, `effort`,
   `api-key-env` (the name of the variable holding the key),
-  `prices-usd-per-mtok` (`input`, `output`, `cache-read`, `cache-write`)
-  and the three token keys `context-window-tokens`,
+  `prices-usd-per-mtok` (`input`, `output`, `cache-read`, `cache-write`),
+  the three token keys `context-window-tokens`,
   `context-threshold-tokens` and `output-cap-tokens` (all required
-  positive integers).
+  positive integers), and the optional `max-rounds` round bound (a plain
+  integer between 1 and 32; omitted means 8). `max-rounds` bounds every
+  Advisor call and Sub-agent run the pin answers: one round is one model
+  response plus its tool results, and reaching the bound without a report
+  ends the run `no-report` / `round-limit`. It is an additional stop,
+  never an allowance — ceilings, allowances and the pin's context
+  threshold still end a run first — and the Step Execution loop itself has
+  no round bound.
   `input` prices only the uncached remainder of the prompt. `effort` is
   `low`, `medium` or `high`. The (`provider`, `model`) pair and its
   `endpoint` must come from the code-owned table in
@@ -745,7 +752,8 @@ workflows:
   the input, the caller's declared inputs, the `advisor.prompt` bytes,
   then the question — and returns its report (or its ending) as the tool
   result. The Advisor binds the Sub-agent read-only tools plus its own
-  `report_advice` exit, runs at most 8 rounds, and counts against the
+  `report_advice` exit, runs at most the answering pin's `max-rounds`
+  bound (default 8, at most 32), and counts against the
   calling step's allowance and the Attempt Ceiling at the Advisor pin's
   prices. The runtime never checks whether the caller follows an answer.
 
