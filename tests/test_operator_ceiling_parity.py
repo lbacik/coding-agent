@@ -1,7 +1,7 @@
 """The status snapshot and the step projection read one Attempt Ceiling.
 
 Contract: ADR 0017 — recovery and reporting accept records written by
-older releases. ``ceiling_from_effective_configuration`` is the single
+older releases. ``effective_ceiling`` is the single
 reader of the pinned Attempt Ceiling; the status snapshot builds its
 configured-limit figures from it, so both surfaces agree on current and
 legacy Effective Configuration shapes.
@@ -16,9 +16,7 @@ from typing import Any
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
-from coding_agent.operator.step_projection import (
-    ceiling_from_effective_configuration,
-)
+from coding_agent.workflow.effective import effective_ceiling
 from coding_agent.runtime.ceilings import UsageTotals
 
 
@@ -95,7 +93,7 @@ def test_legacy_limits_shape_matches_shared_reader(tmp_path: Path) -> None:
             }
         }
     }
-    expected = ceiling_from_effective_configuration(effective)
+    expected = effective_ceiling(effective)
     assert expected["effective_tokens"] == 500000
 
     limits = _snapshot_limits(tmp_path, effective)
@@ -138,7 +136,7 @@ def test_non_numeric_and_bool_meters_agree_on_unavailable(
             }
         }
     }
-    expected = ceiling_from_effective_configuration(effective)
+    expected = effective_ceiling(effective)
     assert expected == {
         "cost_usd": None,
         "effective_tokens": None,
