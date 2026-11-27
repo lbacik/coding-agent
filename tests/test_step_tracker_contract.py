@@ -734,7 +734,7 @@ def test_delete_claim_comment_is_idempotent(harness: TrackerHarness) -> None:
     harness.tracker.delete_comment(found.comment_id)
     assert (
         harness.tracker.find_comment_by_marker(
-            harness.issue_number, "issue", "implement#30/1"
+            harness.issue_number, "issue", claim_marker_for("implement#30/1")
         )
         is None
     )

@@ -37,6 +37,7 @@ from coding_agent.runtime.round_handoff import (
     render_handoff_section,
 )
 from coding_agent.runtime.step_finalisation import render_terminal_comment
+from support.markers import terminal_marker_text
 from coding_agent.runtime.transcript import work_conversation
 from coding_agent.workflow.effective import make_test_record
 
@@ -209,6 +210,7 @@ def _terminal_body(
     return render_terminal_comment(
         attempt_id=ATTEMPT_ID,
         outcome=outcome,
+        marker_text=terminal_marker_text(ATTEMPT_ID),
         ending_step=ending_step,
         step_result=step_result,
         workflow_end=workflow_end,

@@ -20,9 +20,11 @@ from coding_agent.inputs.claim import (
     ReleasedClaim,
     attempt_claim,
     check_eligibility,
+    claim_marker_for,
     recover_unconfirmed_claim,
     sweep_and_claim,
 )
+from coding_agent.inputs.github import format_attempt_marker
 from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger, step_effect_key
 from support.fake_step_tracker import FakeStepTracker
@@ -484,7 +486,13 @@ def test_unconfirmed_claim_recovered_by_key(
     """REC-10: restart deletes the own Claim Comment by key and releases."""
     tracker.inputs[42] = _issue_input(assignees=("coding-agent",))
     key = step_effect_key("implement#42/1", "", 0, 1)
-    tracker.post_claim_comment(42, "issue", f"stale claim {key}")
+    stale = claim_marker_for("implement#42/1")
+    tracker.post_claim_comment(
+        42,
+        "issue",
+        f"stale claim {key}\n{format_attempt_marker(stale)}",
+        stale,
+    )
     ledger.open_attempt(
         "implement#42/1",
         effective_configuration={"workflow": "implement"},
@@ -502,7 +510,12 @@ def test_recovery_keeps_assignment_while_another_claim_holds(
 ) -> None:
     """REC-10: the assignment stays while another Claim Comment is in force."""
     tracker.inputs[42] = _issue_input(assignees=("coding-agent",))
-    tracker.post_claim_comment(42, "issue", "other worker claim kind=claim marker")
+    tracker.post_claim_comment(
+        42,
+        "issue",
+        "other worker claim kind=claim marker",
+        claim_marker_for("implement#42/2"),
+    )
     ledger.open_attempt(
         "implement#42/1",
         effective_configuration={"workflow": "implement"},

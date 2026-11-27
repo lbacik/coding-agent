@@ -28,7 +28,8 @@ from coding_agent.github.errors import CredentialFailure, GitHubFailure
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.claim import sweep_and_claim
 from coding_agent.inputs.gates import GateResult
-from coding_agent.inputs.port import LabeledEvent, TrackedInput
+from coding_agent.inputs.marker import AttemptMarker
+from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime import step_recovery
@@ -486,12 +487,12 @@ def test_rec_17_a_credential_failure_records_and_propagates(
 
     class _RevokedTracker(FakeStepTracker):
         def find_comment_by_marker(
-            self, number: int, input_type: Any, marker: str
+            self, number: int, input_type: InputType, marker: AttemptMarker
         ) -> Any:
             raise CredentialFailure("GET", f"/repos/o/r/issues/{number}/comments")
 
         def post_comment(
-            self, number: int, input_type: Any, body: str
+            self, number: int, input_type: InputType, body: str, marker: AttemptMarker
         ) -> Any:
             raise CredentialFailure("POST", f"/repos/o/r/issues/{number}/comments")
 

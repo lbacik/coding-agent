@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputComment, InputType, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.round_handoff import (
@@ -44,6 +45,7 @@ from coding_agent.workflow.schema import (
 )
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
+from support.markers import terminal_marker_text
 
 ATTEMPT = "implement#7/1"
 NUMBER = 7
@@ -188,6 +190,7 @@ def test_handoff_section_rides_above_the_terminal_marker() -> None:
     comment = render_terminal_comment(
         attempt_id=ATTEMPT,
         outcome="unfinished",
+        marker_text=terminal_marker_text(ATTEMPT),
         handoff_section="Round Handoff: offers pickup",
     )
 
@@ -197,7 +200,11 @@ def test_handoff_section_rides_above_the_terminal_marker() -> None:
 
 def test_no_handoff_section_keeps_the_old_shape() -> None:
     """Ordinary rounds render exactly the fixed template."""
-    comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="completed")
+    comment = render_terminal_comment(
+        attempt_id=ATTEMPT,
+        outcome="completed",
+        marker_text=terminal_marker_text(ATTEMPT),
+    )
 
     assert "Round Handoff" not in comment
 
@@ -589,12 +596,12 @@ class _CrashBeforeComment(FakeStepTracker):
     crashing: bool = True
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         self._record("post_comment", number, input_type, body)
         if self.crashing and "kind=terminal" in body:
             raise RuntimeError("crash before the terminal comment")
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
 
 def test_crash_before_comment_records_once_and_replays(ledger: RunLedger) -> None:
