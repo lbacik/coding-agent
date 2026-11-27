@@ -6,13 +6,17 @@ after redaction into the caller's artifact store).
 
 The Step Execution loop (``runtime/graph/agent_step.py``) and the Sub-agent
 loop (``runtime/graph/subagent.py``) used to dispatch an assistant turn's
-tool calls through two independent copies of this sequence. Both copies now
-delegate here: one batch of ordinary calls goes in, the ordered
-:class:`ToolMessage` results plus the billable-call count come out. Each
-loop keeps only its own exit/special tooling (the step loop's report,
-spawn grouping and advisor barrier; the Sub-agent loop's report exit) and
-its own budget/limit/deadline/context/stop decisions — this turn writes to
-no budget and makes no limit, deadline, context or stop decision.
+tool calls through two independent copies of this sequence. Both loops now
+delegate each ordinary call to :func:`execute_tool_call` — the loops keep
+their per-call sequencing (exit-tool interleaving, the Sub-agent mid-batch
+stop abort) while the validate/invoke/redact/cap rule lives here alone.
+:func:`run_tool_call_turn` batches the same entry for whole turns: one
+batch of ordinary calls goes in, the ordered :class:`ToolMessage` results
+plus the billable-call count come out. Each loop keeps only its own
+exit/special tooling (the step loop's report, spawn grouping and advisor
+barrier; the Sub-agent loop's report exit) and its own
+budget/limit/deadline/context/stop decisions — this turn writes to no
+budget and makes no limit, deadline, context or stop decision.
 """
 
 from __future__ import annotations
@@ -58,6 +62,24 @@ def tool_call_id_for(call: Mapping[str, Any], index: int) -> str:
     return str(raw_id) if raw_id else f"call-{index}"
 
 
+def invoke_tool_redacted(
+    tool: BaseTool,
+    args: Mapping[str, Any],
+    registry: SecretRegistry,
+) -> str:
+    """Invoke one tool to its redacted result text, exceptions included.
+
+    Success text is redacted through ``registry``; an invocation exception
+    becomes an ``Error:``-prefixed redacted class/status string. Shared by
+    the ordinary-call entry below and the Sub-agent report exit, which keeps
+    its own validation and capping path but the same invocation shape.
+    """
+    try:
+        return registry.redact(str(tool.invoke(dict(args))))
+    except Exception as exc:
+        return f"Error: {format_exception_redacted(exc, registry)}"
+
+
 def execute_tool_call(
     call: Mapping[str, Any],
     *,
@@ -71,23 +93,23 @@ def execute_tool_call(
     """Run one ordinary tool call to its redacted, capped :class:`ToolMessage`.
 
     Unknown tool names and unknown arguments never run the tool: each
-    becomes an ordinary ``Error:`` result. Success text is redacted through
-    ``registry``; an invocation exception becomes an ``Error:``-prefixed
-    redacted class/status string. Every non-exempt result is capped after
-    redaction via ``cap_tool_result`` into ``store`` — including exception
-    and refusal strings, so an oversized refusal keeps its head, tail and
-    ``read_result_slice`` pointer with the full content in the store.
+    becomes an ordinary ``Error:`` result (an unknown name is short and
+    fixed, so — as in both loops before — it is returned uncapped). Success
+    text is redacted through ``registry``; an invocation exception becomes
+    an ``Error:``-prefixed redacted class/status string. Every non-exempt
+    ran-or-refused result is capped after redaction via ``cap_tool_result``
+    into ``store`` — including exception and refusal strings, so an
+    oversized refusal keeps its head, tail and ``read_result_slice``
+    pointer with the full content in the store.
     """
     name = str(call.get("name"))
     tool_call_id = tool_call_id_for(call, index)
     tool = tools_by_name.get(name)
     if tool is None:
-        content = f"Error: no such tool {name!r}"
-        if name not in exempt_tool_names:
-            content = cap_tool_result(
-                content, tool_call_id=tool_call_id, limit=limit, store=store
-            )
-        return ToolMessage(content=content, tool_call_id=tool_call_id)
+        return ToolMessage(
+            content=f"Error: no such tool {name!r}",
+            tool_call_id=tool_call_id,
+        )
     raw_args: Any = call.get("args", {})
     args: Mapping[str, Any] = raw_args if isinstance(raw_args, Mapping) else {}
     declared = tool_param_names(tool)
@@ -96,10 +118,7 @@ def execute_tool_call(
         assert declared is not None
         content = unknown_argument_error(name, unknown, declared)
     else:
-        try:
-            content = registry.redact(str(tool.invoke(dict(args))))
-        except Exception as exc:
-            content = f"Error: {format_exception_redacted(exc, registry)}"
+        content = invoke_tool_redacted(tool, args, registry)
     if name not in exempt_tool_names:
         content = cap_tool_result(
             content, tool_call_id=tool_call_id, limit=limit, store=store

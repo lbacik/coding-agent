@@ -148,17 +148,21 @@ def test_unknown_arguments_refused_naming_unknown_and_valid() -> None:
 
 def test_no_such_tool_is_an_error_message() -> None:
     """A call to an unknown tool name is an ordinary ``Error:`` message."""
+    store = InMemoryArtifactStore()
     result = run_tool_call_turn(
         [_call("no_such_tool", {}, "u1")],
         tools_by_name={},
         registry=SecretRegistry({}),
         limit=4_000,
-        store=InMemoryArtifactStore(),
+        store=store,
     )
     assert result.billable_tool_calls == 1
     assert len(result.messages) == 1
     assert str(result.messages[0].content) == "Error: no such tool 'no_such_tool'"
     assert result.messages[0].tool_call_id == "u1"
+    # Unknown names are short and fixed: returned uncapped, nothing stored.
+    with pytest.raises(Exception):
+        store.read("u1")
 
 
 def test_non_mapping_args_treated_as_empty() -> None:

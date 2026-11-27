@@ -57,11 +57,11 @@ from coding_agent.runtime.git import (
 )
 from coding_agent.runtime.redaction import (
     Redactable,
-    format_exception_redacted,
     registry_from,
 )
 from coding_agent.runtime.graph.tool_call_turn import (
     execute_tool_call,
+    invoke_tool_redacted,
     tool_call_id_for,
 )
 from coding_agent.runtime.result_capping import (
@@ -1055,14 +1055,9 @@ def run_subagent(
                 report_args: Mapping[str, Any] = (
                     raw_args if isinstance(raw_args, Mapping) else {}
                 )
-                try:
-                    report_content = registry.redact(
-                        str(tool.invoke(dict(report_args)))
-                    )
-                except Exception as exc:
-                    report_content = (
-                        f"Error: {format_exception_redacted(exc, registry)}"
-                    )
+                report_content = invoke_tool_redacted(
+                    tool, report_args, registry
+                )
                 results.append(
                     ToolMessage(
                         content=report_content,
