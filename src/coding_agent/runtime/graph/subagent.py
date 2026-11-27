@@ -60,13 +60,15 @@ from coding_agent.runtime.redaction import (
     format_exception_redacted,
     registry_from,
 )
+from coding_agent.runtime.graph.tool_call_turn import (
+    execute_tool_call,
+    tool_call_id_for,
+)
 from coding_agent.runtime.result_capping import (
     DEFAULT_RESULT_CAP_LIMIT,
     ArtifactStore,
     InMemoryArtifactStore,
     cap_tool_result,
-    tool_param_names,
-    unknown_argument_error,
 )
 from coding_agent.runtime.toolset import build_file_tools
 
@@ -1044,48 +1046,47 @@ def run_subagent(
         stopped_mid_turn = False
         for index, call in enumerate(response.tool_calls):
             name = str(call.get("name"))
-            raw_id = call.get("id")
-            tool_call_id = str(raw_id) if raw_id else f"unidentified-{index}"
             tool = by_name.get(name)
-            if tool is None:
+            if tool is not None and name == report_tool_name:
+                # The report exit keeps its own validation path (like the
+                # step loop's report and spawn tools): it is invoked as-is
+                # with no unknown-argument refusal and no capping.
+                raw_args: Any = call.get("args", {})
+                report_args: Mapping[str, Any] = (
+                    raw_args if isinstance(raw_args, Mapping) else {}
+                )
+                try:
+                    report_content = registry.redact(
+                        str(tool.invoke(dict(report_args)))
+                    )
+                except Exception as exc:
+                    report_content = (
+                        f"Error: {format_exception_redacted(exc, registry)}"
+                    )
                 results.append(
                     ToolMessage(
-                        content=f"Error: no such tool {name!r}",
-                        tool_call_id=tool_call_id,
+                        content=report_content,
+                        tool_call_id=tool_call_id_for(call, index),
                     )
                 )
             else:
-                args: Mapping[str, Any] = call.get("args", {})
-                if not isinstance(args, Mapping):
-                    args = {}
-                declared = tool_param_names(tool)
-                # The report exit keeps its own validation path (like the
-                # step loop's report and spawn tools): only ordinary tool
-                # calls are refused for unknown arguments.
-                unknown: set[str] = (
-                    set(args) - declared
-                    if declared is not None and name != report_tool_name
-                    else set()
-                )
-                if unknown:
-                    assert declared is not None
-                    # Unknown arguments never run the tool: the refused call
-                    # still bills (charged with the batch above) but has no
-                    # side effects.
-                    content = unknown_argument_error(name, unknown, declared)
-                else:
-                    try:
-                        content = registry.redact(str(tool.invoke(dict(args))))
-                    except Exception as exc:
-                        content = f"Error: {format_exception_redacted(exc, registry)}"
-                if name != report_tool_name:
-                    content = cap_tool_result(
-                        content,
-                        tool_call_id=tool_call_id,
+                # Ordinary tool calls run through the shared tool-call
+                # turn: unknown names and unknown arguments never run the
+                # tool (the refused call still bills, charged with the
+                # batch above), success text is redacted, exceptions are
+                # redacted ``Error:`` results, and every result is capped
+                # after redaction into this run's store (§9).
+                results.append(
+                    execute_tool_call(
+                        call,
+                        index=index,
+                        tools_by_name=by_name,
+                        registry=registry,
                         limit=result_cap_limit,
                         store=store,
+                        exempt_tool_names=frozenset({report_tool_name}),
                     )
-                results.append(ToolMessage(content=content, tool_call_id=tool_call_id))
+                )
             if _stop():
                 stopped_mid_turn = True
                 break

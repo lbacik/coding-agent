@@ -119,9 +119,9 @@ from coding_agent.runtime.graph.subagent import (
     subagent_tool_result_text,
     validate_spawn_args,
 )
+from coding_agent.runtime.graph.tool_call_turn import execute_tool_call
 from coding_agent.runtime.redaction import (
     Redactable,
-    format_exception_redacted,
     registry_from,
 )
 from coding_agent.runtime.transcript import (
@@ -135,9 +135,6 @@ from coding_agent.runtime.result_capping import (
     ArtifactStore,
     InMemoryArtifactStore,
     build_read_result_slice_tool,
-    cap_tool_result,
-    tool_param_names,
-    unknown_argument_error,
 )
 from coding_agent.runtime.toolset import (
     build_file_tools,
@@ -2287,42 +2284,23 @@ def _run_agent_step_inner(
                     results.append(ToolMessage(content="The Step Result is recorded.", tool_call_id=call_id))
                 index += 1
                 continue
-            tool = by_name.get(name)
-            if tool is None:
-                results.append(ToolMessage(content=f"Error: no such tool {name!r}", tool_call_id=call_id))
-            else:
-                declared = tool_param_names(tool)
-                unknown: set[str] = (
-                    set(args) - declared if declared is not None else set()
+            # Ordinary tool calls run through the shared tool-call turn:
+            # unknown names and unknown arguments never run the tool (the
+            # refused call still counts as an ordinary tool call above),
+            # success text is redacted, exceptions are redacted ``Error:``
+            # results, and every result but the activation delivery is
+            # capped after redaction into this execution's store (§9, §9.9).
+            results.append(
+                execute_tool_call(
+                    call,
+                    index=index,
+                    tools_by_name=by_name,
+                    registry=registry,
+                    limit=DEFAULT_RESULT_CAP_LIMIT,
+                    store=deps.artifact_store,
+                    exempt_tool_names=frozenset({ACTIVATION_TOOL_NAME}),
                 )
-                if unknown:
-                    assert declared is not None
-                    # Unknown arguments never run the tool: the result names
-                    # them and lists the declared parameters (pointing at
-                    # ``read_lines`` where a ``read_file`` call meant a line
-                    # range), with no footprint and no command executed — and
-                    # the call still counts as an ordinary tool call above.
-                    content = unknown_argument_error(name, unknown, declared)
-                else:
-                    try:
-                        content = registry.redact(str(tool.invoke(dict(args))))
-                    except Exception as exc:
-                        content = f"Error: {format_exception_redacted(exc, registry)}"
-                if name != ACTIVATION_TOOL_NAME:
-                    # Contract §9: every ordinary tool result is capped
-                    # after redaction — head, tail and a
-                    # ``read_result_slice`` pointer over the limit — the
-                    # same ``cap_tool_result`` the Sub-agent loop and the
-                    # diagnostic callers use, into this execution's store.
-                    # Activation results stay exempt (§9.9): however large
-                    # the delivery is, it arrives whole.
-                    content = cap_tool_result(
-                        content,
-                        tool_call_id=call_id,
-                        limit=DEFAULT_RESULT_CAP_LIMIT,
-                        store=deps.artifact_store,
-                    )
-                results.append(ToolMessage(content=content, tool_call_id=call_id))
+            )
             index += 1
         if pending_spawns:
             ordered = sorted(pending_spawns, key=lambda item: item[0])
