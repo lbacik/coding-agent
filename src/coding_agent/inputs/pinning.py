@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.port import InputType, TrackedInput
+from coding_agent.ledger.store import AttemptPin
 from coding_agent.runtime.fingerprint import compute_fingerprint
 
 
@@ -111,4 +112,32 @@ def pin_from_readback(
         selection_actor_type=selection_actor_type,
         selection_actor_at=selection_actor_at,
         identity_mode=identity_mode,
+    )
+
+
+def attempt_pin_from_pin(pin: PinnedInput, attempt: str) -> AttemptPin:
+    """Record a Claim pin as its ledger row: the single pin conversion (§7).
+
+    The one field-by-field ``PinnedInput`` → ``AttemptPin`` copy both Claim
+    lanes share. The worker recovery reverse conversion
+    (``worker/run.py`` ``_pin_to_input``) is untouched.
+    """
+    return AttemptPin(
+        attempt_id=attempt,
+        workflow_id=pin.workflow_id,
+        input_type=pin.input_type,
+        input_number=pin.input_number,
+        title=pin.title,
+        body=pin.body,
+        fingerprint=pin.fingerprint,
+        base_revision=pin.base_revision,
+        base_tip=pin.base_tip,
+        input_head=pin.input_head,
+        head_branch=pin.head_branch,
+        base_branch=pin.base_branch,
+        selection_actor=pin.selection_actor,
+        selection_actor_id=pin.selection_actor_id,
+        selection_actor_type=pin.selection_actor_type,
+        selection_actor_at=pin.selection_actor_at,
+        identity_mode=pin.identity_mode,
     )

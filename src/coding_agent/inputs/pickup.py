@@ -36,27 +36,18 @@ from typing import TYPE_CHECKING
 from coding_agent.inputs.authorisation import IdentityMode
 
 from coding_agent.inputs.claim import (
-    ASSIGN_ORDINAL,
-    CLAIM_COMMENT_ORDINAL,
-    CLAIM_EXECUTION,
-    CLAIM_STEP,
     ClaimConfig,
     ConfirmedClaim,
     ReleasedClaim,
-    claim_comment_body,
+    _execute_claim,
     in_force_claim_comments,
-    pin_claim_comments,
-    release_claim,
-    release_priority_claim,
-    store_claim_content,
     terminal_marker_for,
-    trusted_terminal_attempt_ids,
 )
-from coding_agent.inputs.numbering import attempt_id, next_n, parse_attempt_marker
-from coding_agent.inputs.pinning import pin_from_readback
-from coding_agent.inputs.port import InputComment, InputType, StepTrackerPort, TrackedInput
+from coding_agent.inputs.numbering import parse_attempt_marker
+from coding_agent.inputs.pinning import PinnedInput, pin_from_readback
+from coding_agent.inputs.port import InputComment, StepTrackerPort, TrackedInput
 from coding_agent.inputs.selection import open_agent_pr_for_issue, sort_inputs
-from coding_agent.ledger.store import AttemptPin, RunLedger, step_effect_key
+from coding_agent.ledger.store import RunLedger
 from coding_agent.operator.commands import CommandRecord
 from coding_agent.runtime.round_handoff import RoundHandoffOffer, parse_handoff_block
 
@@ -398,218 +389,60 @@ def attempt_pickup_claim(
     evidence as the selection actor. The confirmed Claim carries the
     offer so the Continuation opens at the exact published work commit
     with the pinned note as input data.
+
+    A thin pickup-lane wrapper around :func:`claim._execute_claim`: the
+    lane supplies the Round Handoff offer evidence, the pickup
+    source-comment revalidation and the pickup pin finish (retained Base
+    Revision, no merge-base resolution); the core owns the ordered
+    ledger-plus-tracker sequence.
     """
-    ledger_n = ledger.next_workflow_attempt_number(
-        pickup.workflow_id, candidate.number
-    )
     claim_agent_id = (
         pickup.agent_id if pickup.agent_id is not None else tracker.agent_id
     )
-    live_markers: list[str] = list(known_markers)
-    try:
-        live_comments = tracker.list_comments(
-            candidate.number, candidate.input_type
-        )
-        for raw_finished in trusted_terminal_attempt_ids(
-            live_comments, claim_agent_id
-        ):
-            live_markers.append(terminal_marker_for(raw_finished))
-    except Exception:
-        pass
-    n = next_n(
-        pickup.workflow_id,
-        candidate.number,
-        ledger_n=ledger_n - 1,
-        branches=known_branches,
-        markers=live_markers,
-    )
-    attempt = attempt_id(pickup.workflow_id, candidate.number, n)
-    store_claim_content(ledger, attempt, claim_config)
-    opened = ledger.open_attempt_if_intake_open(
-        attempt,
-        effective_configuration=pickup.effective_configuration,
-        agent_identity_id=pickup.agent_id,
-    )
-    if opened is None:
-        if priority_request_id is not None:
-            return None
-        return ReleasedClaim(input_number=candidate.number, reason="intake-closed")
-    assign_key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, ASSIGN_ORDINAL)
-    ledger.record_step_effect_intent(
-        attempt,
-        CLAIM_STEP,
-        CLAIM_EXECUTION,
-        ASSIGN_ORDINAL,
-        rendered_payload=(
-            f"assign {pickup.agent_login} on {candidate.input_type} "
-            f"#{candidate.number}"
-        ),
-        expected_target={
-            "input": f"{candidate.input_type}#{candidate.number}",
-            "assignee": pickup.agent_login,
-        },
-    )
-    tracker.assign_input(candidate.number, candidate.input_type)
-    ledger.set_assigned_by_us(attempt, True)
-    comment_key = step_effect_key(
-        attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
-    )
-    ledger.record_step_effect_intent(
-        attempt,
-        CLAIM_STEP,
-        CLAIM_EXECUTION,
-        CLAIM_COMMENT_ORDINAL,
-        rendered_payload=claim_comment_body(attempt, comment_key),
-        expected_target={
-            "input": f"{candidate.input_type}#{candidate.number}",
-            "kind": "claim",
-        },
-    )
-    posted = tracker.post_claim_comment(
-        candidate.number,
-        candidate.input_type,
-        claim_comment_body(attempt, comment_key),
-    )
-    ledger.record_step_effect_receipt(
-        attempt,
-        CLAIM_STEP,
-        CLAIM_EXECUTION,
-        ASSIGN_ORDINAL,
-        remote_id=pickup.agent_login,
-    )
-    ledger.record_step_effect_receipt(
-        attempt,
-        CLAIM_STEP,
-        CLAIM_EXECUTION,
-        CLAIM_COMMENT_ORDINAL,
-        remote_id=str(posted.comment_id),
-    )
 
-    failure = _pickup_readback_failure(
+    def revalidate(attempt: str, own_comment_id: int) -> str | None:
+        return _pickup_readback_failure(
+            tracker,
+            ledger,
+            claim_config,
+            pickup,
+            candidate,
+            offer=offer,
+            source_comment_id=source_comment.comment_id,
+            own_comment_id=own_comment_id,
+            agent_id=claim_agent_id,
+        )
+
+    def finish_pin(readback: TrackedInput, base_tip: str) -> PinnedInput:
+        pin = pin_from_readback(
+            readback,
+            workflow_id=pickup.workflow_id,
+            base_tip=base_tip,
+            merge_base=None,
+            selection_actor=offer.selection_actor or None,
+            selection_actor_id=offer.selection_actor_id,
+            selection_actor_type=offer.selection_actor_type or None,
+            selection_actor_at=offer.selection_actor_at or None,
+            identity_mode=identity_mode,
+        )
+        return replace(pin, base_revision=offer.base_revision)
+
+    return _execute_claim(
         tracker,
         ledger,
-        claim_config,
-        pickup,
-        candidate,
-        offer=offer,
-        source_comment_id=source_comment.comment_id,
-        own_comment_id=posted.comment_id,
-        agent_id=claim_agent_id,
-    )
-    if failure is not None:
-        if priority_request_id is not None:
-            release_priority_claim(
-                tracker,
-                ledger,
-                attempt,
-                candidate.number,
-                candidate.input_type,
-                posted.comment_id,
-                request_id=priority_request_id,
-                reason=failure,
-            )
-        else:
-            release_claim(
-                tracker,
-                ledger,
-                attempt,
-                candidate.number,
-                candidate.input_type,
-                posted.comment_id,
-            )
-        return ReleasedClaim(input_number=candidate.number, reason=failure)
-
-    readback = tracker.fetch_input(candidate.number, candidate.input_type)
-    base_tip = tracker.fetch_base_tip(pickup.base_branch)
-    pinned_comments: tuple[PinnedComment, ...] = ()
-    if claim_config.comments_declared and candidate.input_type == "issue":
-        try:
-            pinned_comments = pin_claim_comments(
-                tracker,
-                ledger,
-                attempt=attempt,
-                number=candidate.number,
-                input_type=candidate.input_type,
-                issue_author_id=readback.author_id,
-                agent_login=pickup.agent_login,
-                agent_id=claim_agent_id,
-            )
-        except Exception:
-            if priority_request_id is not None:
-                release_priority_claim(
-                    tracker,
-                    ledger,
-                    attempt,
-                    candidate.number,
-                    candidate.input_type,
-                    posted.comment_id,
-                    request_id=priority_request_id,
-                    reason="comments-unreadable",
-                )
-            else:
-                release_claim(
-                    tracker,
-                    ledger,
-                    attempt,
-                    candidate.number,
-                    candidate.input_type,
-                    posted.comment_id,
-                )
-            return ReleasedClaim(
-                input_number=candidate.number, reason="comments-unreadable"
-            )
-    pin = pin_from_readback(
-        readback,
+        candidate=candidate,
+        content=claim_config,
         workflow_id=pickup.workflow_id,
-        base_tip=base_tip,
-        merge_base=None,
-        selection_actor=offer.selection_actor or None,
-        selection_actor_id=offer.selection_actor_id,
-        selection_actor_type=offer.selection_actor_type or None,
-        selection_actor_at=offer.selection_actor_at or None,
-        identity_mode=identity_mode,
-    )
-    pin = replace(pin, base_revision=offer.base_revision)
-    ledger.record_attempt_pin(
-        AttemptPin(
-            attempt_id=attempt,
-            workflow_id=pin.workflow_id,
-            input_type=pin.input_type,
-            input_number=pin.input_number,
-            title=pin.title,
-            body=pin.body,
-            fingerprint=pin.fingerprint,
-            base_revision=pin.base_revision,
-            base_tip=pin.base_tip,
-            input_head=pin.input_head,
-            head_branch=pin.head_branch,
-            base_branch=pin.base_branch,
-            selection_actor=pin.selection_actor,
-            selection_actor_id=pin.selection_actor_id,
-            selection_actor_type=pin.selection_actor_type,
-            selection_actor_at=pin.selection_actor_at,
-            identity_mode=pin.identity_mode,
-        )
-    )
-    ledger.set_attempt_claim_pins(
-        attempt, fingerprint=pin.fingerprint, base_revision=pin.base_revision
-    )
-    if priority_request_id is not None:
-        from coding_agent.operator.commands import NEXT_COMPLETED_DETAIL
-
-        ledger.confirm_priority_claim(
-            attempt, priority_request_id, detail=NEXT_COMPLETED_DETAIL
-        )
-    else:
-        ledger.set_attempt_state(attempt, "claim-confirmed")
-    return ConfirmedClaim(
-        attempt_id=attempt,
-        workflow_id=pickup.workflow_id,
-        input_number=candidate.number,
-        n=n,
-        pin=pin,
+        agent_login=pickup.agent_login,
+        agent_id=pickup.agent_id,
+        effective_configuration=pickup.effective_configuration,
+        base_branch=pickup.base_branch,
+        known_branches=known_branches,
+        known_markers=known_markers,
+        priority_request_id=priority_request_id,
+        revalidate=revalidate,
+        finish_pin=finish_pin,
         pickup_offer=offer,
-        pinned_comments=pinned_comments,
     )
 
 

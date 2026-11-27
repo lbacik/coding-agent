@@ -45,7 +45,11 @@ from coding_agent.inputs.numbering import (
     next_n,
     parse_attempt_marker,
 )
-from coding_agent.inputs.pinning import PinnedInput, pin_from_readback
+from coding_agent.inputs.pinning import (
+    PinnedInput,
+    attempt_pin_from_pin,
+    pin_from_readback,
+)
 from coding_agent.inputs.port import InputComment, InputType, StepTrackerPort, TrackedInput
 from coding_agent.inputs.selection import (
     exclusion_reason,
@@ -55,7 +59,6 @@ from coding_agent.inputs.selection import (
 )
 from coding_agent.ledger.store import (
     STEP_EFFECT_STATUS_RECEIPT,
-    AttemptPin,
     RunLedger,
     step_effect_key,
     step_effect_marker,
@@ -523,6 +526,214 @@ def _record_claim_receipts(
         )
 
 
+class _ClaimPinFailure(Exception):
+    """A lane pin-finish refusal: settle the Claim ``released`` (§6.2).
+
+    Raised by a lane's ``finish_pin`` where the pin cannot be built (e.g.
+    a pull-request read-back with no head SHA); the core settles it like
+    any other failed Claim instead of propagating.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _write_claim_writes(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    *,
+    attempt: str,
+    candidate: TrackedInput,
+    agent_login: str,
+) -> InputComment:
+    """Perform the Claim's two writes, each one Effect Intent settled once (§6.2, ADR 0028).
+
+    Records the assignment intent, assigns, then records the Claim Comment
+    intent, posts the Claim Comment bearing the Attempt Marker with
+    ``CLAIM_KIND``, and records both receipts through the shared helper.
+    The single intent → write → receipt path both lanes share.
+    """
+    assign_key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, ASSIGN_ORDINAL)
+    ledger.record_step_effect_intent(
+        attempt,
+        CLAIM_STEP,
+        CLAIM_EXECUTION,
+        ASSIGN_ORDINAL,
+        rendered_payload=f"assign {agent_login} on {candidate.input_type} #{candidate.number}",
+        expected_target={
+            "input": f"{candidate.input_type}#{candidate.number}",
+            "assignee": agent_login,
+        },
+    )
+    tracker.assign_input(candidate.number, candidate.input_type)
+    ledger.set_assigned_by_us(attempt, True)
+    comment_key = step_effect_key(
+        attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
+    )
+    ledger.record_step_effect_intent(
+        attempt,
+        CLAIM_STEP,
+        CLAIM_EXECUTION,
+        CLAIM_COMMENT_ORDINAL,
+        rendered_payload=claim_comment_body(attempt, comment_key),
+        expected_target={
+            "input": f"{candidate.input_type}#{candidate.number}",
+            "kind": CLAIM_KIND,
+        },
+    )
+    posted = tracker.post_claim_comment(
+        candidate.number,
+        candidate.input_type,
+        claim_comment_body(attempt, comment_key),
+    )
+    _record_claim_receipts(
+        ledger, attempt, comment_id=posted.comment_id, agent_login=agent_login
+    )
+    return posted
+
+
+def _execute_claim(
+    tracker: StepTrackerPort,
+    ledger: RunLedger,
+    *,
+    candidate: TrackedInput,
+    content: ClaimConfig,
+    workflow_id: str,
+    agent_login: str,
+    agent_id: int | None,
+    effective_configuration: Mapping[str, object],
+    base_branch: str,
+    known_branches: Iterable[str] = (),
+    known_markers: Iterable[str] = (),
+    priority_request_id: str | None = None,
+    revalidate: Callable[[str, int], str | None],
+    finish_pin: Callable[[TrackedInput, str], PinnedInput],
+    pickup_offer: RoundHandoffOffer | None = None,
+) -> ConfirmedClaim | ReleasedClaim | None:
+    """Run the ordered Claim sequence both lanes share (§6.2).
+
+    Numbering (ledger count plus live terminal markers) → the Attempt
+    Archive holds the startup blobs → the Attempt row opens in the
+    transaction of the Intake check (ADR 0026: the check stays atomic with
+    the open, inside this module) → the two writes via the shared helper →
+    the lane-injected read-back revalidation → the read-back plus base-tip
+    fetch → the lane-injected pin finish → comment pinning where declared →
+    the single pin recording → priority/settle.
+
+    Only the lane callbacks vary: ``revalidate`` re-checks the lane's
+    authorisation at the read-back (``(attempt, own_comment_id)`` to the
+    failure reason, ``None`` where the Claim holds), and ``finish_pin``
+    builds the lane's pin from ``(readback, base_tip)`` (raising
+    ``_ClaimPinFailure`` where the pin cannot be built). Everything else —
+    numbering, the Intake-atomic open, both writes, both receipts, comment
+    pinning, pin recording and settling — is the one shared sequence.
+    """
+    ledger_n = ledger.next_workflow_attempt_number(workflow_id, candidate.number)
+    claim_agent_id = agent_id if agent_id is not None else tracker.agent_id
+    live_markers: list[str] = list(known_markers)
+    try:
+        live_comments = tracker.list_comments(
+            candidate.number, candidate.input_type
+        )
+        for raw_finished in trusted_terminal_attempt_ids(
+            live_comments, claim_agent_id
+        ):
+            live_markers.append(terminal_marker_for(raw_finished))
+    except Exception:
+        pass
+    n = next_n(
+        workflow_id,
+        candidate.number,
+        ledger_n=ledger_n - 1,
+        branches=known_branches,
+        markers=live_markers,
+    )
+    attempt = attempt_id(workflow_id, candidate.number, n)
+    store_claim_content(ledger, attempt, content)
+    opened = ledger.open_attempt_if_intake_open(
+        attempt,
+        effective_configuration=effective_configuration,
+        agent_identity_id=agent_id,
+    )
+    if opened is None:
+        if priority_request_id is not None:
+            return None
+        return ReleasedClaim(input_number=candidate.number, reason="intake-closed")
+    posted = _write_claim_writes(
+        tracker, ledger, attempt=attempt, candidate=candidate, agent_login=agent_login
+    )
+
+    failure = revalidate(attempt, posted.comment_id)
+    if failure is not None:
+        return _settle_failed_claim(
+            tracker,
+            ledger,
+            candidate,
+            attempt,
+            posted.comment_id,
+            reason=failure,
+            priority_request_id=priority_request_id,
+        )
+
+    readback = tracker.fetch_input(candidate.number, candidate.input_type)
+    base_tip = tracker.fetch_base_tip(base_branch)
+    try:
+        pin = finish_pin(readback, base_tip)
+    except _ClaimPinFailure as pin_failure:
+        return _settle_failed_claim(
+            tracker,
+            ledger,
+            candidate,
+            attempt,
+            posted.comment_id,
+            reason=pin_failure.reason,
+            priority_request_id=priority_request_id,
+        )
+    pinned_comments: tuple[PinnedComment, ...] = ()
+    if content.comments_declared and candidate.input_type == "issue":
+        try:
+            pinned_comments = pin_claim_comments(
+                tracker,
+                ledger,
+                attempt=attempt,
+                number=candidate.number,
+                input_type=candidate.input_type,
+                issue_author_id=readback.author_id,
+                agent_login=agent_login,
+                agent_id=claim_agent_id,
+            )
+        except Exception:
+            return _settle_failed_claim(
+                tracker,
+                ledger,
+                candidate,
+                attempt,
+                posted.comment_id,
+                reason="comments-unreadable",
+                priority_request_id=priority_request_id,
+            )
+    ledger.record_attempt_pin(attempt_pin_from_pin(pin, attempt))
+    ledger.set_attempt_claim_pins(
+        attempt, fingerprint=pin.fingerprint, base_revision=pin.base_revision
+    )
+    if priority_request_id is not None:
+        ledger.confirm_priority_claim(
+            attempt, priority_request_id, detail=NEXT_COMPLETED_DETAIL
+        )
+    else:
+        ledger.set_attempt_state(attempt, "claim-confirmed")
+    return ConfirmedClaim(
+        attempt_id=attempt,
+        workflow_id=workflow_id,
+        input_number=candidate.number,
+        n=n,
+        pin=pin,
+        pickup_offer=pickup_offer,
+        pinned_comments=pinned_comments,
+    )
+
+
 def store_claim_content(ledger: RunLedger, attempt: str, config: ClaimConfig) -> list[str]:
     """Archive the Claim's content blobs before its ledger transaction.
 
@@ -651,194 +862,63 @@ def attempt_claim(
     the same write transaction as the lifecycle write. Intake closed
     (``None``) never resolves the priority — it stays ``accepted`` and is
     never used to reopen Intake.
-    """
-    ledger_n = ledger.next_workflow_attempt_number(
-        config.workflow_id, candidate.number
-    )
-    claim_agent_id = (
-        config.agent_id if config.agent_id is not None else tracker.agent_id
-    )
-    live_markers: list[str] = list(known_markers)
-    try:
-        live_comments = tracker.list_comments(
-            candidate.number, candidate.input_type
-        )
-        for raw_finished in trusted_terminal_attempt_ids(
-            live_comments, claim_agent_id
-        ):
-            live_markers.append(terminal_marker_for(raw_finished))
-    except Exception:
-        pass
-    n = next_n(
-        config.workflow_id,
-        candidate.number,
-        ledger_n=ledger_n - 1,
-        branches=known_branches,
-        markers=live_markers,
-    )
-    attempt = attempt_id(config.workflow_id, candidate.number, n)
-    store_claim_content(ledger, attempt, config)
-    opened = ledger.open_attempt_if_intake_open(
-        attempt,
-        effective_configuration=config.effective_configuration,
-        agent_identity_id=config.agent_id,
-    )
-    if opened is None:
-        if priority_request_id is not None:
-            return None
-        return ReleasedClaim(input_number=candidate.number, reason="intake-closed")
-    assign_key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, ASSIGN_ORDINAL)
-    ledger.record_step_effect_intent(
-        attempt,
-        CLAIM_STEP,
-        CLAIM_EXECUTION,
-        ASSIGN_ORDINAL,
-        rendered_payload=f"assign {config.agent_login} on {candidate.input_type} #{candidate.number}",
-        expected_target={
-            "input": f"{candidate.input_type}#{candidate.number}",
-            "assignee": config.agent_login,
-        },
-    )
-    tracker.assign_input(candidate.number, candidate.input_type)
-    ledger.set_assigned_by_us(attempt, True)
-    comment_key = step_effect_key(
-        attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
-    )
-    ledger.record_step_effect_intent(
-        attempt,
-        CLAIM_STEP,
-        CLAIM_EXECUTION,
-        CLAIM_COMMENT_ORDINAL,
-        rendered_payload=claim_comment_body(attempt, comment_key),
-        expected_target={
-            "input": f"{candidate.input_type}#{candidate.number}",
-            "kind": CLAIM_KIND,
-        },
-    )
-    posted = tracker.post_claim_comment(
-        candidate.number,
-        candidate.input_type,
-        claim_comment_body(attempt, comment_key),
-    )
-    _record_claim_receipts(
-        ledger, attempt, comment_id=posted.comment_id, agent_login=config.agent_login
-    )
 
-    failure = _readback_failure(
-        tracker,
-        ledger,
-        config,
-        candidate,
-        attempt=attempt,
-        own_comment_id=posted.comment_id,
-        identity_mode=identity_mode,
-    )
-    if failure is not None:
-        return _settle_failed_claim(
+    A thin Selection-lane wrapper around :func:`_execute_claim`: the lane
+    supplies the Selection Label authorisation evidence, the Selection
+    read-back revalidation and the Selection pin finish (merge-base
+    resolution for pull-request inputs); the core owns the ordered
+    ledger-plus-tracker sequence.
+    """
+
+    def revalidate(attempt: str, own_comment_id: int) -> str | None:
+        return _readback_failure(
             tracker,
             ledger,
+            config,
             candidate,
-            attempt,
-            posted.comment_id,
-            reason=failure,
-            priority_request_id=priority_request_id,
+            attempt=attempt,
+            own_comment_id=own_comment_id,
+            identity_mode=identity_mode,
         )
 
-    readback = tracker.fetch_input(candidate.number, candidate.input_type)
-    base_tip = tracker.fetch_base_tip(config.base_branch)
-    merge_base: str | None = None
-    if candidate.input_type == "pull-request":
-        if readback.head_sha is None:
-            return _settle_failed_claim(
-                tracker,
-                ledger,
-                candidate,
-                attempt,
-                posted.comment_id,
-                reason="head-missing",
-                priority_request_id=priority_request_id,
-            )
-        if merge_base_resolver is None:
-            raise ValueError("a pull-request Claim needs a merge-base resolver")
-        merge_base = merge_base_resolver(readback.head_sha, base_tip)
-    event = tracker.read_labeled_event(
-        candidate.number, candidate.input_type, config.selection_label
-    )
-    pin = pin_from_readback(
-        readback,
-        workflow_id=config.workflow_id,
-        base_tip=base_tip,
-        merge_base=merge_base,
-        selection_actor=event.actor_login if event is not None else None,
-        selection_actor_id=event.actor_id if event is not None else None,
-        selection_actor_type=event.actor_type if event is not None else None,
-        selection_actor_at=event.created_at if event is not None else None,
-        identity_mode=identity_mode,
-    )
-    pinned_comments: tuple[PinnedComment, ...] = ()
-    if config.comments_declared and candidate.input_type == "issue":
-        try:
-            pinned_comments = pin_claim_comments(
-                tracker,
-                ledger,
-                attempt=attempt,
-                number=candidate.number,
-                input_type=candidate.input_type,
-                issue_author_id=readback.author_id,
-                agent_login=config.agent_login,
-                agent_id=(
-                    config.agent_id
-                    if config.agent_id is not None
-                    else tracker.agent_id
-                ),
-            )
-        except Exception:
-            return _settle_failed_claim(
-                tracker,
-                ledger,
-                candidate,
-                attempt,
-                posted.comment_id,
-                reason="comments-unreadable",
-                priority_request_id=priority_request_id,
-            )
-    ledger.record_attempt_pin(
-        AttemptPin(
-            attempt_id=attempt,
+    def finish_pin(readback: TrackedInput, base_tip: str) -> PinnedInput:
+        merge_base: str | None = None
+        if candidate.input_type == "pull-request":
+            if readback.head_sha is None:
+                raise _ClaimPinFailure("head-missing")
+            if merge_base_resolver is None:
+                raise ValueError("a pull-request Claim needs a merge-base resolver")
+            merge_base = merge_base_resolver(readback.head_sha, base_tip)
+        event = tracker.read_labeled_event(
+            candidate.number, candidate.input_type, config.selection_label
+        )
+        return pin_from_readback(
+            readback,
             workflow_id=config.workflow_id,
-            input_type=readback.input_type,
-            input_number=readback.number,
-            title=readback.title,
-            body=readback.body,
-            fingerprint=pin.fingerprint,
-            base_revision=pin.base_revision,
-            base_tip=pin.base_tip,
-            input_head=pin.input_head,
-            head_branch=pin.head_branch,
-            base_branch=pin.base_branch,
-            selection_actor=pin.selection_actor,
-            selection_actor_id=pin.selection_actor_id,
-            selection_actor_type=pin.selection_actor_type,
-            selection_actor_at=pin.selection_actor_at,
-            identity_mode=pin.identity_mode,
+            base_tip=base_tip,
+            merge_base=merge_base,
+            selection_actor=event.actor_login if event is not None else None,
+            selection_actor_id=event.actor_id if event is not None else None,
+            selection_actor_type=event.actor_type if event is not None else None,
+            selection_actor_at=event.created_at if event is not None else None,
+            identity_mode=identity_mode,
         )
-    )
-    ledger.set_attempt_claim_pins(
-        attempt, fingerprint=pin.fingerprint, base_revision=pin.base_revision
-    )
-    if priority_request_id is not None:
-        ledger.confirm_priority_claim(
-            attempt, priority_request_id, detail=NEXT_COMPLETED_DETAIL
-        )
-    else:
-        ledger.set_attempt_state(attempt, "claim-confirmed")
-    return ConfirmedClaim(
-        attempt_id=attempt,
+
+    return _execute_claim(
+        tracker,
+        ledger,
+        candidate=candidate,
+        content=config,
         workflow_id=config.workflow_id,
-        input_number=candidate.number,
-        n=n,
-        pin=pin,
-        pinned_comments=pinned_comments,
+        agent_login=config.agent_login,
+        agent_id=config.agent_id,
+        effective_configuration=config.effective_configuration,
+        base_branch=config.base_branch,
+        known_branches=known_branches,
+        known_markers=known_markers,
+        priority_request_id=priority_request_id,
+        revalidate=revalidate,
+        finish_pin=finish_pin,
     )
 
 
