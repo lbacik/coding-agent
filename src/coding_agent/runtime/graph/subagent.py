@@ -841,11 +841,18 @@ def run_subagent(
         return is_stopped()
 
     def _over_context(current: list[BaseMessage], tool_list: list[BaseTool]) -> bool:
+        from coding_agent.runtime.context_budget import threshold_outcome
+
         if context_window is None:
             return False
         return (
-            state.measure(list(current), list(tool_list)).value
-            > context_window.usable_threshold
+            threshold_outcome(
+                state.measure(list(current), list(tool_list)).value,
+                hard_usable=None,
+                soft_usable=None,
+                pin_usable=context_window.usable_threshold,
+            )
+            is not None
         )
 
     billable_total = 0

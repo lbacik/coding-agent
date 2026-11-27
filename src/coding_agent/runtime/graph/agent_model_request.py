@@ -164,14 +164,16 @@ def _hard_usable_for(
     or no context-window config is bound (tests only): such a step keeps the
     requesting pin's Context Threshold guard and its existing outcomes.
     """
+    from coding_agent.runtime.context_budget import usable_from_raw
+
     policy = step.context_thresholds
     window = request_pin.context_window if request_pin is not None else deps.context_window
     if policy is None or window is None:
         return None
-    return (
-        policy.hard_tokens
-        - window.safety_margin_tokens
-        - window.request_overhead_tokens
+    return usable_from_raw(
+        policy.hard_tokens,
+        window.safety_margin_tokens,
+        window.request_overhead_tokens,
     )
 
 
@@ -189,16 +191,18 @@ def _soft_usable_for(
     existing outcomes. Where configured the soft bound sits strictly below
     the hard one, so this is the tighter of the two step guards.
     """
+    from coding_agent.runtime.context_budget import usable_from_raw
+
     policy = step.context_thresholds
     window = request_pin.context_window if request_pin is not None else deps.context_window
     if policy is None or window is None:
         return None
     if policy.soft_tokens is None:
         return None
-    return (
-        policy.soft_tokens
-        - window.safety_margin_tokens
-        - window.request_overhead_tokens
+    return usable_from_raw(
+        policy.soft_tokens,
+        window.safety_margin_tokens,
+        window.request_overhead_tokens,
     )
 
 
@@ -1062,7 +1066,14 @@ def request_model_response(
         tally.model_calls += 1
 
     try:
+        from coding_agent.runtime.context_budget import select_usable_threshold
+
         soft_usable = _soft_usable_for(tally.step, deps, request_pin)
+        hard_usable = (
+            _hard_usable_for(tally.step, deps, request_pin)
+            if soft_usable is None
+            else None
+        )
         result = run_model_request(
             deps,
             witness,
@@ -1082,10 +1093,8 @@ def request_model_response(
             # Overflow and pin-violation record matches the tightest guard
             # that admitted the request — including the threshold outcome
             # the loop reports.
-            usable_threshold=(
-                soft_usable
-                if soft_usable is not None
-                else _hard_usable_for(tally.step, deps, request_pin)
+            usable_threshold=select_usable_threshold(
+                soft_usable, hard_usable, None
             ),
             request_pin=request_pin,
         )

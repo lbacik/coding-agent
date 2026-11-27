@@ -752,6 +752,56 @@ class ExecutionTally:
             opening_tail=self.opening_tail,
         )
 
+    def _threshold_end(
+        self,
+        crossing: ConversationContext,
+        usable_threshold: int,
+        *,
+        reason: str,
+        event_kind: str,
+        event_detail: str,
+        status: AgentStepStatus,
+        result_name: str | None,
+        payload: dict[str, object] | None,
+        detail: str,
+        include_limit_fact: bool,
+    ) -> AgentStepOutcome:
+        """One threshold end: the shared record behind all three guards.
+
+        The ``limit-exceeded`` end carries the limit as its ``limit_fact``;
+        the routed hard/soft Step Results carry the same record in the
+        Execution Summary only, so the operator's outcome reason reads the
+        Workflow End the handoff reaches.
+        """
+        limit: dict[str, object] = {
+            "scope": "step",
+            "reason": reason,
+            "conversation_context": crossing.to_record(),
+            "usable_threshold": usable_threshold,
+        }
+        self.record_event(
+            event_kind,
+            event_detail,
+            {
+                "conversation_context": crossing.to_record(),
+                "usable_threshold": usable_threshold,
+            },
+        )
+        return AgentStepOutcome(
+            status=status,
+            result_name=result_name,
+            payload=payload,
+            artifacts={},
+            summary=self._summary(limit, self._spend()),
+            usage=self._meter_usage(),
+            detail=detail,
+            corrections=self.corrections,
+            limit_fact=limit if include_limit_fact else None,
+            events=tuple(self.events),
+            history=tuple(self.history_units),
+            opening_tail=self.opening_tail,
+        )
+
     def context_threshold(
         self, crossing: ConversationContext, usable_threshold: int
     ) -> AgentStepOutcome:
@@ -764,37 +814,21 @@ class ExecutionTally:
         event carry the crossing Conversation Context and the Usable
         Threshold in force (§13.2).
         """
-        limit: dict[str, object] = {
-            "scope": "step",
-            "reason": "context-threshold",
-            "conversation_context": crossing.to_record(),
-            "usable_threshold": usable_threshold,
-        }
-        self.record_event(
-            CONTEXT_THRESHOLD_KIND,
-            f"context threshold in {self.step.id}#{self.seq}",
-            {
-                "conversation_context": crossing.to_record(),
-                "usable_threshold": usable_threshold,
-            },
-        )
-        return AgentStepOutcome(
+        return self._threshold_end(
+            crossing,
+            usable_threshold,
+            reason="context-threshold",
+            event_kind=CONTEXT_THRESHOLD_KIND,
+            event_detail=f"context threshold in {self.step.id}#{self.seq}",
             status="limit-exceeded",
             result_name=None,
             payload=None,
-            artifacts={},
-            summary=self._summary(limit, self._spend()),
-            usage=self._meter_usage(),
             detail=(
                 f"the conversation context ({crossing.value} tokens, "
                 f"{crossing.basis}) would exceed the usable threshold "
                 f"({usable_threshold} tokens)"
             ),
-            corrections=self.corrections,
-            limit_fact=limit,
-            events=tuple(self.events),
-            history=tuple(self.history_units),
-            opening_tail=self.opening_tail,
+            include_limit_fact=True,
         )
 
     def hard_context_threshold(
@@ -814,36 +848,21 @@ class ExecutionTally:
         end, so the operator's outcome reason reads the Workflow End the
         Hard Handoff reaches.
         """
-        limit: dict[str, object] = {
-            "scope": "step",
-            "reason": HARD_CONTEXT_RESULT,
-            "conversation_context": crossing.to_record(),
-            "usable_threshold": usable_threshold,
-        }
-        self.record_event(
-            HARD_CONTEXT_THRESHOLD_KIND,
-            f"hard context threshold in {self.step.id}#{self.seq}",
-            {
-                "conversation_context": crossing.to_record(),
-                "usable_threshold": usable_threshold,
-            },
-        )
-        return AgentStepOutcome(
+        return self._threshold_end(
+            crossing,
+            usable_threshold,
+            reason=HARD_CONTEXT_RESULT,
+            event_kind=HARD_CONTEXT_THRESHOLD_KIND,
+            event_detail=f"hard context threshold in {self.step.id}#{self.seq}",
             status="reported",
             result_name=HARD_CONTEXT_RESULT,
             payload={},
-            artifacts={},
-            summary=self._summary(limit, self._spend()),
-            usage=self._meter_usage(),
             detail=(
                 f"the conversation context ({crossing.value} tokens, "
                 f"{crossing.basis}) would exceed the hard usable threshold "
                 f"({usable_threshold} tokens)"
             ),
-            corrections=self.corrections,
-            events=tuple(self.events),
-            history=tuple(self.history_units),
-            opening_tail=self.opening_tail,
+            include_limit_fact=False,
         )
 
     def soft_context_threshold(
@@ -865,36 +884,21 @@ class ExecutionTally:
         end, so the operator's outcome reason reads the Workflow End the
         receiver's continuation reaches.
         """
-        limit: dict[str, object] = {
-            "scope": "step",
-            "reason": SOFT_CONTEXT_RESULT,
-            "conversation_context": crossing.to_record(),
-            "usable_threshold": usable_threshold,
-        }
-        self.record_event(
-            SOFT_CONTEXT_THRESHOLD_KIND,
-            f"soft context threshold in {self.step.id}#{self.seq}",
-            {
-                "conversation_context": crossing.to_record(),
-                "usable_threshold": usable_threshold,
-            },
-        )
-        return AgentStepOutcome(
+        return self._threshold_end(
+            crossing,
+            usable_threshold,
+            reason=SOFT_CONTEXT_RESULT,
+            event_kind=SOFT_CONTEXT_THRESHOLD_KIND,
+            event_detail=f"soft context threshold in {self.step.id}#{self.seq}",
             status="reported",
             result_name=SOFT_CONTEXT_RESULT,
             payload={},
-            artifacts={},
-            summary=self._summary(limit, self._spend()),
-            usage=self._meter_usage(),
             detail=(
                 f"the conversation context ({crossing.value} tokens, "
                 f"{crossing.basis}) would exceed the soft usable threshold "
                 f"({usable_threshold} tokens)"
             ),
-            corrections=self.corrections,
-            events=tuple(self.events),
-            history=tuple(self.history_units),
-            opening_tail=self.opening_tail,
+            include_limit_fact=False,
         )
 
 
@@ -1846,18 +1850,34 @@ def _threshold_outcome_for(
     the conversation ends ``limit-exceeded``. Returns ``None`` where the
     request passes.
     """
+    from coding_agent.runtime.context_budget import threshold_outcome
+
     hard_usable = _hard_usable_for(step, deps)
     if hard_usable is not None:
-        if context.value > hard_usable:
-            return tally.hard_context_threshold(context, hard_usable)
         soft_usable = _soft_usable_for(step, deps)
-        if soft_usable is not None and context.value > soft_usable:
+        outcome = threshold_outcome(
+            context.value,
+            hard_usable=hard_usable,
+            soft_usable=soft_usable,
+            pin_usable=None,
+        )
+        if outcome == "hard":
+            return tally.hard_context_threshold(context, hard_usable)
+        if outcome == "soft":
+            assert soft_usable is not None
             return tally.soft_context_threshold(context, soft_usable)
         return None
     usable_threshold = (
         deps.context_window.usable_threshold if deps.context_window is not None else None
     )
-    if usable_threshold is not None and context.value > usable_threshold:
+    outcome = threshold_outcome(
+        context.value,
+        hard_usable=None,
+        soft_usable=None,
+        pin_usable=usable_threshold,
+    )
+    if outcome is not None:
+        assert usable_threshold is not None
         if opening:
             return tally.prefix_too_large()
         return tally.context_threshold(context, usable_threshold)

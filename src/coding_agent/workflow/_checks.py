@@ -2313,12 +2313,14 @@ def _pin_output_and_window(pin: Mapping[str, Any]) -> tuple[int, int] | None:
 def admission_floor_for(pin: Mapping[str, Any]) -> AdmissionFloor | None:
     """The floor for a parsed pin entry, or None when it carries no usable
     token budget (a phase-1 fault already refused it)."""
+    from coding_agent.runtime.context_budget import usable_from_raw
+
     threshold = pin.get("context_threshold_tokens")
     if not _is_plain_int(threshold):
         return None
     _, _, safety, overhead, _ = gateway_code_owned()
-    usable = threshold - safety - overhead
-    if usable <= 0:
+    usable = usable_from_raw(threshold, safety, overhead)
+    if usable is None or usable <= 0:
         return None
     return admission_floor_with_usable(pin, usable)
 
@@ -2351,17 +2353,27 @@ def admission_floor_with_usable(
     if usable <= 0:
         return None
     gateway = pin.get("gateway_kind") is not None
-    effective_input = (
-        max(float(input_price), float(cache_write_price))
-        if gateway
-        else float(input_price)
+    from coding_agent.runtime.context_budget import (
+        effective_input_price,
+        priced_bound,
+    )
+
+    token_minimum, cost_minimum = priced_bound(
+        usable,
+        cap,
+        input_price=float(input_price),
+        output_price=float(output_price),
+        cache_write_price=float(cache_write_price),
+        is_gateway=gateway,
+    )
+    effective_input = effective_input_price(
+        float(input_price), float(cache_write_price), is_gateway=gateway
     )
     return AdmissionFloor(
         usable_threshold=usable,
         output_cap=cap,
-        token_minimum=usable + cap,
-        cost_minimum=usable * effective_input / 1_000_000
-        + cap * float(output_price) / 1_000_000,
+        token_minimum=token_minimum,
+        cost_minimum=cost_minimum,
         input_price=effective_input,
         output_price=float(output_price),
         gateway=gateway,
@@ -2435,6 +2447,11 @@ def check_admission_floor(
     pin_floor = admission_floor_for(pin)
     if pin_floor is None:
         return
+    from coding_agent.runtime.context_budget import (
+        select_usable_threshold,
+        usable_from_raw,
+    )
+
     _, _, safety, overhead, _ = gateway_code_owned()
     floors: dict[str, AdmissionFloor] = {}
     floors_minima: dict[str, dict[str, float]] = {}
@@ -2442,12 +2459,16 @@ def check_admission_floor(
     for step_id in sorted(facts.agent_steps):
         hard = facts.thresholds.get(step_id)
         soft = facts.soft_thresholds.get(step_id)
-        if soft is not None:
-            usable = soft - safety - overhead
-        elif hard is None:
-            usable = pin_floor.usable_threshold
-        else:
-            usable = hard - safety - overhead
+        hard_usable = (
+            usable_from_raw(hard, safety, overhead) if hard is not None else None
+        )
+        soft_usable = (
+            usable_from_raw(soft, safety, overhead) if soft is not None else None
+        )
+        usable = select_usable_threshold(
+            soft_usable, hard_usable, pin_floor.usable_threshold
+        )
+        assert usable is not None
         if step_id in facts.subagent_steps:
             usable = max(usable, pin_floor.usable_threshold)
         floor = admission_floor_with_usable(pin, usable)

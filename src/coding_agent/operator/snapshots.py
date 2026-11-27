@@ -701,11 +701,13 @@ def _usable_threshold_from(detail: dict[str, Any] | None) -> Any:
     their own policy. Steps with a policy resolve through
     :func:`_selected_usable_thresholds`.
     """
+    from coding_agent.runtime.context_budget import usable_from_raw
+
     threshold = _context_threshold_from(detail)
     if threshold is None:
         return None
     safety, overhead = _margins_from(detail)
-    return threshold - safety - overhead
+    return usable_from_raw(threshold, safety, overhead)
 
 
 def _effective_steps(detail: dict[str, Any] | None) -> dict[str, Any]:
@@ -757,18 +759,36 @@ def _selected_usable_thresholds(
     also returned for ``native.context_hard_usable_threshold_tokens``.
     Threshold figures use configured tokens.
     """
+    from coding_agent.runtime.context_budget import (
+        select_usable_threshold,
+        usable_from_raw,
+    )
+
     safety, overhead = _margins_from(detail)
     policy = _step_policy_for(detail, step_id)
     if policy is not None:
         hard_raw = _as_usable_number(policy.get("hard_tokens"))
         soft_raw = _as_usable_number(policy.get("soft_tokens"))
+        hard_usable = (
+            usable_from_raw(hard_raw, safety, overhead)
+            if hard_raw is not None
+            else None
+        )
+        soft_usable = (
+            usable_from_raw(soft_raw, safety, overhead)
+            if soft_raw is not None
+            else None
+        )
         if hard_raw is not None and soft_raw is not None:
-            return (soft_raw - safety - overhead, hard_raw - safety - overhead)
+            return (
+                select_usable_threshold(soft_usable, hard_usable, None),
+                hard_usable,
+            )
         if hard_raw is not None:
-            return (hard_raw - safety - overhead, None)
+            return (hard_usable, None)
         if soft_raw is not None:
             # Defensive: validation requires hard alongside soft.
-            return (soft_raw - safety - overhead, None)
+            return (soft_usable, None)
     return (_usable_threshold_from(detail), None)
 
 
