@@ -1,4 +1,4 @@
-"""The three-port boundary contract: InputPort / IssueTrackerPort / CodeHostPort.
+"""The port boundary contract: AgentIdentityPort / InputPort / IssueTrackerPort / CodeHostPort.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §5 (Workflow
 Inputs and selection), §6 (the Claim), §7 (Gates and the base-branch tip),
@@ -16,7 +16,8 @@ facet, ``delivery_reference`` and the ``CodeHostProfile`` facts, the
 neutral-error translation at the adapter boundary, and the two
 no-leak rules (no ``coding_agent.github`` import and no ``GitHubClient``
 type outside the adapter modules; no GitHub host literal in core
-runtime code).
+runtime code). There is no combined port: the runtime threads the narrow
+port each call site needs, and one production object serves them all.
 """
 
 from __future__ import annotations
@@ -37,10 +38,10 @@ from coding_agent.inputs.errors import (
 )
 from coding_agent.inputs.github import GitHubStepTracker
 from coding_agent.inputs.port import (
+    AgentIdentityPort,
     CodeHostPort,
     InputPort,
     IssueTrackerPort,
-    StepTrackerPort,
 )
 from coding_agent.inputs.profile import (
     GITHUB_PROFILE,
@@ -52,6 +53,17 @@ from support.fake_step_tracker import FakeStepTracker
 
 TEST_BASE_URL = "https://api.github.test"
 
+
+AGENT_IDENTITY_PORT_OPS = frozenset(
+    {
+        "target_repo",
+        "agent_login",
+        "agent_id",
+        "fetch_agent_identity",
+        "fetch_repository_owner_id",
+    }
+)
+"""The Agent Identity every port carries (§2.1, §14, §18)."""
 
 INPUT_PORT_OPS = frozenset(
     {
@@ -82,14 +94,10 @@ ISSUE_TRACKER_PORT_OPS = frozenset(INPUT_PORT_OPS | {"delivery_reference"})
 """``InputPort`` plus the pull-request-to-issue link line (INP-14)."""
 
 CODE_HOST_PORT_OPS = frozenset(
-    {
-        "target_repo",
-        "agent_login",
-        "agent_id",
+    ISSUE_TRACKER_PORT_OPS
+    | {
         "profile",
         "pull_requests",
-        "fetch_agent_identity",
-        "fetch_repository_owner_id",
         "fetch_base_tip",
         "list_open_pull_requests",
         "publish_review",
@@ -99,10 +107,7 @@ CODE_HOST_PORT_OPS = frozenset(
         "find_pull_request",
     }
 )
-"""Every operation ``CodeHostPort`` expresses (INP-15 … INP-18, OP-14, REC-22)."""
-
-STEP_TRACKER_PORT_OPS = frozenset(ISSUE_TRACKER_PORT_OPS | CODE_HOST_PORT_OPS)
-"""The combined production port: both ports, no extra operations."""
+"""``IssueTrackerPort`` plus the repository-host delivery operations (INP-15 … INP-18, OP-14, REC-22)."""
 
 FORBIDDEN_PORT_OPS = frozenset(
     {
@@ -136,9 +141,15 @@ def _make_adapter() -> GitHubStepTracker:
     )
 
 
+def test_agent_identity_port_exposes_only_the_agent_identity() -> None:
+    """§2.1, §14, §18: ``AgentIdentityPort`` is exactly its 5 operations."""
+    assert _port_ops(AgentIdentityPort) == AGENT_IDENTITY_PORT_OPS
+
+
 def test_input_port_exposes_exactly_the_claimable_input_operations() -> None:
     """INP-1 … INP-13, INP-19, INP-20: ``InputPort`` is exactly its 19 operations."""
     assert _port_ops(InputPort) == INPUT_PORT_OPS
+    assert AgentIdentityPort in InputPort.__mro__
 
 
 def test_issue_tracker_port_adds_only_the_delivery_reference() -> None:
@@ -147,21 +158,15 @@ def test_issue_tracker_port_adds_only_the_delivery_reference() -> None:
     assert InputPort in IssueTrackerPort.__mro__
 
 
-def test_code_host_port_exposes_exactly_the_repository_operations() -> None:
-    """INP-15 … INP-18, OP-14, REC-22: ``CodeHostPort`` is exactly its 14 operations."""
+def test_code_host_port_adds_only_the_repository_operations() -> None:
+    """INP-15 … INP-18, OP-14, REC-22: ``CodeHostPort`` is the tracker port plus delivery."""
     assert _port_ops(CodeHostPort) == CODE_HOST_PORT_OPS
-
-
-def test_step_tracker_port_combines_both_ports_with_nothing_extra() -> None:
-    """The production port is the union of the two ports, unchanged call sites."""
-    assert _port_ops(StepTrackerPort) == STEP_TRACKER_PORT_OPS
-    assert IssueTrackerPort in StepTrackerPort.__mro__
-    assert CodeHostPort in StepTrackerPort.__mro__
+    assert IssueTrackerPort in CodeHostPort.__mro__
 
 
 def test_no_port_can_apply_a_selection_label_or_edit_title_or_body() -> None:
     """§18: the abstentions hold structurally, on every port."""
-    for port in (InputPort, IssueTrackerPort, CodeHostPort, StepTrackerPort):
+    for port in (AgentIdentityPort, InputPort, IssueTrackerPort, CodeHostPort):
         assert _port_ops(port).isdisjoint(FORBIDDEN_PORT_OPS)
 
 
@@ -179,7 +184,7 @@ def _assert_serves_all_ports(servant: object) -> None:
             assert callable(getattr(servant, operation, None)), operation
 
 
-def test_fake_serves_all_three_ports() -> None:
+def test_fake_serves_every_port() -> None:
     """The fake implements every operation of every port (INP-1 … INP-20, OP-14)."""
     fake = FakeStepTracker()
     _assert_serves_all_ports(fake)
@@ -187,7 +192,7 @@ def test_fake_serves_all_three_ports() -> None:
     assert isinstance(fake.profile, CodeHostProfile)
 
 
-def test_adapter_serves_all_three_ports() -> None:
+def test_adapter_serves_every_port() -> None:
     """The GitHub adapter implements every operation of every port."""
     adapter = _make_adapter()
     _assert_serves_all_ports(adapter)

@@ -41,7 +41,7 @@ from coding_agent.inputs.claim import (
     claim_comment_body,
 )
 from coding_agent.inputs.github import GitHubStepTracker
-from coding_agent.inputs.port import StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort
 from coding_agent.ledger.store import step_effect_key, step_effect_marker
 from support.fake_step_tracker import FakeStepTracker
 
@@ -65,7 +65,7 @@ OWNER_ID = 999
 class TrackerHarness:
     """One side of the contract suite: a tracker plus how to observe it."""
 
-    tracker: StepTrackerPort
+    tracker: CodeHostPort
     issue_number: int
     pr_number: int
     is_live: bool

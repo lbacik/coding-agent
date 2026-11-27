@@ -18,7 +18,7 @@ from coding_agent.identity.commit_identity import noreply_author
 from coding_agent.inputs.claim import ConfirmedClaim
 from coding_agent.inputs.gates import GateResult, check_gate
 from coding_agent.inputs.pinning import PinnedInput
-from coding_agent.inputs.port import InputType, StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.services import SocketServiceProber
@@ -98,7 +98,8 @@ WorkflowRunner = Callable[..., WorkflowResult]
 
 
 def _live_gate(
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     pin: PinnedInput,
     *,
     selection_label: str,
@@ -113,9 +114,9 @@ def _live_gate(
     """
 
     def gate() -> GateResult:
-        current = tracker.fetch_input(pin.input_number, pin.input_type)
+        current = inputs.fetch_input(pin.input_number, pin.input_type)
         try:
-            base_tip_now = tracker.fetch_base_tip(base_branch)
+            base_tip_now = code_host.fetch_base_tip(base_branch)
         except Exception:
             base_tip_now = None
         return check_gate(
@@ -502,7 +503,8 @@ def run_attempt(
             phase_hook=phase_hook,
         )
         _finalise_live_attempt(
-            tracker=ready.tracker,
+            inputs=ready.tracker,
+            code_host=ready.tracker,
             ledger=ready.ledger,
             result=result,
             number=claimed.input_number,
@@ -516,6 +518,7 @@ def run_attempt(
             helper=helper,
             redact=registry,
             gate=_live_gate(
+                ready.tracker,
                 ready.tracker,
                 claimed.pin,
                 selection_label=ready.workflow.input.label,
@@ -802,7 +805,8 @@ def _decide_live_handoff(
 
 def _finalise_live_attempt(
     *,
-    tracker: StepTrackerPort,
+    inputs: InputPort,
+    code_host: CodeHostPort,
     ledger: RunLedger,
     result: WorkflowResult,
     number: int,
@@ -843,7 +847,8 @@ def _finalise_live_attempt(
             except Exception:
                 deadline = None
         finalise_shutdown(
-            tracker=tracker,
+            inputs=inputs,
+            code_host=code_host,
             ledger=ledger,
             attempt_id=result.attempt_id,
             number=number,
@@ -898,7 +903,8 @@ def _finalise_live_attempt(
     except Exception:
         uncommitted = 0
     finish_attempt(
-        tracker=tracker,
+        inputs=inputs,
+        code_host=code_host,
         ledger=ledger,
         attempt_id=result.attempt_id,
         target=FinalisationTarget(

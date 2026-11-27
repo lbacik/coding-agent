@@ -577,7 +577,7 @@ def test_worker_loop_success_path_seals_consistently(tmp_path: Path) -> None:
             )
 
         exit_code = run_worker_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=_loop_config(),
             run_one_attempt=run_one,
@@ -616,7 +616,7 @@ def test_worker_loop_infrastructure_failure_seals_consistently(
             )
 
         exit_code = run_worker_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=_loop_config(),
             run_one_attempt=run_one,

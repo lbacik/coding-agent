@@ -41,7 +41,7 @@ from coding_agent.inputs.github import (
 from coding_agent.inputs.github import (
     github_step_tracker as _github_step_tracker,
 )
-from coding_agent.inputs.port import StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort
 from coding_agent.provider.capability import (
     CapabilityAssertionResult,
     assert_provider_capability,
@@ -81,7 +81,7 @@ class CodeHostStartupPort(Protocol):
         repo: str,
         token: str,
         identity: Identity,
-    ) -> StepTrackerPort:
+    ) -> CodeHostPort:
         """Build the Worker's step tracker for the Agent Identity."""
         ...
 
@@ -99,7 +99,7 @@ class CodeHostStartupPort(Protocol):
 
     def resolve_identity_mode(
         self,
-        tracker: StepTrackerPort,
+        tracker: CodeHostPort,
         identity: Identity,
     ) -> IdentityMode:
         """Resolve the repository owner and detect the identity mode (§18)."""
@@ -195,7 +195,7 @@ class ProductionCodeHostPort:
         repo: str,
         token: str,
         identity: Identity,
-    ) -> StepTrackerPort:
+    ) -> CodeHostPort:
         """Build the production step tracker for the Agent Identity."""
         return _github_step_tracker(
             owner=owner,
@@ -221,7 +221,7 @@ class ProductionCodeHostPort:
 
     def resolve_identity_mode(
         self,
-        tracker: StepTrackerPort,
+        tracker: CodeHostPort,
         identity: Identity,
     ) -> IdentityMode:
         """Resolve the repository owner and detect the identity mode (§18)."""

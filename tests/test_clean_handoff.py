@@ -661,7 +661,7 @@ def test_unavailable_revision_falls_back_to_selection(
     _trusted_comment(tracker, ATTEMPT, _offer())
 
     claimed = sweep_and_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         pickup=_pickup_config(tracker, verify_remote=lambda offer: False),
@@ -762,7 +762,7 @@ def test_clean_case_recovery_replays_the_same_offer(
     crashing.base_tip = TIP
     with pytest.raises(RuntimeError, match="crash between comment and pickup"):
         finish_attempt(
-            tracker=crashing,
+            inputs=crashing, code_host=crashing,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -777,7 +777,7 @@ def test_clean_case_recovery_replays_the_same_offer(
     tracker.inputs[NUMBER] = crashing.inputs[NUMBER]
 
     finalised = finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),

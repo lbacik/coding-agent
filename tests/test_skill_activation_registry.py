@@ -632,7 +632,7 @@ def test_worker_loop_activates_from_the_registry_across_attempts(
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=WorkerLoopConfig(
             claim_config=_claim_config(workflow),

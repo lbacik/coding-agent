@@ -439,7 +439,7 @@ def test_worker_halts_at_once_on_a_recorded_pin_violation(
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=WorkerLoopConfig(
             claim_config=ClaimConfig(
@@ -493,7 +493,7 @@ def test_recovery_finishes_a_recorded_pin_violation(
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,

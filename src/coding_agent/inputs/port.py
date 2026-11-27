@@ -325,13 +325,14 @@ class IssueTrackerPort(InputPort, Protocol):
         ...
 
 
-class CodeHostPort(InputPort, Protocol):
+class CodeHostPort(IssueTrackerPort, Protocol):
     """The Code Host: the Target Repository, its pull requests and reviews.
 
     Row ids: INP-15 … INP-18, OP-14 (with S7b), REC-22 (§5.3, §7, §10.5,
-    §10.6, §14, §18). Extends :class:`InputPort` so one production object
-    serves both ports; the runtime threads the narrow port each call site
-    needs. In production ``inputs`` and ``code_host`` are the same object.
+    §10.6, §14, §18), with the issue-tracker surface inherited. Extends
+    :class:`IssueTrackerPort` so one production object serves every port;
+    the runtime threads the narrow port each call site needs. In
+    production ``inputs`` and ``code_host`` are the same object.
     """
 
     @property

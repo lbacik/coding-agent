@@ -210,7 +210,7 @@ def _claim_with_components(
         activation_deliveries=dict(deliveries),
         activation_components={name: dict(paths) for name, paths in components.items()},
     )
-    claimed = sweep_and_claim(tracker, ledger, config)
+    claimed = sweep_and_claim(tracker, tracker, ledger, config)
     assert isinstance(claimed, ConfirmedClaim)
     return ledger, store, tracker, claimed
 
@@ -298,7 +298,7 @@ def test_recovery_settles_from_archive_after_deployment_changed(tmp_path: Path) 
         # entry takes no prompt/delivery/component bytes at all. It resolves
         # everything from the ledger row plus the archive.
         summary = recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
         assert summary.settled == (claimed.attempt_id,)
         assert summary.pending == ()
@@ -328,7 +328,7 @@ def test_recovery_uses_pinned_labels_not_current_file(tmp_path: Path) -> None:
         # Attempt: recovery reads them from the pinned Effective
         # Configuration.
         summary = recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
         assert summary.settled == (claimed.attempt_id,)
         assert ledger.get_attempt(claimed.attempt_id).state == "finished"
@@ -402,7 +402,7 @@ def test_corrupt_blob_refuses_at_worker_loop_seam(tmp_path: Path) -> None:
         target.write_bytes(b"corrupted bytes\n")
         with pytest.raises(ArchiveRecoveryRefused) as excinfo:
             recover_unfinished_step_attempts(
-                tracker=tracker, ledger=ledger, workflow=_workflow()
+                inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
             )
         assert claimed.attempt_id in str(excinfo.value)
         assert excinfo.value.attempt_id == claimed.attempt_id
@@ -440,7 +440,7 @@ def test_missing_blob_refuses_with_no_tracker_writes(tmp_path: Path) -> None:
         (archive / "content" / digest).unlink()
         with pytest.raises(ArchiveRecoveryRefused) as excinfo:
             recover_unfinished_step_attempts(
-                tracker=tracker, ledger=ledger, workflow=_workflow()
+                inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
             )
         assert claimed.attempt_id in str(excinfo.value)
         assert excinfo.value.fault == "missing-blob"
@@ -475,7 +475,7 @@ def test_symlinked_blob_refuses(tmp_path: Path) -> None:
         target.symlink_to(outside)
         with pytest.raises(ArchiveRecoveryRefused) as excinfo:
             recover_unfinished_step_attempts(
-                tracker=tracker, ledger=ledger, workflow=_workflow()
+                inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
             )
         assert excinfo.value.fault == "symlinked-blob"
         assert claimed.attempt_id in str(excinfo.value)
@@ -654,7 +654,7 @@ def test_no_secret_restoration_for_not_delivered(tmp_path: Path) -> None:
         assert not (archive / "content" / secret_digest).exists()
         # Recovery succeeds without the secret, and never creates it.
         summary = recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
         assert summary.settled == (claimed.attempt_id,)
         assert not (archive / "content" / secret_digest).exists()
@@ -688,7 +688,7 @@ def test_direct_settlement_entry_still_validates(tmp_path: Path) -> None:
         (archive / "content" / first_digest).write_bytes(b"tampered\n")
         with pytest.raises(ArchiveRecoveryRefused):
             recover_attempt(
-                tracker=tracker,
+                inputs=tracker, code_host=tracker,
                 ledger=ledger,
                 attempt_id=claimed.attempt_id,
                 number=claimed.input_number,
@@ -725,7 +725,7 @@ def test_recovery_halt_names_attempt_and_fault(tmp_path: Path) -> None:
         )
         (archive / "content" / first_digest).write_bytes(b"bad\n")
         exit_code = run_worker_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             loop_config=_loop_config(tracker),
             run_one_attempt=lambda _claimed: (_ for _ in ()).throw(
@@ -763,7 +763,7 @@ def test_open_legacy_step_record_is_refused_never_converted(tmp_path: Path) -> N
         tracker = _tracker_with_issue(7)
         with pytest.raises(PinnedConfigurationRefused) as excinfo:
             recover_unfinished_step_attempts(
-                tracker=tracker, ledger=ledger, workflow=_workflow()
+                inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
             )
         assert "implement#7/1" in str(excinfo.value)
         assert ledger.get_attempt("implement#7/1").state == "open"
@@ -784,7 +784,7 @@ def test_open_versioned_legacy_record_is_refused(tmp_path: Path) -> None:
         tracker = _tracker_with_issue(7)
         with pytest.raises(PinnedConfigurationRefused):
             recover_unfinished_step_attempts(
-                tracker=tracker, ledger=ledger, workflow=_workflow()
+                inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
             )
         assert ledger.get_attempt("implement#7/1").state == "open"
     finally:
@@ -848,7 +848,7 @@ def test_unfinished_legacy_mvp_attempt_refuses_without_archive(tmp_path: Path) -
         tracker = _tracker_with_issue(7)
         with pytest.raises(LegacyAttemptRefused) as excinfo:
             recover_unfinished_step_attempts(
-                tracker=tracker, ledger=ledger, workflow=_workflow()
+                inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
             )
         assert "#7/1" in str(excinfo.value)
         assert not (tmp_path / "state" / "evidence").exists()
@@ -871,7 +871,7 @@ def test_empty_archive_validates_without_blobs(tmp_path: Path) -> None:
         ledger.open_attempt("implement#7/1", effective_configuration=effective)
         ledger.set_attempt_state("implement#7/1", "claim-confirmed")
         summary = recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=bare
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=bare
         )
         assert summary.settled == ("implement#7/1",)
     finally:
@@ -922,7 +922,7 @@ def test_recovery_takes_no_model_nor_current_files(
 
         model = ScriptedModel([])
         summary = recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
         assert summary.settled == (claimed.attempt_id,)
         assert model.invocations == []

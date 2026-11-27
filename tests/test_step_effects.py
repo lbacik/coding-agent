@@ -420,7 +420,7 @@ def test_credential_failure_propagates_from_the_driver(ledger: RunLedger) -> Non
     tracker = _BadTracker(agent_id=1001)
     with pytest.raises(CredentialFailure):
         drive_effect(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             step_id="explain",
@@ -490,7 +490,7 @@ def _drive_post_comment(
 ) -> EffectOutcome:
     """Drive one ``post-comment`` effect through the scripted tracker."""
     return drive_effect(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         step_id="work",

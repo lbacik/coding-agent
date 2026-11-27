@@ -197,7 +197,7 @@ def _finalise(
 ) -> FakeStepTracker:
     """Finalise a ``run_workflow`` result the way the live Attempt run does."""
     _finalise_live_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         result=result,
         number=NUMBER,

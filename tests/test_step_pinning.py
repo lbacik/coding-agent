@@ -353,7 +353,7 @@ def test_cfg42_gateway_record_without_a_source_still_recovers(ledger: RunLedger)
     tracker = _tracker_with((7, "2026-10-01T00:00:00Z"))
 
     summary = recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=_workflow()
+        inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
     )
 
     assert summary.settled == ("implement#7/1",)
@@ -413,7 +413,7 @@ def test_cfg41_restart_uses_pinned_labels_after_an_edit(ledger: RunLedger) -> No
 
     edited = _workflow(label=EDITED_LABEL, end_labels=("edited-done",))
     summary = recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=edited
+        inputs=tracker, code_host=tracker, ledger=ledger, workflow=edited
     )
 
     assert summary.settled == ("implement#7/1",)
@@ -445,14 +445,14 @@ def test_cfg41_open_attempt_uses_pinned_selection_label_after_an_edit(
 
     edited = _workflow(label=EDITED_LABEL, end_labels=("edited-done",))
     summary = recover_unfinished_step_attempts(
-        tracker=tracker, ledger=ledger, workflow=edited
+        inputs=tracker, code_host=tracker, ledger=ledger, workflow=edited
     )
 
     assert summary.settled == ("implement#7/1",)
     assert ledger.get_attempt("implement#7/1").state == "released"
     from coding_agent.inputs.claim import ConfirmedClaim
 
-    claimed = sweep_and_claim(tracker, ledger, _claim_config(workflow))
+    claimed = sweep_and_claim(tracker, tracker, ledger, _claim_config(workflow))
     assert isinstance(claimed, ConfirmedClaim)
     assert (claimed.attempt_id, claimed.n) == ("implement#7/2", 2)
 
@@ -528,7 +528,7 @@ def test_cfg42_old_shape_record_refuses_recovery(ledger: RunLedger) -> None:
 
     with pytest.raises(PinnedConfigurationRefused, match="implement#7/1"):
         recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
 
     assert ledger.get_attempt("implement#7/1").state == "open"
@@ -542,7 +542,7 @@ def test_cfg42_missing_shape_record_refuses_recovery(ledger: RunLedger) -> None:
 
     with pytest.raises(PinnedConfigurationRefused, match="implement#7/1"):
         recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
 
 
@@ -554,7 +554,7 @@ def test_cfg42_open_state_old_shape_refuses_recovery(ledger: RunLedger) -> None:
 
     with pytest.raises(PinnedConfigurationRefused, match="implement#7/1"):
         recover_unfinished_step_attempts(
-            tracker=tracker, ledger=ledger, workflow=_workflow()
+            inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
         )
 
     assert tracker.calls == []
@@ -573,7 +573,7 @@ def test_cfg42_refusal_halts_the_poll_loop_without_a_new_attempt(
         raise AssertionError(f"no Attempt should run (got {claimed})")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=WorkerLoopConfig(
             claim_config=_claim_config(workflow),

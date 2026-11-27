@@ -124,7 +124,7 @@ def test_live_uses_pinned_labels_when_caller_differs(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(selection_label="agent:changed"),
@@ -146,7 +146,7 @@ def test_replay_uses_pinned_plan_when_config_differs(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -160,7 +160,7 @@ def test_replay_uses_pinned_plan_when_config_differs(ledger: RunLedger) -> None:
     # with exactly one terminal comment (no duplicate on the same remote).
     comments_before = len(tracker.comments)
     finalised = finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(selection_label="agent:changed"),
@@ -253,7 +253,7 @@ def _recover(
     tracker: FakeStepTracker, ledger: RunLedger
 ) -> tuple[str, int]:
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -281,7 +281,7 @@ def test_crash_before_comment_replays_same_comment(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
     with pytest.raises(RuntimeError, match="crash before terminal comment"):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -312,7 +312,7 @@ def test_crash_between_comment_and_labels_replays_same_comment(
     tracker.inputs[NUMBER] = _issue()
     with pytest.raises(RuntimeError, match="crash between comment"):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -341,7 +341,7 @@ def test_crash_between_label_writes_replays_same_comment(
     tracker.inputs[NUMBER] = _issue()
     with pytest.raises(RuntimeError, match="crash between label writes"):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -373,7 +373,7 @@ def test_crash_between_labels_and_release_replays_same_comment(
     tracker.inputs[NUMBER] = _issue()
     with pytest.raises(RuntimeError, match="crash between labels"):
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             target=_target(),
@@ -418,7 +418,7 @@ def test_ambiguous_label_removal_reads_back_without_duplicate(
     )
     calls_before = len(tracker.calls)
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -443,7 +443,7 @@ def test_legacy_v4_record_replays_from_pinned_data(ledger: RunLedger) -> None:
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(),
@@ -457,7 +457,7 @@ def test_legacy_v4_record_replays_from_pinned_data(ledger: RunLedger) -> None:
     # The remote already reflects the first run; recovery adds nothing.
     comments_before = len(tracker.comments)
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -541,7 +541,7 @@ def test_legacy_shaped_intents_replay_without_duplicate_writes(
     calls_before = len(tracker.calls)
     comments_before = len(tracker.comments)
     finalised = finish_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         target=_target(selection_label="agent:changed"),

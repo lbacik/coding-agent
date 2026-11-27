@@ -240,7 +240,7 @@ def test_sweep_claims_the_oldest_authorised_input_first(ledger: RunLedger) -> No
     """§5: the sweep tries candidates in ``(created_at, number)`` order."""
     tracker = _tracker_with((31, "2026-10-02T00:00:00Z"), (32, "2026-10-01T00:00:00Z"))
 
-    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    claimed = sweep_and_claim(tracker, tracker, ledger, _claim_config())
 
     assert isinstance(claimed, ConfirmedClaim)
     assert (claimed.attempt_id, claimed.input_number, claimed.n) == (
@@ -255,7 +255,7 @@ def test_a_claim_without_authorisation_selects_nothing(ledger: RunLedger) -> Non
     tracker = FakeStepTracker(agent_login=IDENTITY.login, agent_id=IDENTITY.account_id)
     tracker.inputs[7] = _issue_input(7, "2026-10-01T00:00:00Z")
 
-    assert sweep_and_claim(tracker, ledger, _claim_config()) is None
+    assert sweep_and_claim(tracker, tracker, ledger, _claim_config()) is None
     assert not ledger.has_unfinished_attempt()
 
 
@@ -274,7 +274,7 @@ def test_p_wrk_4_idle_the_worker_sleeps_for_the_poll_interval(ledger: RunLedger)
     sleeps: list[float] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(poll=42.0),
         run_one_attempt=_recording_runner(ledger, {}, []),
@@ -298,7 +298,7 @@ def test_p_wrk_4_after_an_attempt_the_worker_selects_again_immediately(
     sleeps: list[float] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(tracker, _recording_runner(ledger, {}, ran)),
@@ -319,7 +319,7 @@ def test_p_wrk_1_a_recorded_credential_failure_halts_at_once(ledger: RunLedger) 
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_recording_runner(
@@ -353,7 +353,7 @@ def test_p_wrk_1_a_credential_failure_escaping_the_run_halts_at_once(
         raise CredentialFailure("GET", "/repos/o/r/issues/31")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -380,7 +380,9 @@ def test_p_wrk_1_a_revoked_credential_during_selection_halts(ledger: RunLedger) 
             raise CredentialFailure("GET", "/repos/o/r/issues")
 
     exit_code = run_worker_loop(
-        tracker=RevokedTracker(
+        inputs=RevokedTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ), code_host=RevokedTracker(
             agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
         ),
         ledger=ledger,
@@ -421,7 +423,7 @@ def test_c_err_2_a_failed_sweep_is_retried_at_the_next_poll(
     slept: list[float] = []
 
     exit_code = run_worker_loop(
-        tracker=flaky,
+        inputs=flaky, code_host=flaky,
         ledger=ledger,
         loop_config=_loop_config(poll=60.0),
         run_one_attempt=_release_on_finish(flaky, _recording_runner(ledger, {}, ran)),
@@ -468,7 +470,7 @@ def test_a_claim_interrupted_after_the_attempt_opened_halts_rather_than_idling(
     failing.labeled_events.update(tracker.labeled_events)
 
     exit_code = run_worker_loop(
-        tracker=failing,
+        inputs=failing, code_host=failing,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_recording_runner(ledger, {}, []),
@@ -497,7 +499,7 @@ def test_p_wrk_2_three_infrastructure_failures_halt_after_the_third_is_finalized
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(
@@ -524,7 +526,7 @@ def test_p_wrk_2_the_counter_resets_after_an_attempt_without_such_a_failure(
     ran: list[int] = []
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_release_on_finish(
@@ -1389,7 +1391,7 @@ def test_a_setup_failure_outside_the_run_is_recorded_finalized_and_counted(
         raise OSError(28, "No space left on device")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -1438,7 +1440,7 @@ def test_an_infrastructure_escape_ends_internal_failure_with_terminal_writes(
         raise error
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(workflow=workflow),
         run_one_attempt=run_one,
@@ -1511,7 +1513,7 @@ def test_a_failed_finalisation_leaves_the_attempt_recorded_and_unfinished(
         raise OSError(28, "No space left on device")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -1553,7 +1555,7 @@ def test_a_write_failure_after_the_record_is_finished_as_recorded_by_recovery(
     def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         if claimed.input_number == 31:
             finish_attempt(
-                tracker=tracker,
+                inputs=tracker, code_host=tracker,
                 ledger=ledger,
                 attempt_id=claimed.attempt_id,
                 target=FinalisationTarget(
@@ -1579,7 +1581,7 @@ def test_a_write_failure_after_the_record_is_finished_as_recorded_by_recovery(
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(workflow=workflow),
         run_one_attempt=_release_on_finish(tracker, run_one),
@@ -1649,7 +1651,7 @@ def test_a_transient_terminal_comment_failure_recovers_on_the_next_cycle(
     def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         if claimed.input_number == 31:
             finish_attempt(
-                tracker=tracker,
+                inputs=tracker, code_host=tracker,
                 ledger=ledger,
                 attempt_id=claimed.attempt_id,
                 target=FinalisationTarget(
@@ -1675,7 +1677,7 @@ def test_a_transient_terminal_comment_failure_recovers_on_the_next_cycle(
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(workflow=workflow),
         run_one_attempt=_release_on_finish(tracker, run_one),
@@ -1729,7 +1731,7 @@ def test_a_failed_live_terminal_write_does_not_crash_the_worker(
 
     def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
         finish_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=claimed.attempt_id,
             target=FinalisationTarget(
@@ -1747,7 +1749,7 @@ def test_a_failed_live_terminal_write_does_not_crash_the_worker(
         raise AssertionError("unreachable: the comment post above raises")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(workflow=workflow),
         run_one_attempt=run_one,
@@ -1792,7 +1794,7 @@ def test_an_unsettled_effect_intent_leaves_the_attempt_for_recovery(
         raise OSError(28, "No space left on device")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -1832,7 +1834,7 @@ def test_a_credential_failure_during_finalisation_halts_leaving_recovery(
         raise OSError(28, "No space left on device")
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -1857,7 +1859,7 @@ def test_a_halt_is_not_masked_by_the_attempt_bound(ledger: RunLedger) -> None:
     tracker = _tracker_with((31, "2026-10-01T00:00:00Z"))
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_recording_runner(
@@ -1895,7 +1897,7 @@ def test_claim_released_where_read_back_loses_is_not_an_attempt(
 
     tracker.on_assign = _race
 
-    claimed = sweep_and_claim(tracker, ledger, _claim_config())
+    claimed = sweep_and_claim(tracker, tracker, ledger, _claim_config())
 
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 8

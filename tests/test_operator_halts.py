@@ -264,7 +264,7 @@ def test_ready_reached_only_after_recovery_settles(
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(live),
         run_one_attempt=run_one,
@@ -300,7 +300,9 @@ def test_credential_failure_during_selection_halts(tmp_path: Path) -> None:
     try:
         live = LiveView(process_started_at=_started_at())
         exit_code = run_worker_loop(
-            tracker=RevokedTracker(
+            inputs=RevokedTracker(
+                agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+            ), code_host=RevokedTracker(
                 agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
             ),
             ledger=ledger,
@@ -330,7 +332,9 @@ def test_legacy_attempt_halts(ledger: RunLedger) -> None:
     """
     ledger.open_attempt("#7/1", effective_configuration={})
     exit_code = run_worker_loop(
-        tracker=FakeStepTracker(
+        inputs=FakeStepTracker(
+            agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
+        ), code_host=FakeStepTracker(
             agent_login=IDENTITY.login, agent_id=IDENTITY.account_id
         ),
         ledger=ledger,
@@ -377,7 +381,7 @@ def test_three_recovery_write_failures_halt(ledger: RunLedger) -> None:
         author_id=7,
     )
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_never_run(),
@@ -410,7 +414,7 @@ def test_claim_interrupted_after_attempt_opened_halts(ledger: RunLedger) -> None
     tracker.inputs[7] = _issue_input(7)
     tracker.labeled_events[(7, SELECTION_LABEL)] = _human_event()
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=_never_run(),
@@ -445,7 +449,7 @@ def test_three_infrastructure_failures_halt(ledger: RunLedger) -> None:
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -474,7 +478,7 @@ def test_recorded_credential_failure_halts(ledger: RunLedger) -> None:
         )
 
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(),
         run_one_attempt=run_one,
@@ -508,7 +512,7 @@ def test_unsupported_environment_fails_attempt_without_halt(
 
     live = LiveView(process_started_at=_started_at())
     exit_code = run_worker_loop(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         loop_config=_loop_config(live),
         run_one_attempt=run_one,

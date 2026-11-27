@@ -529,12 +529,12 @@ def run_open_pull_request(
         workflow_id=workflow_id,
         step_id=step_id,
         config_digest=config_digest,
-        delivery_reference=tracker.delivery_reference(
+        delivery_reference=code_host.delivery_reference(
             str(input_number), draft=draft
         ),
         base_revision=base_revision,
         effect_marker=marker,
-        max_body_chars=tracker.profile.max_body_chars,
+        max_body_chars=code_host.profile.max_body_chars,
     )
     outcome = drive_effect(
         inputs=inputs,
@@ -720,7 +720,7 @@ def run_publish_review(
         config_digest=config_digest,
         input_head=head,
         effect_marker=marker,
-        max_body_chars=tracker.profile.max_body_chars,
+        max_body_chars=code_host.profile.max_body_chars,
     )
     outcome = drive_effect(
         inputs=inputs,
@@ -887,7 +887,7 @@ def run_post_comment(
         step_id=step_id,
         config_digest=config_digest,
         effect_marker=marker,
-        max_body_chars=tracker.profile.max_body_chars,
+        max_body_chars=code_host.profile.max_body_chars,
     )
     outcome = drive_effect(
         inputs=inputs,

@@ -44,7 +44,7 @@ from coding_agent.operator.live import LiveView
 if TYPE_CHECKING:
     from coding_agent.inputs.authorisation import IdentityMode
     from coding_agent.inputs.claim import ClaimConfig
-    from coding_agent.inputs.port import StepTrackerPort
+    from coding_agent.inputs.port import CodeHostPort
     from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import snapshots as _snapshots
 from coding_agent.operator.contract import utc_now_z
@@ -296,7 +296,7 @@ def _validate_next_issue(value: Any) -> int | None:
 
 
 def _bounded_next_eligibility(
-    tracker_factory: Callable[[], StepTrackerPort] | None,
+    tracker_factory: Callable[[], CodeHostPort] | None,
     claim_config: ClaimConfig | None,
     ledger: RunLedger | None,
     identity_mode: IdentityMode | None,
@@ -330,6 +330,7 @@ def _bounded_next_eligibility(
             tracker = tracker_factory()
             box["reason"] = check_eligibility(
                 tracker,
+                tracker,
                 ledger,
                 claim_config,
                 issue_number,
@@ -352,7 +353,7 @@ def _serve_next_issue(
     ledger_path: Path,
     request: dict[str, Any],
     claim_config: ClaimConfig | None = None,
-    tracker_factory: Callable[[], StepTrackerPort] | None = None,
+    tracker_factory: Callable[[], CodeHostPort] | None = None,
     ledger: RunLedger | None = None,
     identity_mode: IdentityMode | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
@@ -539,7 +540,7 @@ def _handle_one(
     live: LiveView,
     registry: Redactable = None,
     claim_config: ClaimConfig | None = None,
-    tracker_factory: Callable[[], StepTrackerPort] | None = None,
+    tracker_factory: Callable[[], CodeHostPort] | None = None,
     ledger: RunLedger | None = None,
     identity_mode: IdentityMode | None = None,
     eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
@@ -600,7 +601,7 @@ class OperatorListener:
         live: LiveView,
         registry: Redactable = None,
         claim_config: ClaimConfig | None = None,
-        tracker_factory: Callable[[], StepTrackerPort] | None = None,
+        tracker_factory: Callable[[], CodeHostPort] | None = None,
         ledger: RunLedger | None = None,
         identity_mode: IdentityMode | None = None,
         eligibility_timeout_seconds: float = _NEXT_ELIGIBILITY_TIMEOUT_SECONDS,
@@ -630,7 +631,7 @@ class OperatorListener:
         self._next_issue_source: (
             tuple[
                 ClaimConfig,
-                Callable[[], StepTrackerPort],
+                Callable[[], CodeHostPort],
                 RunLedger,
                 IdentityMode,
             ]
@@ -657,7 +658,7 @@ class OperatorListener:
     def configure_next_issue(
         self,
         claim_config: ClaimConfig,
-        tracker_factory: Callable[[], StepTrackerPort],
+        tracker_factory: Callable[[], CodeHostPort],
         ledger: RunLedger,
         identity_mode: IdentityMode,
     ) -> None:

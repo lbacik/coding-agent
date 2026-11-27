@@ -44,7 +44,7 @@ from coding_agent.identity.token import TokenRejected
 from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import ClaimConfig
 from coding_agent.inputs.pickup import PickupConfig
-from coding_agent.inputs.port import InputType, StepTrackerPort
+from coding_agent.inputs.port import CodeHostPort, InputType
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator.listener import OperatorListener
 from coding_agent.operator.live import LiveView
@@ -350,7 +350,7 @@ class Ready:
     The step loop decides against ``usable_threshold``; anything publishing
     the configured value reads ``threshold_tokens`` off this config.
     """
-    tracker: StepTrackerPort
+    tracker: CodeHostPort
     """The step tracker the poll loop selects and finalises through."""
     ledger: RunLedger
     """The open Run Ledger (§15)."""
@@ -508,7 +508,7 @@ def read_target_repository_profile(
     *,
     github: CodeHostStartupPort,
     token: str,
-    tracker: StepTrackerPort,
+    tracker: CodeHostPort,
     owner: str,
     repo: str,
     base_branch: str,
@@ -1229,7 +1229,7 @@ def start(
         # The ``next issue N`` eligibility read gets its own tracker
         # instance — never the Worker thread's. A fresh client per
         # commit keeps even the transport separate.
-        def _listener_tracker() -> StepTrackerPort:
+        def _listener_tracker() -> CodeHostPort:
             return ports.github.make_tracker(
                 owner=owner,
                 repo=repo,

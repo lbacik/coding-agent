@@ -31,7 +31,7 @@ from coding_agent import agentctl
 from coding_agent.identity.startup import Identity
 from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, sweep_and_claim
-from coding_agent.inputs.port import LabeledEvent, StepTrackerPort, TrackedInput
+from coding_agent.inputs.port import LabeledEvent, CodeHostPort, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import listener as operator_listener
 from coding_agent.operator.live import LiveView
@@ -752,8 +752,8 @@ def _next_request(request_id: str, issue: int) -> bytes:
     return (json.dumps(body) + "\n").encode("utf-8")
 
 
-def _tracker_factory_for(tracker: FakeStepTracker) -> Callable[[], StepTrackerPort]:
-    def factory() -> StepTrackerPort:
+def _tracker_factory_for(tracker: FakeStepTracker) -> Callable[[], CodeHostPort]:
+    def factory() -> CodeHostPort:
         return tracker
 
     return factory
@@ -780,7 +780,7 @@ def test_next_issue_commits_eligible_and_priority_claims_it(tmp_path: Path) -> N
         assert reply is not None
         assert reply.get("replayed") is False
         assert reply["command"]["arguments"] == {"issue": 41}
-        claimed = sweep_and_claim(tracker, ledger, config, priority=41)
+        claimed = sweep_and_claim(tracker, tracker, ledger, config, priority=41)
         assert isinstance(claimed, ConfirmedClaim)
         assert claimed.input_number == 41
         assert claimed.attempt_id == "implement#41/1"
@@ -790,7 +790,7 @@ def test_next_issue_commits_eligible_and_priority_claims_it(tmp_path: Path) -> N
         ledger.set_attempt_state(claimed.attempt_id, "finished")
         tracker.remove_label(41, "issue", LABEL)
         tracker.unassign_input(41, "issue")
-        following = sweep_and_claim(tracker, ledger, config)
+        following = sweep_and_claim(tracker, tracker, ledger, config)
         assert isinstance(following, ConfirmedClaim)
         assert following.input_number == 40
     finally:

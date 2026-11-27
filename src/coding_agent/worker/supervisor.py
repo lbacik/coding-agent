@@ -117,7 +117,8 @@ def run_worker(
         # selection (§4.1, §16.1); ``run_one_attempt`` covers the Workflow
         # run itself.
         return _worker_run.run_worker_loop(
-            tracker=ready.tracker,
+            inputs=ready.tracker,
+            code_host=ready.tracker,
             ledger=ready.ledger,
             loop_config=WorkerLoopConfig(
                 claim_config=ready.claim_config,

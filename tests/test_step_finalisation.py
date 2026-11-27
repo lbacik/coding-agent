@@ -469,7 +469,7 @@ def test_drift_keeps_pull_request_and_lists_it(ledger: RunLedger) -> None:
     )
     ledger.record_step_effect_receipt(ATTEMPT, "open-pr", 1, 0, remote_id="101")
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -505,7 +505,7 @@ def test_restart_releases_unconfirmed_claim(
     )
     ledger.set_assigned_by_us(ATTEMPT, True)
     recovered = recover_unconfirmed_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -529,7 +529,7 @@ def test_restart_closes_open_execution_as_interrupted(
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "process", 1, entry_result="start")
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -555,7 +555,7 @@ def test_restart_ends_withdrawn_where_input_withdrawn(
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "process", 1, entry_result="start")
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -582,7 +582,7 @@ def test_recorded_outcome_finished_as_recorded(ledger: RunLedger) -> None:
         writes=terminal_writes_for_outcome(),
     )
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -653,7 +653,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     )
     with pytest.raises(CredentialFailure):
         recover_attempt(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             number=NUMBER,
@@ -667,7 +667,7 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     assert stored.reason == "credential-failure"
     tracker.failing = False
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -711,7 +711,7 @@ def test_recover_never_commits_dirty_tree(ledger: RunLedger, tmp_path: Path) -> 
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     _open_attempt(ledger)
     recovered = recover_attempt(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -736,7 +736,7 @@ def test_sigterm_finalises_interrupted_shutdown(ledger: RunLedger) -> None:
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "review", 1, entry_result="start")
     recovered = finalise_shutdown(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -762,7 +762,7 @@ def test_sigterm_during_review_leaves_no_result(ledger: RunLedger) -> None:
     _open_attempt(ledger)
     ledger.open_step_execution(ATTEMPT, "review", 1, entry_result="start")
     recovered = finalise_shutdown(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -785,7 +785,7 @@ def test_shutdown_withdrawn_where_input_withdrawn(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue(assignees=("coding-agent",))
     _open_attempt(ledger)
     recovered = finalise_shutdown(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,

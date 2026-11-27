@@ -209,7 +209,7 @@ def test_independent_volume_claims_past_trusted_terminal(
     _seed_trusted_terminal(tracker, "implement#42/1")
     fresh = RunLedger(tmp_path / "fresh.db")
     try:
-        claimed = sweep_and_claim(tracker, fresh, _config(tracker))
+        claimed = sweep_and_claim(tracker, tracker, fresh, _config(tracker))
     finally:
         fresh.close()
     assert isinstance(claimed, ConfirmedClaim)
@@ -223,7 +223,7 @@ def test_independent_volume_blocked_by_active_claim(
     _seed_claim(tracker, "implement#42/1")
     fresh = RunLedger(tmp_path / "fresh.db")
     try:
-        assert sweep_and_claim(tracker, fresh, _config(tracker)) is None
+        assert sweep_and_claim(tracker, tracker, fresh, _config(tracker)) is None
     finally:
         fresh.close()
 
@@ -245,7 +245,7 @@ def test_independent_volume_blocked_by_forged_terminal(
     tracker._next_comment_id += 1
     fresh = RunLedger(tmp_path / "fresh.db")
     try:
-        assert sweep_and_claim(tracker, fresh, _config(tracker)) is None
+        assert sweep_and_claim(tracker, tracker, fresh, _config(tracker)) is None
     finally:
         fresh.close()
 
@@ -330,7 +330,7 @@ def test_agent_run_two_volumes_finished_permits_new_claim(tmp_path: Path) -> Non
     ) -> object:
         def run_one(claimed: ConfirmedClaim) -> WorkflowResult:
             finish_attempt(
-                tracker=tracker,
+                inputs=tracker, code_host=tracker,
                 ledger=ledger,
                 attempt_id=claimed.attempt_id,
                 target=FinalisationTarget(
@@ -349,7 +349,7 @@ def test_agent_run_two_volumes_finished_permits_new_claim(tmp_path: Path) -> Non
 
     try:
         exit_code = run_worker_loop(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=first_ledger,
             loop_config=_loop_config(tracker, workflow),
             run_one_attempt=_finish_one(first_ledger),  # type: ignore[arg-type]
@@ -385,7 +385,7 @@ def test_agent_run_two_volumes_finished_permits_new_claim(tmp_path: Path) -> Non
     second_ledger = RunLedger(second_path)
     try:
         second_claimed = sweep_and_claim(
-            tracker, second_ledger, _loop_config(tracker, workflow).claim_config
+            tracker, tracker, second_ledger, _loop_config(tracker, workflow).claim_config
         )
     finally:
         first_ledger.close()
@@ -405,10 +405,10 @@ def test_agent_run_two_volumes_active_claim_still_arbitrates(
     first_ledger = RunLedger(tmp_path / "a.db")
     second_ledger = RunLedger(tmp_path / "b.db")
     try:
-        first = sweep_and_claim(tracker, first_ledger, _config(tracker))
+        first = sweep_and_claim(tracker, tracker, first_ledger, _config(tracker))
         assert isinstance(first, ConfirmedClaim)
         assert first.attempt_id == "implement#42/1"
-        assert sweep_and_claim(tracker, second_ledger, _config(tracker)) is None
+        assert sweep_and_claim(tracker, tracker, second_ledger, _config(tracker)) is None
     finally:
         first_ledger.close()
         second_ledger.close()
