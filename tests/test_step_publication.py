@@ -31,8 +31,15 @@ import pytest
 
 from coding_agent.github.errors import CredentialFailure
 from coding_agent.inputs.gates import GateResult
-from coding_agent.inputs.port import InputType, TrackedInput
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
+from coding_agent.inputs.port import (
+    InputPullRequest,
+    InputReview,
+    InputType,
+    TrackedInput,
+)
+from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.services import ServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix, load_toolchain_matrix
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
@@ -49,7 +56,6 @@ from coding_agent.runtime.step_publication import (
     PUBLISHING_OPERATIONS,
     DocumentResolutionError,
     PublishingOperationRunner,
-    closing_keyword_line,
     provenance_footer,
     pull_request_title_for_issue,
     render_comment_body,
@@ -211,15 +217,24 @@ def test_title_is_the_issue_title_verbatim() -> None:
     assert pull_request_title_for_issue("Add a greeting") == "Add a greeting"
 
 
-def test_closing_keyword_ready_and_draft() -> None:
-    """OP-17 (§10.5): ready closes, draft only names the issue."""
-    assert closing_keyword_line(7, draft=False) == "Closes #7"
-    assert closing_keyword_line(7, draft=True) == "Part of #7"
+def test_delivery_reference_ready_and_draft() -> None:
+    """OP-17 (§10.5): the tracker composes the link line; draft never closes."""
+    tracker = FakeStepTracker()
+    assert tracker.delivery_reference("7", draft=False) == "Closes #7"
+    assert tracker.delivery_reference("7", draft=True) == "Part of #7"
 
 
 def test_open_pr_body_is_keyword_document_footer_marker() -> None:
     """OP-18 (§14.4): keyword, verbatim document, footer, marker — in order."""
-    marker = step_effect_marker(ATTEMPT, "open-pr", 1, 0, kind="open-pull-request")
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt=ATTEMPT,
+            kind="open-pull-request",
+            step="open-pr",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
     body = render_open_pull_request_body(
         document="Implements the greeting.",
         artifact_ref="process.1.document",
@@ -251,7 +266,15 @@ def test_open_pr_body_is_keyword_document_footer_marker() -> None:
 
 def test_review_body_carries_the_reviewed_head() -> None:
     """OP-18 (§14.4): the review footer carries the reviewed Input Head."""
-    marker = step_effect_marker(ATTEMPT, "publish", 1, 0, kind="publish-review")
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt=ATTEMPT,
+            kind="publish-review",
+            step="publish",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
     body = render_review_body(
         document="Looks good.",
         artifact_ref="review-step.1.document",
@@ -269,7 +292,15 @@ def test_review_body_carries_the_reviewed_head() -> None:
 
 def test_comment_body_carries_no_revision() -> None:
     """OP-18 (§14.4): the comment footer carries no revision."""
-    marker = step_effect_marker(ATTEMPT, "explain", 1, 0, kind="post-comment")
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt=ATTEMPT,
+            kind="post-comment",
+            step="explain",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
     body = render_comment_body(
         document="Blocked on credentials.",
         artifact_ref="process.1.document",
@@ -376,7 +407,15 @@ def test_open_pr_foreign_marker_pull_request_is_ignored(
     repo = tmp_path / "repo"
     _init_repo(repo)
     tracker = FakeStepTracker(agent_id=1001)
-    marker = step_effect_marker(ATTEMPT, "open-pr", 1, 0, kind="open-pull-request")
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt=ATTEMPT,
+            kind="open-pull-request",
+            step="open-pr",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
     tracker.seed_foreign_marker_pull_request(
         "agent/implement/7/1-greeting", marker
     )
@@ -517,9 +556,10 @@ class _RaceTracker(FakeStepTracker):
             base_branch="main",
         )
 
-    def publish_review(self, number: int, *, commit_id: str, body: str):  # type: ignore[no-untyped-def]
-        from coding_agent.inputs.port import InputReview
-
+    def publish_review(
+        self, number: int, *, commit_id: str, body: str, marker: AttemptMarker
+    ) -> InputReview:
+        _ = (number, commit_id, body, marker)
         raise RuntimeError("push raced: remote head moved")
 
 
@@ -726,7 +766,10 @@ def test_credential_failure_propagates(tmp_path: Path, ledger: RunLedger) -> Non
     """REC-17 (§16.3): a Credential Failure is never routed or swallowed."""
 
     class _BadTracker(FakeStepTracker):
-        def find_pull_request(self, head_branch: str, marker: str):  # type: ignore[no-untyped-def]
+        def find_pull_request(
+            self, head_branch: str, marker: AttemptMarker
+        ) -> InputPullRequest | None:
+            _ = (head_branch, marker)
             raise CredentialFailure("GET", "/repos/o/s/pulls")
 
     repo = tmp_path / "repo"
@@ -772,7 +815,15 @@ def test_missing_document_is_error_without_a_write(
 def test_huge_document_truncates_only_the_document() -> None:
     """OP-19 (§14.4): the keyword, footer and marker survive truncation."""
     document = "x" * 70_000
-    marker = step_effect_marker(ATTEMPT, "open-pr", 1, 0, kind="open-pull-request")
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt=ATTEMPT,
+            kind="open-pull-request",
+            step="open-pr",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
     footer = provenance_footer(
         attempt_id=ATTEMPT,
         workflow_id=WORKFLOW_ID,

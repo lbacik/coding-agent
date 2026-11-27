@@ -42,13 +42,14 @@ from coding_agent.inputs.errors import (
     StepTrackerError,
 )
 from coding_agent.inputs.gates import GateResult
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.inputs.retry import (
     INITIAL_BACKOFF_SECONDS,
     MAX_IN_PLACE_ATTEMPTS,
     MAX_IN_PLACE_WAIT_SECONDS,
 )
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 
 if TYPE_CHECKING:
     from coding_agent.runtime.effects.modules import EffectModule
@@ -202,8 +203,12 @@ def drive_effect(
             expected_target=module.target_to_dict(target),
         )
     ctx = EffectContext(number=number, input_type=input_type)
-    marker = step_effect_marker(
-        attempt_id, step_id, seq, ordinal, kind=module.marker_kind
+    marker = AttemptMarker(
+        attempt=attempt_id,
+        kind=module.marker_kind,
+        step=step_id,
+        execution_number=seq,
+        ordinal=ordinal,
     )
     try:
         existing = module.find(inputs, code_host, ctx, target, marker)
@@ -247,7 +252,7 @@ def drive_effect(
     waited_seconds = 0.0
     while True:
         try:
-            written = module.perform(inputs, code_host, ctx, target, body)
+            written = module.perform(inputs, code_host, ctx, target, body, marker)
         except CredentialFailure:
             raise
         except Exception as exc:

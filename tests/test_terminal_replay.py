@@ -17,8 +17,10 @@ from pathlib import Path
 
 import pytest
 
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputComment, InputType, TrackedInput
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.step_finalisation import (
     FINALISATION_EXECUTION,
     FINALISATION_STEP,
@@ -39,6 +41,7 @@ from coding_agent.workflow.schema import (
 )
 from support.effective_config import full_effective_configuration
 from support.fake_step_tracker import FakeStepTracker
+from support.markers import terminal_marker_text
 
 ATTEMPT = "implement#7/1"
 NUMBER = 7
@@ -194,12 +197,12 @@ class _CrashBeforeComment(FakeStepTracker):
     crashing: bool = True
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         self._record("post_comment", number, input_type, body)
         if self.crashing and "kind=terminal" in body:
             raise RuntimeError("crash before terminal comment")
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
 
 class _CrashOnRemove(FakeStepTracker):
@@ -496,14 +499,19 @@ def test_legacy_shaped_intents_replay_without_duplicate_writes(
     comment = render_terminal_comment(
         attempt_id=ATTEMPT,
         outcome="completed",
+        marker_text=terminal_marker_text(ATTEMPT),
         ending_step="work",
         step_result="done",
         workflow_end="completed",
     )
-    marker = step_effect_marker(
-        ATTEMPT, FINALISATION_STEP, FINALISATION_EXECUTION, 0, kind="terminal"
+    marker = AttemptMarker(
+        attempt=ATTEMPT,
+        kind="terminal",
+        step=FINALISATION_STEP,
+        execution_number=FINALISATION_EXECUTION,
+        ordinal=0,
     )
-    assert marker in comment
+    assert format_attempt_marker(marker) in comment
     ledger.record_terminal_outcome(
         ATTEMPT,
         outcome="completed",

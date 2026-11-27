@@ -41,6 +41,7 @@ from coding_agent.github.client import DEFAULT_BASE_URL, GitHubClient
 from coding_agent.github.errors import request_with_retry
 from coding_agent.inputs.errors import InputError, InputNotFound
 from coding_agent.inputs.errors import StepTrackerError as StepTrackerError
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import (
     AgentFacts,
     CodeHostPort,
@@ -81,6 +82,21 @@ def _write_error(method: str, path: str, response: requests.Response) -> StepTra
         method=method,
         path=path,
         status_code=status_code,
+    )
+
+
+def format_attempt_marker(marker: AttemptMarker) -> str:
+    """Render an Attempt Marker to today's HTML comment line (§14.1, §14.4).
+
+    The single marker construction site: ``<!-- coding-agent attempt=…
+    kind=… step=… n=… ordinal=… -->`` with the empty-step placeholder
+    convention (``step=-``). Byte-identical to every receipt written before
+    the structured marker, so recovery keeps matching.
+    """
+    return (
+        f"<!-- coding-agent attempt={marker.attempt} kind={marker.kind} "
+        f"step={marker.step or '-'} n={marker.execution_number} "
+        f"ordinal={marker.ordinal} -->"
     )
 
 
@@ -164,6 +180,10 @@ class GitHubStepTracker:
         the semantic reference and never formats vendor text itself.
         """
         return self.profile.delivery_reference(ref, draft=draft)
+
+    def format_marker(self, marker: AttemptMarker) -> str:
+        """Render an Attempt Marker to today's HTML comment line (§14.1)."""
+        return format_attempt_marker(marker)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         """One §14.4-classified call; statuses outside 401/403/429 are returned."""
@@ -597,10 +617,11 @@ class GitHubStepTracker:
         return candidate.author_login == self.agent_login
 
     def post_claim_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         """Post the Claim Comment bearing the Attempt Marker (§6.1)."""
         _ = input_type
+        _ = marker
         response = self._request(
             "POST", f"{self._issue_path(number)}/comments", json={"body": body}
         )
@@ -647,11 +668,12 @@ class GitHubStepTracker:
         return found
 
     def find_comment_by_marker(
-        self, number: int, input_type: InputType, marker: str
+        self, number: int, input_type: InputType, marker: AttemptMarker
     ) -> InputComment | None:
         """Find our comment by Attempt Marker (§14)."""
+        rendered = self.format_marker(marker)
         for comment in self.list_comments(number, input_type):
-            if marker not in comment.body:
+            if rendered not in comment.body:
                 continue
             if not self._comment_author_matches(comment):
                 continue
@@ -674,10 +696,10 @@ class GitHubStepTracker:
             )
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         """Post one comment on the input, body already rendered (§10.7)."""
-        posted = self.post_claim_comment(number, input_type, body)
+        posted = self.post_claim_comment(number, input_type, body, marker)
         return InputComment(
             comment_id=posted.comment_id,
             body=posted.body,
@@ -687,9 +709,10 @@ class GitHubStepTracker:
         )
 
     def publish_review(
-        self, number: int, *, commit_id: str, body: str
+        self, number: int, *, commit_id: str, body: str, marker: AttemptMarker
     ) -> InputReview:
         """Publish a COMMENT-event review against ``commit_id`` (§10.6)."""
+        _ = marker
         response = self._request(
             "POST",
             f"/repos/{self.owner}/{self.repo}/pulls/{number}/reviews",
@@ -766,10 +789,13 @@ class GitHubStepTracker:
             page += 1
         return found
 
-    def find_review_by_marker(self, number: int, marker: str) -> InputReview | None:
+    def find_review_by_marker(
+        self, number: int, marker: AttemptMarker
+    ) -> InputReview | None:
         """Find our review by Attempt Marker (§14)."""
+        rendered = self.format_marker(marker)
         for review in self.list_reviews(number):
-            if marker not in review.body:
+            if rendered not in review.body:
                 continue
             if self.agent_id is not None:
                 if review.author_id != self.agent_id:
@@ -823,8 +849,10 @@ class GitHubStepTracker:
         base_branch: str,
         body: str,
         draft: bool = False,
+        marker: AttemptMarker,
     ) -> InputPullRequest:
         """Open one pull request from ``head_branch`` (§10.5, §14)."""
+        _ = marker
         response = self._request(
             "POST",
             f"/repos/{self.owner}/{self.repo}/pulls",
@@ -864,16 +892,17 @@ class GitHubStepTracker:
         )
 
     def find_pull_request(
-        self, head_branch: str, marker: str
+        self, head_branch: str, marker: AttemptMarker
     ) -> InputPullRequest | None:
         """Find our pull request by head branch and Attempt Marker (§14).
 
         Lists pull requests with ``head=<owner>:<branch>`` and ``state=all``,
-        then returns the one whose body carries ``marker`` and whose author
-        is the Agent Identity — open preferred where both states match. An
-        unmarked pull request from the same branch is not ours: the lookup
-        never adopts it and returns ``None`` instead.
+        then returns the one whose body carries the rendered marker and
+        whose author is the Agent Identity — open preferred where both
+        states match. An unmarked pull request from the same branch is not
+        ours: the lookup never adopts it and returns ``None`` instead.
         """
+        rendered = self.format_marker(marker)
         response = self._request(
             "GET",
             f"/repos/{self.owner}/{self.repo}/pulls",
@@ -895,7 +924,7 @@ class GitHubStepTracker:
         for entry in items:
             if not isinstance(entry, dict):
                 continue
-            candidate = self._pull_request_from_payload(entry, marker)
+            candidate = self._pull_request_from_payload(entry, rendered)
             if candidate.head_branch != head_branch:
                 continue
             if not candidate.marker_present:

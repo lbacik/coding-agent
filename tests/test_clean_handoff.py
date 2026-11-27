@@ -64,6 +64,7 @@ from coding_agent.workflow.schema import (
     WorkflowStep,
 )
 from support.fake_step_tracker import FakeStepTracker
+from support.markers import terminal_marker_text
 
 WORKFLOW = "implement"
 SELECTION_LABEL = "agent:implement"
@@ -170,6 +171,7 @@ def _terminal_body(attempt: str, offer: RoundHandoffOffer | None) -> str:
     return render_terminal_comment(
         attempt_id=attempt,
         outcome="unfinished",
+        marker_text=terminal_marker_text(attempt),
         ending_step="publish",
         step_result="no-changes",
         workflow_end="unfinished",

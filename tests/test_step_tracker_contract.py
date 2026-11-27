@@ -50,6 +50,7 @@ from coding_agent.inputs.claim import (
     CLAIM_EXECUTION,
     CLAIM_STEP,
     claim_comment_body,
+    claim_marker_for,
 )
 from coding_agent.inputs.errors import (
     CredentialFailure,
@@ -57,9 +58,10 @@ from coding_agent.inputs.errors import (
     PermissionRefusal,
     RateLimitExhausted,
 )
-from coding_agent.inputs.github import GitHubStepTracker
+from coding_agent.inputs.github import GitHubStepTracker, format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import CodeHostPort, TrackedInput
-from coding_agent.ledger.store import step_effect_key, step_effect_marker
+from coding_agent.ledger.store import step_effect_key
 from support.fake_step_tracker import FakeStepTracker
 
 TEST_BASE_URL = "https://api.github.test"
@@ -130,7 +132,11 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
     key = step_effect_key(
         "implement#30/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
     )
-    marker = claim_comment_body("implement#30/1", key)
+    marker = claim_comment_body(
+        "implement#30/1",
+        key,
+        format_attempt_marker(claim_marker_for("implement#30/1")),
+    )
     issue = _issue_payload(ISSUE_NUMBER, ISSUE_LABEL)
     pr_issue = _issue_payload(PR_NUMBER, PR_LABEL)
     pr_issue["pull_request"] = {"url": f"{TEST_BASE_URL}/repos/octocat/sandbox/pulls/31"}
@@ -195,9 +201,14 @@ def _mocked_harness(requests_mock: Any) -> TrackerHarness:
     )
     held_pulls: list[dict[str, Any]] = []
     next_pull_number = [101]
-    foreign_pr_marker = step_effect_marker(
-        "implement#9/9", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
-        kind="open-pull-request",
+    foreign_pr_marker = format_attempt_marker(
+        AttemptMarker(
+            attempt="implement#9/9",
+            kind="open-pull-request",
+            step=CLAIM_STEP,
+            execution_number=CLAIM_EXECUTION,
+            ordinal=CLAIM_COMMENT_ORDINAL,
+        )
     )
     held_pulls.append(
         {
@@ -422,7 +433,11 @@ def _fake_harness() -> TrackerHarness:
     key = step_effect_key(
         "implement#30/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL
     )
-    marker = claim_comment_body("implement#30/1", key)
+    marker = claim_comment_body(
+        "implement#30/1",
+        key,
+        format_attempt_marker(claim_marker_for("implement#30/1")),
+    )
     fake = FakeStepTracker(
         owner="octocat",
         repo="sandbox",
@@ -470,10 +485,17 @@ def _fake_harness() -> TrackerHarness:
     )
     fake.base_tip = "t" * 40
     fake.seed_foreign_marker_comment(marker)
-    own = fake.post_claim_comment(ISSUE_NUMBER, "issue", marker)
+    own = fake.post_claim_comment(
+        ISSUE_NUMBER, "issue", marker, claim_marker_for("implement#30/1")
+    )
     assert own.comment_id == 2
     fake.seed_foreign_marker_review(marker)
-    fake.publish_review(PR_NUMBER, commit_id="h" * 40, body=marker)
+    fake.publish_review(
+        PR_NUMBER,
+        commit_id="h" * 40,
+        body=marker,
+        marker=claim_marker_for("implement#30/1"),
+    )
     fake.open_pull_requests.append(fake.inputs[PR_NUMBER])
     fake.calls.clear()
     return TrackerHarness(
@@ -664,11 +686,14 @@ def test_claim_writes_order_and_own_comment_found_by_key(
         pytest.skip("live side runs the full flow once in the issue flow test")
     attempt = "implement#30/9"
     key = step_effect_key(attempt, CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL)
-    body = claim_comment_body(attempt, key)
+    marker = claim_marker_for(attempt)
+    body = claim_comment_body(attempt, key, format_attempt_marker(marker))
     harness.tracker.assign_input(harness.issue_number, "issue")
-    posted = harness.tracker.post_claim_comment(harness.issue_number, "issue", body)
+    posted = harness.tracker.post_claim_comment(
+        harness.issue_number, "issue", body, marker
+    )
     found = harness.tracker.find_comment_by_marker(
-        harness.issue_number, "issue", attempt
+        harness.issue_number, "issue", marker
     )
     assert found is not None
     assert found.comment_id == posted.comment_id
@@ -682,7 +707,7 @@ def test_foreign_marker_comment_is_never_ours(harness: TrackerHarness) -> None:
     """§14: a comment by another account carrying our marker is not our receipt."""
     if _is_live(harness):
         pytest.skip("live side has no foreign marker comment")
-    marker = "implement#30/1"
+    marker = claim_marker_for("implement#30/1")
     if isinstance(harness.tracker, FakeStepTracker):
         found = harness.tracker.find_comment_by_marker(
             harness.issue_number, "issue", marker
@@ -702,14 +727,14 @@ def test_delete_claim_comment_is_idempotent(harness: TrackerHarness) -> None:
     if _is_live(harness):
         pytest.skip("live side deletes its comments once during teardown")
     found = harness.tracker.find_comment_by_marker(
-        harness.issue_number, "issue", "implement#30/1"
+        harness.issue_number, "issue", claim_marker_for("implement#30/1")
     )
     assert found is not None
     harness.tracker.delete_comment(found.comment_id)
     harness.tracker.delete_comment(found.comment_id)
     assert (
         harness.tracker.find_comment_by_marker(
-            harness.issue_number, "issue", "implement#30/1"
+            harness.issue_number, "issue", claim_marker_for("implement#30/1")
         )
         is None
     )
@@ -721,22 +746,21 @@ def test_review_published_and_found_by_marker(
     """OP-14: the review publishes through the review API and is found by key."""
     if _is_live(harness):
         pytest.skip("live side probes issues only")
-    marker = step_effect_marker(
-        "review#31/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL, kind="claim"
-    )
+    marker = claim_marker_for("review#31/1")
+    body = format_attempt_marker(marker)
     if isinstance(harness.tracker, FakeStepTracker):
         published = harness.tracker.publish_review(
-            harness.pr_number, commit_id="n" * 40, body=marker
+            harness.pr_number, commit_id="n" * 40, body=body, marker=marker
         )
-        found = harness.tracker.find_review_by_marker(harness.pr_number, "review#31/1")
+        found = harness.tracker.find_review_by_marker(harness.pr_number, marker)
         assert found is not None
         assert found.review_id == published.review_id
     else:
         published = harness.tracker.publish_review(
-            harness.pr_number, commit_id="h" * 40, body=marker
+            harness.pr_number, commit_id="h" * 40, body=body, marker=marker
         )
         assert published.review_id == 601
-        found = harness.tracker.find_review_by_marker(harness.pr_number, "review#31/1")
+        found = harness.tracker.find_review_by_marker(harness.pr_number, marker)
         assert found is not None
         assert found.review_id == 601
     if not isinstance(harness.tracker, FakeStepTracker):
@@ -760,11 +784,14 @@ def test_pull_request_opened_and_found_by_marker(
     """OP-14: the pull request opens from the branch and is found by key."""
     if _is_live(harness):
         pytest.skip("live side probes issues only")
-    marker = step_effect_marker(
-        "implement#30/2", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+    marker = AttemptMarker(
+        attempt="implement#30/2",
         kind="open-pull-request",
+        step=CLAIM_STEP,
+        execution_number=CLAIM_EXECUTION,
+        ordinal=CLAIM_COMMENT_ORDINAL,
     )
-    body = f"Closes #{harness.issue_number}\n\na document\n\n{marker}"
+    body = f"Closes #{harness.issue_number}\n\na document\n\n{format_attempt_marker(marker)}"
     if isinstance(harness.tracker, FakeStepTracker):
         opened = harness.tracker.open_pull_request(
             title="a title",
@@ -772,9 +799,10 @@ def test_pull_request_opened_and_found_by_marker(
             base_branch="main",
             body=body,
             draft=False,
+            marker=marker,
         )
         found = harness.tracker.find_pull_request(
-            "agent/implement/30/2-slug", "implement#30/2"
+            "agent/implement/30/2-slug", marker
         )
         assert found is not None
         assert found.number == opened.number
@@ -786,10 +814,11 @@ def test_pull_request_opened_and_found_by_marker(
             base_branch="main",
             body=body,
             draft=False,
+            marker=marker,
         )
         assert opened.number == 101
         found = harness.tracker.find_pull_request(
-            "agent/implement/30/2-slug", "implement#30/2"
+            "agent/implement/30/2-slug", marker
         )
         assert found is not None
         assert found.number == 101
@@ -817,11 +846,14 @@ def test_foreign_marker_pull_request_is_never_ours(
     """OP-14 (§14): a pull request by another account carrying our marker."""
     if _is_live(harness):
         pytest.skip("live side has no foreign marker pull request")
-    marker = step_effect_marker(
-        "implement#30/3", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+    marker = AttemptMarker(
+        attempt="implement#30/3",
         kind="open-pull-request",
+        step=CLAIM_STEP,
+        execution_number=CLAIM_EXECUTION,
+        ordinal=CLAIM_COMMENT_ORDINAL,
     )
-    body = f"Closes #{harness.issue_number}\n\na document\n\n{marker}"
+    body = f"Closes #{harness.issue_number}\n\na document\n\n{format_attempt_marker(marker)}"
     if isinstance(harness.tracker, FakeStepTracker):
         harness.tracker.open_pull_request(
             title="a title",
@@ -829,12 +861,13 @@ def test_foreign_marker_pull_request_is_never_ours(
             base_branch="main",
             body=body,
             draft=False,
+            marker=marker,
         )
         harness.tracker.seed_foreign_marker_pull_request(
-            "agent/implement/30/3-slug", marker
+            "agent/implement/30/3-slug", format_attempt_marker(marker)
         )
         found = harness.tracker.find_pull_request(
-            "agent/implement/30/3-slug", "implement#30/3"
+            "agent/implement/30/3-slug", marker
         )
         assert found is not None
         assert found.author_login == AGENT_LOGIN
@@ -845,11 +878,12 @@ def test_foreign_marker_pull_request_is_never_ours(
             base_branch="main",
             body=body,
             draft=False,
+            marker=marker,
         )
         # The mocked POST mirrors a human copy with the same branch and
         # marker; the lookup must still return the Agent Identity's own.
         found = harness.tracker.find_pull_request(
-            "agent/implement/30/3-slug", "implement#30/3"
+            "agent/implement/30/3-slug", marker
         )
         assert found is not None
         assert found.number == 101
@@ -857,7 +891,14 @@ def test_foreign_marker_pull_request_is_never_ours(
         # The seeded human pull request on its own branch is never ours.
         assert (
             harness.tracker.find_pull_request(
-                "feature-foreign", "implement#9/9"
+                "feature-foreign",
+                AttemptMarker(
+                    attempt="implement#9/9",
+                    kind="open-pull-request",
+                    step=CLAIM_STEP,
+                    execution_number=CLAIM_EXECUTION,
+                    ordinal=CLAIM_COMMENT_ORDINAL,
+                ),
             )
             is None
         )
@@ -873,10 +914,13 @@ def test_post_comment_published_and_found_by_marker(
     key = step_effect_key(
         attempt, CLAIM_STEP, 2, CLAIM_COMMENT_ORDINAL
     )
-    body = claim_comment_body(attempt, key)
-    posted = harness.tracker.post_comment(harness.issue_number, "issue", body)
+    marker = claim_marker_for(attempt)
+    body = claim_comment_body(attempt, key, format_attempt_marker(marker))
+    posted = harness.tracker.post_comment(
+        harness.issue_number, "issue", body, marker
+    )
     found = harness.tracker.find_comment_by_marker(
-        harness.issue_number, "issue", attempt
+        harness.issue_number, "issue", marker
     )
     assert found is not None
     assert found.comment_id == posted.comment_id
@@ -887,7 +931,9 @@ def test_foreign_marker_review_is_never_ours(harness: TrackerHarness) -> None:
     """§14: a review by another account carrying our marker is not our receipt."""
     if _is_live(harness):
         pytest.skip("live side has no foreign marker review")
-    found = harness.tracker.find_review_by_marker(harness.pr_number, "implement#30/1")
+    found = harness.tracker.find_review_by_marker(
+        harness.pr_number, claim_marker_for("implement#30/1")
+    )
     assert found is not None
     assert found.author_login == AGENT_LOGIN
 
@@ -926,22 +972,26 @@ def test_draft_pull_request_carries_the_draft_reference(
     tracker = harness.tracker
     reference = tracker.delivery_reference(str(harness.issue_number), draft=True)
     assert reference == f"Part of #{harness.issue_number}"
-    marker = step_effect_marker(
-        "implement#30/20", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL,
+    marker = AttemptMarker(
+        attempt="implement#30/20",
         kind="open-pull-request",
+        step=CLAIM_STEP,
+        execution_number=CLAIM_EXECUTION,
+        ordinal=CLAIM_COMMENT_ORDINAL,
     )
-    body = f"{reference}\n\na document\n\n{marker}"
+    body = f"{reference}\n\na document\n\n{format_attempt_marker(marker)}"
     opened = tracker.open_pull_request(
         title="a title",
         head_branch="agent/implement/30/20-slug",
         base_branch="main",
         body=body,
         draft=True,
+        marker=marker,
     )
     assert opened.draft is True
     assert reference in opened.body
     found = tracker.find_pull_request(
-        "agent/implement/30/20-slug", "implement#30/20"
+        "agent/implement/30/20-slug", marker
     )
     assert found is not None
     assert found.number == opened.number
@@ -1072,13 +1122,16 @@ def test_live_issue_flow(harness: TrackerHarness) -> None:
     tip = tracker.fetch_base_tip("main")
     assert len(tip) == 40
     tracker.assign_input(harness.issue_number, "issue")
-    marker = step_effect_marker(
-        "implement#99/1", CLAIM_STEP, CLAIM_EXECUTION, CLAIM_COMMENT_ORDINAL, kind="claim"
+    marker = claim_marker_for("implement#99/1")
+    posted = tracker.post_claim_comment(
+        harness.issue_number,
+        "issue",
+        format_attempt_marker(marker),
+        marker,
     )
-    posted = tracker.post_claim_comment(harness.issue_number, "issue", marker)
     try:
         found = tracker.find_comment_by_marker(
-            harness.issue_number, "issue", "implement#99/1"
+            harness.issue_number, "issue", marker
         )
         assert found is not None
         assert found.comment_id == posted.comment_id

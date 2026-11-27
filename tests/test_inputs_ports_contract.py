@@ -36,6 +36,7 @@ from coding_agent.inputs.errors import (
     InputNotFound,
     PermissionRefusal,
 )
+from coding_agent.inputs.claim import claim_marker_for
 from coding_agent.inputs.github import GitHubStepTracker
 from coding_agent.inputs.port import (
     AgentIdentityPort,
@@ -79,6 +80,7 @@ INPUT_PORT_OPS = frozenset(
         "has_open_blocker",
         "assign_input",
         "unassign_input",
+        "format_marker",
         "post_claim_comment",
         "list_comments",
         "find_comment_by_marker",
@@ -147,7 +149,7 @@ def test_agent_identity_port_exposes_only_the_agent_identity() -> None:
 
 
 def test_input_port_exposes_exactly_the_claimable_input_operations() -> None:
-    """INP-1 … INP-13, INP-19, INP-20: ``InputPort`` is exactly its 19 operations."""
+    """INP-1 … INP-13, INP-19, INP-20: ``InputPort`` is exactly its 20 operations."""
     assert _port_ops(InputPort) == INPUT_PORT_OPS
     assert AgentIdentityPort in InputPort.__mro__
 
@@ -341,7 +343,9 @@ def test_adapter_transient_write_failure_is_caught_as_neutral_input_error(
         json={"message": "boom"},
     )
     with pytest.raises(InputError) as exc_info:
-        adapter.post_claim_comment(30, "issue", "a body")
+        adapter.post_claim_comment(
+            30, "issue", "a body", claim_marker_for("implement#30/1")
+        )
     assert exc_info.value.transient is True
     assert exc_info.value.failure_class == "github"
 
@@ -426,6 +430,21 @@ def test_closing_keyword_literal_lives_only_in_the_profile() -> None:
         for path in _python_files()
         if path != _SRC_ROOT / "inputs" / "profile.py"
         and "Closes #" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
+def test_marker_construction_lives_only_in_the_adapter() -> None:
+    """Core never renders marker text: the HTML comment is adapter-owned.
+
+    The bare ``coding-agent attempt=`` fragment in ``inputs/comments.py``
+    is the Claim-time read-back parse, which stays core-owned by design.
+    """
+    offenders = [
+        str(path.relative_to(_SRC_ROOT.parent.parent))
+        for path in _python_files()
+        if path != _SRC_ROOT / "inputs" / "github.py"
+        and "<!-- coding-agent attempt=" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
 

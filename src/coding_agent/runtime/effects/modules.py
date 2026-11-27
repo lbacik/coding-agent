@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.runtime.effects.driver import EffectContext
 
@@ -172,7 +173,7 @@ class EffectModule(Protocol[TargetT]):
         code_host: CodeHostPort,
         ctx: EffectContext,
         target: TargetT,
-        marker: str,
+        marker: AttemptMarker,
     ) -> Any | None:
         """Find our write by Attempt Marker (§14); ``None`` where absent."""
         ...
@@ -194,6 +195,7 @@ class EffectModule(Protocol[TargetT]):
         ctx: EffectContext,
         target: TargetT,
         body: str,
+        marker: AttemptMarker,
     ) -> Any:
         """Perform the write once, body already rendered; the tracker result."""
         ...
@@ -228,7 +230,7 @@ class CommentEffect:
         code_host: CodeHostPort,
         ctx: EffectContext,
         target: CommentTarget,
-        marker: str,
+        marker: AttemptMarker,
     ) -> Any | None:
         """Find our comment by Attempt Marker (§14)."""
         _ = (code_host, target)
@@ -252,10 +254,11 @@ class CommentEffect:
         ctx: EffectContext,
         target: CommentTarget,
         body: str,
+        marker: AttemptMarker,
     ) -> Any:
         """Post one comment on the input, body already rendered (§10.7)."""
         _ = (code_host, target)
-        return inputs.post_comment(ctx.number, ctx.input_type, body)
+        return inputs.post_comment(ctx.number, ctx.input_type, body, marker)
 
     def remote_id(self, result: Any) -> str | None:
         """The comment id the receipt carries (§14.1)."""
@@ -286,7 +289,7 @@ class TerminalCommentEffect:
         code_host: CodeHostPort,
         ctx: EffectContext,
         target: TerminalCommentTarget,
-        marker: str,
+        marker: AttemptMarker,
     ) -> Any | None:
         """Find our terminal comment by Attempt Marker (§14, §15.3)."""
         _ = (code_host, target)
@@ -310,10 +313,11 @@ class TerminalCommentEffect:
         ctx: EffectContext,
         target: TerminalCommentTarget,
         body: str,
+        marker: AttemptMarker,
     ) -> Any:
         """Post the terminal comment, body already rendered (§15.3)."""
         _ = (code_host, target)
-        return inputs.post_comment(ctx.number, ctx.input_type, body)
+        return inputs.post_comment(ctx.number, ctx.input_type, body, marker)
 
     def remote_id(self, result: Any) -> str | None:
         """The comment id the receipt carries (§14.1)."""
@@ -340,7 +344,7 @@ class ReviewEffect:
         code_host: CodeHostPort,
         ctx: EffectContext,
         target: ReviewTarget,
-        marker: str,
+        marker: AttemptMarker,
     ) -> Any | None:
         """Find our review by Attempt Marker (§14)."""
         _ = (inputs, target)
@@ -377,11 +381,12 @@ class ReviewEffect:
         ctx: EffectContext,
         target: ReviewTarget,
         body: str,
+        marker: AttemptMarker,
     ) -> Any:
         """Publish a COMMENT-event review against the recorded head (§10.6)."""
         _ = inputs
         return code_host.publish_review(
-            ctx.number, commit_id=target.commit_id, body=body
+            ctx.number, commit_id=target.commit_id, body=body, marker=marker
         )
 
     def remote_id(self, result: Any) -> str | None:
@@ -410,7 +415,7 @@ class PullRequestEffect:
         code_host: CodeHostPort,
         ctx: EffectContext,
         target: PullRequestTarget,
-        marker: str,
+        marker: AttemptMarker,
     ) -> Any | None:
         """Find our pull request by head branch and Attempt Marker (§14).
 
@@ -438,6 +443,7 @@ class PullRequestEffect:
         ctx: EffectContext,
         target: PullRequestTarget,
         body: str,
+        marker: AttemptMarker,
     ) -> Any:
         """Open one pull request from the recorded branch (§10.5)."""
         _ = (inputs, ctx)
@@ -447,6 +453,7 @@ class PullRequestEffect:
             base_branch=target.base_branch,
             body=body,
             draft=target.draft,
+            marker=marker,
         )
 
     def remote_id(self, result: Any) -> str | None:

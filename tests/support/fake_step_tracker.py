@@ -23,6 +23,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import (
     AgentFacts,
     InputComment,
@@ -78,6 +80,10 @@ class FakeStepTracker:
     def delivery_reference(self, ref: str, *, draft: bool = False) -> str:
         """The pull-request-to-issue link line for issue ``ref``."""
         return self.profile.delivery_reference(ref, draft=draft)
+
+    def format_marker(self, marker: AttemptMarker) -> str:
+        """Render an Attempt Marker the GitHub way (byte-identical)."""
+        return format_attempt_marker(marker)
 
     def _record(self, name: str, *args: object) -> None:
         self.calls.append((name, args))
@@ -195,7 +201,7 @@ class FakeStepTracker:
             )
 
     def post_claim_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         """Post the Claim Comment bearing the Attempt Marker."""
         self._record("post_claim_comment", number, input_type, body)
@@ -221,12 +227,13 @@ class FakeStepTracker:
         return login == self.agent_login
 
     def find_comment_by_marker(
-        self, number: int, input_type: InputType, marker: str
+        self, number: int, input_type: InputType, marker: AttemptMarker
     ) -> InputComment | None:
         """Find our comment by Attempt Marker."""
-        self._record("find_comment_by_marker", number, input_type, marker)
+        rendered = self.format_marker(marker)
+        self._record("find_comment_by_marker", number, input_type, rendered)
         for comment in self.comments:
-            if marker not in comment.body:
+            if rendered not in comment.body:
                 continue
             if not self._author_matches(comment.author_login, comment.author_id):
                 continue
@@ -241,9 +248,10 @@ class FakeStepTracker:
         ]
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         """Post one comment on the input, body already rendered."""
+        _ = marker
         self._record("post_comment", number, input_type, body)
         comment = InputComment(
             comment_id=self._next_comment_id,
@@ -286,9 +294,10 @@ class FakeStepTracker:
         return comment
 
     def publish_review(
-        self, number: int, *, commit_id: str, body: str
+        self, number: int, *, commit_id: str, body: str, marker: AttemptMarker
     ) -> InputReview:
         """Publish a COMMENT-event review against ``commit_id``."""
+        _ = marker
         self._record("publish_review", number, commit_id, body)
         review = InputReview(
             review_id=self._next_review_id,
@@ -307,11 +316,14 @@ class FakeStepTracker:
         self._record("list_reviews", number)
         return list(self.reviews)
 
-    def find_review_by_marker(self, number: int, marker: str) -> InputReview | None:
+    def find_review_by_marker(
+        self, number: int, marker: AttemptMarker
+    ) -> InputReview | None:
         """Find our review by Attempt Marker."""
-        self._record("find_review_by_marker", number, marker)
+        rendered = self.format_marker(marker)
+        self._record("find_review_by_marker", number, rendered)
         for review in self.reviews:
-            if marker not in review.body:
+            if rendered not in review.body:
                 continue
             if not self._author_matches(review.author_login, review.author_id):
                 continue
@@ -326,8 +338,10 @@ class FakeStepTracker:
         base_branch: str,
         body: str,
         draft: bool = False,
+        marker: AttemptMarker,
     ) -> InputPullRequest:
         """Open one pull request from ``head_branch``, body already rendered."""
+        _ = marker
         self._record(
             "open_pull_request", title, head_branch, base_branch, body, draft
         )
@@ -349,15 +363,16 @@ class FakeStepTracker:
         return opened
 
     def find_pull_request(
-        self, head_branch: str, marker: str
+        self, head_branch: str, marker: AttemptMarker
     ) -> InputPullRequest | None:
         """Find our pull request by head branch and Attempt Marker."""
-        self._record("find_pull_request", head_branch, marker)
+        rendered = self.format_marker(marker)
+        self._record("find_pull_request", head_branch, rendered)
         matching: list[InputPullRequest] = []
         for candidate in self.opened_pull_requests:
             if candidate.head_branch != head_branch:
                 continue
-            if marker not in candidate.body:
+            if rendered not in candidate.body:
                 continue
             if not self._author_matches(
                 candidate.author_login, candidate.author_id

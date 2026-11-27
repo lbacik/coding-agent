@@ -23,8 +23,10 @@ from pathlib import Path
 import pytest
 
 from coding_agent.inputs.gates import GateResult
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputComment, InputType, TrackedInput
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.observed_identity import (
     PIN_VIOLATION_DETAIL,
     PIN_VIOLATION_REASON,
@@ -283,10 +285,10 @@ class _OrderingTracker(FakeStepTracker):
         assert self._ledger.get_outcome(self._attempt_id) is not None
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         self._check()
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
     def remove_label(self, number: int, input_type: InputType, label: str) -> None:
         self._check()
@@ -334,12 +336,12 @@ class _CrashTracker(FakeStepTracker):
     crashing: bool = True
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         self._record("post_comment", number, input_type, body)
         if self.crashing:
             raise RuntimeError("crash between the record and the publish")
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
 
 def test_crash_between_record_and_publish_replays_same_bytes(
@@ -448,15 +450,17 @@ def test_refuses_an_attempt_with_an_unsettled_effect_intent(
     tracker = FakeStepTracker()
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
-    marker = step_effect_marker(
-        ATTEMPT, "handoff-comment", 1, 0, kind="post-comment"
+    marker = AttemptMarker(
+        attempt=ATTEMPT, kind="post-comment", step="handoff-comment",
+        execution_number=1, ordinal=0,
     )
+    marker_text = format_attempt_marker(marker)
     ledger.record_step_effect_intent(
         ATTEMPT,
         "handoff-comment",
         1,
         0,
-        rendered_payload=f"post-comment {ATTEMPT}\nmarker {marker}",
+        rendered_payload=f"post-comment {ATTEMPT}\nmarker {marker_text}",
         expected_target={
             "operation": "post-comment",
             "input_number": NUMBER,

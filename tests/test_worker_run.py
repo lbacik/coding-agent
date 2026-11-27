@@ -29,6 +29,7 @@ from coding_agent.inputs.github import StepTrackerError
 from coding_agent.identity.startup import Identity, StartupCheckFailed
 from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim
 from coding_agent.inputs.claim import sweep_and_claim
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.provider.capability import ProviderCapabilityRefused
@@ -1469,7 +1470,7 @@ class _FlakyCommentTracker(FakeStepTracker):
     failures_left: int = 0
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> Any:
         if self.failures_left > 0:
             self.failures_left -= 1
@@ -1481,7 +1482,7 @@ class _FlakyCommentTracker(FakeStepTracker):
                 reason="server-error",
                 failure_class="github",
             )
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
 
 _SeededTrackerT = TypeVar("_SeededTrackerT", bound=FakeStepTracker)
@@ -1614,7 +1615,7 @@ class _TransientTerminalCommentTracker(FakeStepTracker):
     failures_left: int = 0
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> Any:
         if self.failures_left > 0 and "kind=terminal" in body:
             self.failures_left -= 1
@@ -1626,7 +1627,7 @@ class _TransientTerminalCommentTracker(FakeStepTracker):
                 path=f"/repos/o/r/issues/{number}/comments",
                 status_code=503,
             )
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
 
 def test_a_transient_terminal_comment_failure_recovers_on_the_next_cycle(
@@ -1711,7 +1712,7 @@ def test_a_failed_live_terminal_write_does_not_crash_the_worker(
 
     class _RefusingTerminalCommentTracker(FakeStepTracker):
         def post_comment(
-            self, number: int, input_type: InputType, body: str
+            self, number: int, input_type: InputType, body: str, marker: AttemptMarker
         ) -> Any:
             if "kind=terminal" in body:
                 self._record("post_comment", number, input_type, body)
@@ -1719,7 +1720,7 @@ def test_a_failed_live_terminal_write_does_not_crash_the_worker(
                     f"POST /repos/o/r/issues/{number}/comments returned "
                     "422: boom"
                 )
-            return super().post_comment(number, input_type, body)
+            return super().post_comment(number, input_type, body, marker)
 
     tracker = _issue_tracker_with(
         _RefusingTerminalCommentTracker(
@@ -1820,7 +1821,7 @@ def test_a_credential_failure_during_finalisation_halts_leaving_recovery(
 
     class _RevokedTracker(FakeStepTracker):
         def post_comment(
-            self, number: int, input_type: InputType, body: str
+            self, number: int, input_type: InputType, body: str, marker: AttemptMarker
         ) -> Any:
             self._record("post_comment", number, input_type, body)
             raise CredentialFailure("POST", f"/repos/o/r/issues/{number}/comments")

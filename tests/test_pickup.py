@@ -38,6 +38,7 @@ from coding_agent.runtime.round_handoff import (
 )
 from coding_agent.runtime.step_finalisation import render_terminal_comment
 from support.fake_step_tracker import FakeStepTracker
+from support.markers import terminal_marker_text
 
 WORKFLOW = "implement"
 SELECTION_LABEL = "agent:implement"
@@ -75,6 +76,7 @@ def _terminal_body(attempt: str, offer: RoundHandoffOffer | None) -> str:
     return render_terminal_comment(
         attempt_id=attempt,
         outcome="unfinished",
+        marker_text=terminal_marker_text(attempt),
         ending_step="publish",
         step_result="pushed",
         workflow_end="unfinished",
