@@ -23,6 +23,7 @@ code in startup records a Halt or prints the refusal line.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
@@ -50,6 +51,13 @@ from coding_agent.operator.listener import OperatorListener
 from coding_agent.operator.live import LiveView
 from coding_agent.operator.paths import worker_socket_path
 from coding_agent.operator.store import OPERATOR_BACKEND, OperatorStore, agent_version
+from coding_agent.profile.parser import (
+    InvalidProfile,
+    MissingReadinessFacts,
+    UnknownSchema,
+    parse_profile_yaml,
+)
+from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.toolchain import (
     MalformedToolchainMatrix,
     SupportedToolchainMatrix,
@@ -73,6 +81,7 @@ from coding_agent.provider.price_table import PriceTable, TokenPrices
 from coding_agent.runtime.ceilings import LoopCeilings
 from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.redaction import SecretRegistry, install_stream_redaction
+from coding_agent.runtime.step_operations import PROFILE_RELPATH
 from coding_agent.skillbundle.deployment import (
     RunVerificationRefusal,
     VerifiedRunInputs,
@@ -485,6 +494,102 @@ def _emit_startup_event(
         print(f"run: could not emit {event_type} ({exc})", file=sys.stderr)
 
 
+def read_target_repository_profile(
+    *,
+    client: GitHubClient,
+    tracker: StepTrackerPort,
+    owner: str,
+    repo: str,
+    base_branch: str,
+) -> str:
+    """Read the Target Repository's Project Profile at the base tip (§10.2).
+
+    ADR 0037: a Workflow that needs a Validation Contract and names no
+    ``target.profile`` reads ``docs/agents/project-profile.yml`` from the
+    Target Repository at the base-branch tip through GitHub. Parse plus
+    schema only — toolchain and service fit stay in ``check-readiness``,
+    which reports them as ``not-ready``. A missing, unreadable or invalid
+    profile raises :class:`StartupRefused` (phase ``project-profile``)
+    naming the searched path and the revision read.
+    """
+    try:
+        tip = tracker.fetch_base_tip(base_branch)
+    except Exception as exc:
+        raise StartupRefused(
+            "project-profile",
+            f"cannot resolve the base tip of {owner}/{repo}#{base_branch} "
+            f"to read {PROFILE_RELPATH}: {exc}",
+        ) from exc
+    try:
+        response = client.get(
+            f"/repos/{owner}/{repo}/contents/{PROFILE_RELPATH}?ref={tip}"
+        )
+    except requests.RequestException as exc:
+        raise StartupRefused(
+            "project-profile",
+            f"cannot read {PROFILE_RELPATH} at revision {tip} "
+            f"on {owner}/{repo}: {exc}",
+        ) from exc
+    if response.status_code == 404:
+        raise StartupRefused(
+            "project-profile",
+            f"{owner}/{repo} has no {PROFILE_RELPATH} at revision {tip}: "
+            "a Workflow that needs a Validation Contract requires "
+            "target.profile or the repository profile",
+        )
+    if response.status_code != 200:
+        raise StartupRefused(
+            "project-profile",
+            f"cannot read {PROFILE_RELPATH} at revision {tip} "
+            f"on {owner}/{repo}: GET returned {response.status_code}",
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise StartupRefused(
+            "project-profile",
+            f"{PROFILE_RELPATH} at revision {tip} on {owner}/{repo} "
+            f"returned no JSON body: {exc}",
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(
+        payload.get("content"), str
+    ):
+        raise StartupRefused(
+            "project-profile",
+            f"{PROFILE_RELPATH} at revision {tip} on {owner}/{repo} "
+            "is not a readable file",
+        )
+    try:
+        text = base64.b64decode(payload["content"]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise StartupRefused(
+            "project-profile",
+            f"{PROFILE_RELPATH} at revision {tip} on {owner}/{repo} "
+            f"does not decode: {exc}",
+        ) from exc
+    outcome = parse_profile_yaml(text)
+    if isinstance(outcome, ProjectProfile):
+        return text
+    if isinstance(outcome, UnknownSchema):
+        detail = (
+            "declared schema "
+            f"{outcome.declared!r} is not one this image understands"
+        )
+    elif isinstance(outcome, MissingReadinessFacts):
+        detail = "missing Readiness Facts: " + "; ".join(outcome.missing)
+    elif isinstance(outcome, InvalidProfile):
+        detail = outcome.detail
+    else:  # pragma: no cover - the parser's outcome set is closed
+        raise AssertionError(
+            f"unexpected profile outcome {type(outcome).__name__}"
+        )
+    raise StartupRefused(
+        "project-profile",
+        f"{PROFILE_RELPATH} at revision {tip} on {owner}/{repo} "
+        f"is not a valid Validation Contract: {detail}",
+    )
+
+
 def start(
     *,
     config: Path,
@@ -675,7 +780,18 @@ def start(
             check="project-profile",
             result="started",
         )
-        if cfg.target.profile is None:
+        # Where the Workflow needs a Validation Contract and names no
+        # `target.profile`, the repository read is deferred to after
+        # `github-checks`: it needs the GitHub client and the tracker's base
+        # tip (ADR 0037). The started line and event above stand; `ok` (or
+        # the refusal) lands there. A Workflow that needs no Validation
+        # Contract keeps the exact `skipped` line.
+        profile_deferred = (
+            cfg.target.profile is None and selected.needs_validation_contract
+        )
+        if profile_deferred:
+            pass
+        elif cfg.target.profile is None:
             _log_startup_phase_skipped(
                 "project-profile", "profile from Target Repository"
             )
@@ -816,6 +932,23 @@ def start(
                 f"could not resolve the repository owner: {exc}",
             )
         _log_startup_phase_ok("github-checks")
+
+        if profile_deferred:
+            # The deferred Target Repository read: the Workflow needs a
+            # Validation Contract and names no `target.profile`, so the
+            # profile comes from the repository at the base tip (ADR 0037).
+            # Missing, unreadable or invalid content refuses here, naming
+            # the searched path and the revision read; toolchain and
+            # service fit stay in `check-readiness`.
+            live.set_startup_check("project-profile")
+            read_target_repository_profile(
+                client=client,
+                tracker=tracker,
+                owner=owner,
+                repo=repo,
+                base_branch=cfg.target.base_branch,
+            )
+            _log_startup_phase_ok("project-profile")
 
         # Step 5: the Provider Capability Assertion for every distinct pin
         # the selected Workflow references, in that order — the Workflow's
@@ -1177,6 +1310,7 @@ __all__ = [
     "configured_pin",
     "credential_env_vars",
     "github_tracker",
+    "read_target_repository_profile",
     "referenced_model_decls",
     "start",
 ]

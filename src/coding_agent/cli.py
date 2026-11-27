@@ -931,6 +931,22 @@ def run_config_validate_command(config: Path, workflow: str | None = None) -> in
                 print(f"config validate: FAILED: {exc}", file=sys.stderr)
                 return 1
     cfg = loaded.config
+    if loaded.config.target.profile is None:
+        # ADR 0037: a Workflow that needs a Validation Contract reads it
+        # from the Target Repository at startup. Never a refusal: the
+        # repository is not contacted here.
+        if workflow is not None:
+            candidates = (
+                [cfg.workflows[workflow]] if workflow in cfg.workflows else []
+            )
+        else:
+            candidates = list(cfg.workflows.values())
+        if any(candidate.needs_validation_contract for candidate in candidates):
+            print(
+                "config validate: NOTICE: no target.profile: the Validation "
+                "Contract will be read from the Target Repository's "
+                "docs/agents/project-profile.yml at startup",
+            )
     if workflow is not None:
         if workflow not in cfg.workflows:
             # The loader already faults unknown workflows; this is a safety net.

@@ -281,8 +281,24 @@ Attempt's preflight. Where no matrix can be resolved the toolchain check
 is skipped with a notice and validation still exits 0. At `run` startup
 the `project-profile` phase repeats the parse and the toolchain
 assertion after the `toolchain-matrix` phase; any failure is a Startup
-Refusal naming the phase, while a configuration without `target.profile`
-logs `skipped (profile from Target Repository)`. The profile bytes join
+Refusal naming the phase. Where `target.profile` is absent the behaviour
+depends on whether the selected Workflow needs a Validation Contract
+(ADR 0037): a Workflow needs one iff any `agent` step declares the
+`tests` tool group or any operation step is `check-readiness` or
+`run-validation` — nothing else (`shell`, `subagents`, `advisor`,
+`commit-and-push`, `update-from-base` and the publishing operations bind
+against no contract). A Workflow that needs one reads the Target
+Repository's `docs/agents/project-profile.yml` at the base-branch tip
+after the `github-checks` phase; a missing, unreadable, unparsable or
+schema-violating repository profile is a Startup Refusal naming the
+searched path and the revision read. Toolchain and service reachability
+are never part of this read: they stay in `check-readiness`, which
+reports them as `not-ready`. A Workflow that needs none logs
+`skipped (profile from Target Repository)` and runs without a profile.
+Where `target.profile` is absent and the Workflow needs a contract,
+`agent config validate` prints a notice that the profile will be read
+from the Target Repository at startup; it is never a refusal. The
+profile bytes join
 the Claim's content-addressed blobs and the Effective Configuration
 record as `project_profile: {locator, sha256, size_bytes}` (record
 `version: 2` is unchanged), so the Attempt Archive pins the contract
