@@ -18,8 +18,9 @@ rendered body is recorded with its Effect Intent).
 
 Slice S7b of ``docs/plan/step-workflow-implementation-plan.md``. Reuses the
 renderers and the Attempt Marker in ``runtime/publication.py``, the
-``ValidationRegistry``/``Gate``/``CommitPushGitOps`` seams in
-``runtime/step_operations.py`` and the tracker port in ``inputs/port.py``.
+``ValidationRegistry``/``Gate``/``AttemptWorkspaceGit`` seams in
+``runtime/step_operations.py`` and ``runtime/workspace_git.py``,
+and the tracker port in ``inputs/port.py``.
 Additive: until the S10 cutover the released Worker keeps running the MVP
 runtime and nothing here is reachable from ``agent run``; the compiled
 Workflow graph calls these executors only when a run injects a
@@ -63,7 +64,6 @@ from coding_agent.runtime.effects.registry import (
     STEP_EFFECT_OPERATIONS,
 )
 from coding_agent.runtime.step_operations import (
-    CommitPushGitOps,
     GateChecker,
     GateFailed,
     LocalOperationRunner,
@@ -71,6 +71,7 @@ from coding_agent.runtime.step_operations import (
     ValidationRegistry,
     tree_identity,
 )
+from coding_agent.runtime.workspace_git import AttemptWorkspaceGit
 from coding_agent.workflow.schema import WorkflowStep
 
 PUBLISHING_OPERATIONS = STEP_EFFECT_OPERATIONS
@@ -404,7 +405,7 @@ def _check_gate(
 
 def run_open_pull_request(
     *,
-    workspace: Path,
+    git: AttemptWorkspaceGit,
     attempt_id: str,
     workflow_id: str,
     input_number: int,
@@ -420,7 +421,6 @@ def run_open_pull_request(
     tree_id: str | None = None,
     gate: GateChecker | None = None,
     claim_active: bool = True,
-    git: CommitPushGitOps,
     tracker: StepTrackerPort,
     ledger: RunLedger | None = None,
     step_id: str = "open-pull-request",
@@ -438,7 +438,7 @@ def run_open_pull_request(
     Every attempted write records its Effect Intent before the write and its
     Receipt — or its ``not-performed`` settlement — after it (§14.1).
     """
-    tree = tree_id if tree_id is not None else tree_identity(workspace)
+    tree = tree_id if tree_id is not None else tree_identity(git.workspace)
     registry = validation_registry if validation_registry is not None else ValidationRegistry()
     if with_requires and not registry.holds(with_requires, tree):
         return OpenPullRequestOutcome(
@@ -472,7 +472,7 @@ def run_open_pull_request(
             detail=f"error: {exc}",
         )
     try:
-        clean = git.is_clean(workspace)
+        clean = git.is_clean()
     except Exception as exc:
         return OpenPullRequestOutcome(
             result="error",
@@ -492,7 +492,7 @@ def run_open_pull_request(
             detail="error: the working tree is dirty; the pull request needs a pushed revision",
         )
     try:
-        revision = git.head_sha(workspace)
+        revision = git.head_sha()
     except Exception as exc:
         return OpenPullRequestOutcome(
             result="error",
@@ -1004,7 +1004,7 @@ class PublishingOperationRunner:
     ) -> OperationExecution:
         """Run one ``open-pull-request`` step through its S7b executor."""
         outcome = run_open_pull_request(
-            workspace=self.local.workspace,
+            git=self.local.git,
             attempt_id=attempt_id,
             workflow_id=self.workflow_id,
             input_number=self.local.input_number,
@@ -1019,7 +1019,6 @@ class PublishingOperationRunner:
             validation_registry=self.local.validation_registry,
             gate=self.local.gate,
             claim_active=self.claim_active,
-            git=self.local._git_ops(),
             tracker=self.tracker,
             ledger=ledger,
             step_id=step.id,
@@ -1049,7 +1048,7 @@ class PublishingOperationRunner:
     ) -> OperationExecution:
         """Run one ``publish-review`` step through its S7b executor."""
         review_outcome = run_publish_review(
-            workspace=self.local.workspace,
+            workspace=self.local.git.workspace,
             attempt_id=attempt_id,
             workflow_id=self.workflow_id,
             input_number=self.local.input_number,
@@ -1087,7 +1086,7 @@ class PublishingOperationRunner:
     ) -> OperationExecution:
         """Run one ``post-comment`` step through its S7b executor."""
         comment_outcome = run_post_comment(
-            workspace=self.local.workspace,
+            workspace=self.local.git.workspace,
             attempt_id=attempt_id,
             workflow_id=self.workflow_id,
             input_number=self.local.input_number,

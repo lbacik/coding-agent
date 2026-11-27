@@ -75,11 +75,11 @@ from coding_agent.runtime.step_recovery import (
     finalise_shutdown,
 )
 from coding_agent.runtime.step_operations import (
-    LiveCommitPushGitOps,
     LocalOperationRunner,
     ProfileUnavailable,
     tree_identity,
 )
+from coding_agent.runtime.workspace_git import AttemptWorkspaceGit, GitHubRemote
 from coding_agent.runtime.step_publication import (
     DocumentResolutionError,
     PublishingOperationRunner,
@@ -390,16 +390,22 @@ def run_attempt(
         pinned_override_text = pinned_profile_text(
             ready.ledger, claimed.attempt_id
         )
+        workspace_git = AttemptWorkspaceGit(
+            workspace.path,
+            author_name,
+            author_email,
+            GitHubRemote(
+                workspace.path, canonical_remote, helper=helper, redact=registry
+            ),
+        )
         local_runner = LocalOperationRunner(
-            workspace=workspace.path,
+            git=workspace_git,
             start_commit=start_commit,
             matrix=ready.matrix,
             service_env={},
             prober=SocketServiceProber(),
             runner=ready.command_runner,
             evidence_dir=evidence_dir,
-            author_name=author_name,
-            author_email=author_email,
             attempt_branch=working_branch,
             input_type=str(pin_facts.input_type),
             head_branch=pin_facts.head_branch,
@@ -408,12 +414,6 @@ def run_attempt(
             if pin_facts.input_type == "pull-request"
             else None,
             input_number=claimed.input_number,
-            git=LiveCommitPushGitOps(
-                canonical_remote, helper=helper, redact=registry
-            ),
-            remote_url=canonical_remote,
-            helper=helper,
-            redact=registry,
             profile_text_override=pinned_override_text,
         )
         profile, profile_detail = local_runner.pin_validation_contract()

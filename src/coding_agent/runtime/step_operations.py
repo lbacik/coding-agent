@@ -58,26 +58,10 @@ from coding_agent.profile.toolchain import SupportedToolchainMatrix
 from coding_agent.runtime.footprint import collect_dirty_digests
 from coding_agent.runtime.git import (
     GitFailure,
-    clear_merge_state,
-    commit_tree_sha,
-    create_commit_with_parents,
-    diff_names_between,
-    fetch_revision,
     head_revision,
-    is_ancestor,
-    merge_tip_no_commit,
-    object_exists,
-    push_branch,
-    push_ref,
-    read_blob_at_revision,
     read_file_at_revision,
-    remote_ref_sha,
-    tree_touches_workflows_path,
-    unmerged_paths,
-    update_branch_ref,
-    write_staged_tree,
 )
-from coding_agent.runtime.redaction import GitCredentialHelper, Redactable
+from coding_agent.runtime.workspace_git import AttemptWorkspaceGit
 from coding_agent.validate.harness import CommandContext, run_validation_contract
 from coding_agent.validate.results import RawCommandResult, classify
 from coding_agent.validate.runner import CommandRunner
@@ -528,228 +512,6 @@ GateChecker = Callable[[], GateResult]
 """Re-read the input and answer the Gate before a write (§7.3, §10.1)."""
 
 
-class CommitPushGitOps(Protocol):
-    """The git surface ``run_commit_and_push`` needs, injectable for tests.
-
-    Commits are built with explicit parents (``commit-and-push`` and
-    ``update-from-base``, §10.4, §10.8): merge state left by ``shell`` is
-    cleared and never becomes a parent.
-    """
-
-    def is_clean(self, workspace: Path) -> bool: ...
-    def touches_workflows(self, workspace: Path) -> bool: ...
-    def head_sha(self, workspace: Path) -> str: ...
-    def stage_all(self, workspace: Path) -> None: ...
-    def clear_merge_state(self, workspace: Path) -> None: ...
-    def write_tree(self, workspace: Path) -> str: ...
-    def create_commit(
-        self,
-        workspace: Path,
-        tree: str,
-        parents: list[str],
-        message: str,
-        author_name: str,
-        author_email: str,
-    ) -> str: ...
-    def move_branch(self, workspace: Path, branch: str, sha: str) -> None: ...
-    def advance_head(self, workspace: Path, sha: str) -> None: ...
-    def commit_tree(self, workspace: Path, revision: str) -> str: ...
-    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]: ...
-    def read_blob(self, workspace: Path, revision: str, path: str) -> bytes | None: ...
-    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None: ...
-    def object_exists(self, workspace: Path, revision: str) -> bool: ...
-    def fetch_revision(self, workspace: Path, revision: str) -> None: ...
-    def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool: ...
-    def merge_tip(
-        self,
-        workspace: Path,
-        tip: str,
-        *,
-        author_name: str,
-        author_email: str,
-    ) -> int: ...
-    def unmerged_paths(self, workspace: Path) -> list[str]: ...
-    def remote_sha(self, branch: str) -> str | None: ...
-    def push_issue_branch(self, workspace: Path, branch: str) -> None: ...
-    def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None: ...
-
-
-class LiveCommitPushGitOps:
-    """The production :class:`CommitPushGitOps`: ``runtime/git.py`` helpers.
-
-    Every push is fast-forward only — ``push_branch`` and ``push_ref`` never
-    pass ``--force``, ``--force-with-lease`` or a delete flag — and the
-    credential rides on a helper, never in the remote URL (§10.4, §18).
-    The Attempt's helper and redaction registry arrive here from the
-    supervisor; every remote-touching call forwards them.
-    """
-
-    def __init__(
-        self,
-        remote_url: str,
-        helper: GitCredentialHelper | None = None,
-        redact: Redactable = None,
-    ) -> None:
-        self._remote_url = remote_url
-        self._helper = helper
-        self._redact = redact
-
-    def is_clean(self, workspace: Path) -> bool:
-        completed = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            return False
-        return not completed.stdout.strip()
-
-    def touches_workflows(self, workspace: Path) -> bool:
-        return tree_touches_workflows_path(workspace)
-
-    def head_sha(self, workspace: Path) -> str:
-        return head_revision(workspace)
-
-    def stage_all(self, workspace: Path) -> None:
-        completed = subprocess.run(
-            ["git", "add", "-A"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            raise GitFailure(f"'git add -A' failed: {(completed.stderr or completed.stdout).strip()}")
-
-    def clear_merge_state(self, workspace: Path) -> None:
-        clear_merge_state(workspace)
-
-    def write_tree(self, workspace: Path) -> str:
-        return write_staged_tree(workspace)
-
-    def create_commit(
-        self,
-        workspace: Path,
-        tree: str,
-        parents: list[str],
-        message: str,
-        author_name: str,
-        author_email: str,
-    ) -> str:
-        revision = create_commit_with_parents(
-            workspace,
-            tree,
-            parents,
-            message,
-            author_name=author_name,
-            author_email=author_email,
-        )
-        return revision
-
-    def move_branch(self, workspace: Path, branch: str, sha: str) -> None:
-        update_branch_ref(workspace, branch, sha)
-
-    def advance_head(self, workspace: Path, sha: str) -> None:
-        from coding_agent.runtime.git import restore_detached_head as _restore
-        from coding_agent.runtime.git import head_branch as _head_branch
-
-        if _head_branch(workspace) is None:
-            _restore(workspace, sha=sha)
-            return
-        completed = subprocess.run(
-            ["git", "update-ref", "HEAD", sha],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            raise GitFailure(
-                f"'git update-ref HEAD {sha}' failed: "
-                f"{(completed.stderr or completed.stdout).strip()}"
-            )
-
-    def commit_tree(self, workspace: Path, revision: str) -> str:
-        return commit_tree_sha(workspace, revision)
-
-    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]:
-        return diff_names_between(workspace, old, new)
-
-    def read_blob(self, workspace: Path, revision: str, path: str) -> bytes | None:
-        return read_blob_at_revision(workspace, revision, path)
-
-    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None:
-        result = subprocess.run(
-            ["git", "show", f":{path}"],
-            cwd=workspace,
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            return None
-        return result.stdout
-
-    def object_exists(self, workspace: Path, revision: str) -> bool:
-        return object_exists(workspace, revision)
-
-    def fetch_revision(self, workspace: Path, revision: str) -> None:
-        fetch_revision(
-            workspace,
-            self._remote_url,
-            revision,
-            redact=self._redact,
-            helper=self._helper,
-        )
-
-    def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool:
-        from coding_agent.runtime.git import is_ancestor as _is_ancestor
-
-        return _is_ancestor(workspace, ancestor, descendant)
-
-    def merge_tip(
-        self,
-        workspace: Path,
-        tip: str,
-        *,
-        author_name: str,
-        author_email: str,
-    ) -> int:
-        return merge_tip_no_commit(
-            workspace, tip, author_name=author_name, author_email=author_email
-        )
-
-    def unmerged_paths(self, workspace: Path) -> list[str]:
-        return unmerged_paths(workspace)
-
-    def remote_sha(self, branch: str) -> str | None:
-        return remote_ref_sha(
-            self._remote_url, branch, redact=self._redact, helper=self._helper
-        )
-
-    def push_issue_branch(self, workspace: Path, branch: str) -> None:
-        from coding_agent.runtime.git import attempt_branch_sha as _branch_sha
-
-        local_sha = _branch_sha(workspace, branch)
-        if local_sha is None:
-            local_sha = head_revision(workspace)
-        push_ref(
-            workspace,
-            self._remote_url,
-            local_sha,
-            branch,
-            redact=self._redact,
-            helper=self._helper,
-        )
-
-    def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None:
-        push_ref(
-            workspace,
-            self._remote_url,
-            local_sha,
-            branch,
-            redact=self._redact,
-            helper=self._helper,
-        )
-
-
 @dataclass(frozen=True)
 class CommitPushOutcome:
     """One ``commit-and-push`` Step Execution's end (§10.4)."""
@@ -771,19 +533,19 @@ def _is_workflows_path(path: str) -> bool:
 
 
 def _unresolved_conflict_paths(
-    git: CommitPushGitOps, workspace: Path, conflicted_paths: tuple[str, ...] | list[str]
+    git: AttemptWorkspaceGit, conflicted_paths: tuple[str, ...] | list[str]
 ) -> list[str]:
     """Conflicted paths whose staged content still carries markers (§10.8)."""
     marked: list[str] = []
     for path in conflicted_paths:
-        content = git.read_staged_blob(workspace, path)
+        content = git.read_staged_blob(path)
         if content is not None and has_conflict_marker(content):
             marked.append(path)
     return marked
 
 
 def _workflows_violation_paths(
-    git: CommitPushGitOps, workspace: Path, revision: str, parents: list[str]
+    git: AttemptWorkspaceGit, revision: str, parents: list[str]
 ) -> list[str]:
     """Paths under ``.github/workflows/`` not taken verbatim from a parent (§10.4).
 
@@ -796,19 +558,19 @@ def _workflows_violation_paths(
     """
     changed: set[str] = set()
     for parent in parents:
-        changed.update(git.diff_names(workspace, parent, revision))
+        changed.update(git.diff_names(parent, revision))
     violating: list[str] = []
     for path in sorted(changed):
         if not _is_workflows_path(path):
             continue
         try:
-            new_blob = git.read_blob(workspace, revision, path)
+            new_blob = git.read_blob(revision, path)
         except Exception:
             new_blob = None
         allowed = False
         for parent in parents:
             try:
-                parent_blob = git.read_blob(workspace, parent, path)
+                parent_blob = git.read_blob(parent, path)
             except Exception:
                 continue
             if parent_blob == new_blob:
@@ -831,19 +593,16 @@ def commit_message_for_attempt(attempt_id: str, summary: str | None = None) -> s
 
 def run_commit_and_push(
     *,
-    workspace: Path,
+    git: AttemptWorkspaceGit,
     attempt_id: str,
     input_type: str,
     branch: str,
     expected_head: str | None,
-    author_name: str,
-    author_email: str,
     start_commit: str,
     with_requires: tuple[tuple[str, str], ...] = (),
     validation_registry: ValidationRegistry | None = None,
     tree_id: str | None = None,
     gate: GateChecker | None = None,
-    git: CommitPushGitOps,
     ledger: RunLedger | None = None,
     step_id: str = "commit-and-push",
     seq: int = 1,
@@ -885,7 +644,7 @@ def run_commit_and_push(
     was made from. The facts carry the link: ``tree_id`` is the pre-commit
     identity, ``revision`` the new commit.
     """
-    tree = tree_id if tree_id is not None else tree_identity(workspace)
+    tree = tree_id if tree_id is not None else tree_identity(git.workspace)
     registry = validation_registry if validation_registry is not None else ValidationRegistry()
     if with_requires and not registry.holds(with_requires, tree):
         return CommitPushOutcome(
@@ -933,7 +692,7 @@ def run_commit_and_push(
     # Merge state left by `shell` is ignored and cleared before anything
     # else: it never becomes a commit parent (§10.4).
     try:
-        git.clear_merge_state(workspace)
+        git.clear_merge_state()
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
@@ -955,7 +714,7 @@ def run_commit_and_push(
             )
 
     try:
-        clean = git.is_clean(workspace)
+        clean = git.is_clean()
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
@@ -966,7 +725,7 @@ def run_commit_and_push(
 
     if clean:
         try:
-            current = git.head_sha(workspace)
+            current = git.head_sha()
         except Exception as exc:
             return CommitPushOutcome(
                 result="error",
@@ -1010,7 +769,7 @@ def run_commit_and_push(
                 {"operation": "commit-and-push", "branch": branch, "revision": current},
             )
             try:
-                git.push_issue_branch(workspace, branch)
+                git.push_issue_branch(branch)
             except Exception as exc:
                 _not_performed(f"error: {exc}")
                 return CommitPushOutcome(
@@ -1052,7 +811,7 @@ def run_commit_and_push(
             },
         )
         try:
-            git.push_ref(workspace, current, branch)
+            git.push_ref(current, branch)
         except Exception as exc:
             try:
                 moved = git.remote_sha(branch)
@@ -1092,7 +851,7 @@ def run_commit_and_push(
     # governs (§10.4).
     if pending is None:
         try:
-            if git.touches_workflows(workspace):
+            if git.touches_workflows():
                 return CommitPushOutcome(
                     result="error",
                     revision=None,
@@ -1107,7 +866,7 @@ def run_commit_and_push(
                 detail=f"error: could not inspect the working tree: {exc!r}",
             )
     try:
-        head_before = git.head_sha(workspace)
+        head_before = git.head_sha()
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
@@ -1142,7 +901,7 @@ def run_commit_and_push(
                 detail="stale-head: the remote head differs from the Input Head",
             )
     try:
-        git.stage_all(workspace)
+        git.stage_all()
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
@@ -1152,7 +911,7 @@ def run_commit_and_push(
         )
     if pending is not None:
         try:
-            marked = _unresolved_conflict_paths(git, workspace, pending.conflicted_paths)
+            marked = _unresolved_conflict_paths(git, pending.conflicted_paths)
         except Exception as exc:
             return CommitPushOutcome(
                 result="error",
@@ -1172,17 +931,14 @@ def run_commit_and_push(
             )
     parents = [head_before] if pending is None else [head_before, pending.base_tip]
     try:
-        staged_tree = git.write_tree(workspace)
+        staged_tree = git.write_tree()
         revision = git.create_commit(
-            workspace,
             staged_tree,
             parents,
             commit_message_for_attempt(attempt_id, commit_summary),
-            author_name,
-            author_email,
         )
-        git.move_branch(workspace, branch, revision)
-        git.advance_head(workspace, revision)
+        git.move_branch(branch, revision)
+        git.advance_head(revision)
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
@@ -1203,8 +959,8 @@ def run_commit_and_push(
     registry.inherit_result(tree, revision)
     if pending is not None:
         try:
-            new_tree = git.commit_tree(workspace, revision)
-            changed = git.diff_names(workspace, pending.auto_tree, new_tree)
+            new_tree = git.commit_tree(revision)
+            changed = git.diff_names(pending.auto_tree, new_tree)
         except Exception as exc:
             return CommitPushOutcome(
                 result="error",
@@ -1225,7 +981,7 @@ def run_commit_and_push(
                 ),
             )
     try:
-        violating = _workflows_violation_paths(git, workspace, revision, parents)
+        violating = _workflows_violation_paths(git, revision, parents)
     except Exception as exc:
         return CommitPushOutcome(
             result="error",
@@ -1249,7 +1005,7 @@ def run_commit_and_push(
             {"operation": "commit-and-push", "branch": branch, "revision": revision},
         )
         try:
-            git.push_issue_branch(workspace, branch)
+            git.push_issue_branch(branch)
         except Exception as exc:
             try:
                 moved = git.remote_sha(branch)
@@ -1287,7 +1043,7 @@ def run_commit_and_push(
         },
     )
     try:
-        git.push_ref(workspace, revision, branch)
+        git.push_ref(revision, branch)
     except Exception as exc:
         try:
             moved = git.remote_sha(branch)
@@ -1337,13 +1093,10 @@ class UpdateFromBaseOutcome:
 
 def run_update_from_base(
     *,
-    workspace: Path,
+    git: AttemptWorkspaceGit,
     attempt_id: str,
     input_type: str,
     base_tip: str | None,
-    author_name: str,
-    author_email: str,
-    git: CommitPushGitOps,
     ledger: RunLedger | None = None,
     step_id: str = "update-from-base",
     seq: int = 1,
@@ -1398,7 +1151,7 @@ def run_update_from_base(
                 detail="error: merge already pending; commit-and-push must consume it first",
             )
     try:
-        head = git.head_sha(workspace)
+        head = git.head_sha()
     except Exception as exc:
         return UpdateFromBaseOutcome(
             result="error",
@@ -1407,7 +1160,7 @@ def run_update_from_base(
             detail=f"error: could not read HEAD: {exc!r}",
         )
     try:
-        present = git.object_exists(workspace, base_tip)
+        present = git.object_exists(base_tip)
     except Exception as exc:
         return UpdateFromBaseOutcome(
             result="error",
@@ -1417,7 +1170,7 @@ def run_update_from_base(
         )
     if not present:
         try:
-            git.fetch_revision(workspace, base_tip)
+            git.fetch_revision(base_tip)
         except Exception as exc:
             return UpdateFromBaseOutcome(
                 result="error",
@@ -1426,7 +1179,7 @@ def run_update_from_base(
                 detail=f"error: could not fetch the Base Tip: {exc}",
             )
         try:
-            present = git.object_exists(workspace, base_tip)
+            present = git.object_exists(base_tip)
         except Exception as exc:
             return UpdateFromBaseOutcome(
                 result="error",
@@ -1442,7 +1195,7 @@ def run_update_from_base(
                 detail="error: the Base Tip is not available in the workspace",
             )
     try:
-        if git.is_ancestor(workspace, base_tip, head):
+        if git.is_ancestor(base_tip, head):
             return UpdateFromBaseOutcome(
                 result="up-to-date",
                 base_tip=base_tip,
@@ -1457,9 +1210,7 @@ def run_update_from_base(
             detail=f"error: could not compare the Base Tip with HEAD: {exc!r}",
         )
     try:
-        git.merge_tip(
-            workspace, base_tip, author_name=author_name, author_email=author_email
-        )
+        git.merge_tip(base_tip)
     except Exception as exc:
         return UpdateFromBaseOutcome(
             result="error",
@@ -1468,7 +1219,7 @@ def run_update_from_base(
             detail=f"error: the merge failed: {exc}",
         )
     try:
-        conflicted = git.unmerged_paths(workspace)
+        conflicted = git.unmerged_paths()
     except Exception as exc:
         return UpdateFromBaseOutcome(
             result="error",
@@ -1477,9 +1228,9 @@ def run_update_from_base(
             detail=f"error: could not read the merge outcome: {exc!r}",
         )
     try:
-        git.stage_all(workspace)
-        auto_tree = git.write_tree(workspace)
-        git.clear_merge_state(workspace)
+        git.stage_all()
+        auto_tree = git.write_tree()
+        git.clear_merge_state()
     except Exception as exc:
         return UpdateFromBaseOutcome(
             result="error",
@@ -1564,15 +1315,13 @@ class LocalOperationRunner:
     ``update-from-base`` merges (§10.8).
     """
 
-    workspace: Path
+    git: AttemptWorkspaceGit
     start_commit: str
     matrix: SupportedToolchainMatrix
     service_env: Mapping[str, str]
     prober: ServiceProber
     runner: CommandRunner
     evidence_dir: Path
-    author_name: str
-    author_email: str
     attempt_branch: str
     input_type: str
     head_branch: str | None = None
@@ -1580,10 +1329,6 @@ class LocalOperationRunner:
     base_tip: str | None = None
     input_number: int = 0
     gate: GateChecker | None = None
-    git: CommitPushGitOps | None = None
-    remote_url: str | None = None
-    helper: GitCredentialHelper | None = None
-    redact: Redactable = None
     profile_text_override: str | None = None
     _profile: ProjectProfile | None = field(default=None, init=False, repr=False)
     _profile_loaded: bool = field(default=False, init=False, repr=False)
@@ -1595,7 +1340,7 @@ class LocalOperationRunner:
         text = self.profile_text_override
         if text is None:
             try:
-                text = read_profile_at_commit(self.workspace, self.start_commit)
+                text = read_profile_at_commit(self.git.workspace, self.start_commit)
             except GitFailure:
                 text = None
             sources = (f"{self.start_commit}:{PROFILE_RELPATH}",)
@@ -1653,15 +1398,6 @@ class LocalOperationRunner:
         profile, _ = self.pin_validation_contract()
         return profile
 
-    def _git_ops(self) -> CommitPushGitOps:
-        if self.git is not None:
-            return self.git
-        if self.remote_url is None:
-            raise ValueError("LocalOperationRunner needs `git` or `remote_url`")
-        return LiveCommitPushGitOps(
-            self.remote_url, helper=self.helper, redact=self.redact
-        )
-
     def run(
         self,
         step: WorkflowStep,
@@ -1674,14 +1410,15 @@ class LocalOperationRunner:
             f"LocalOperationRunner cannot run {step.operation!r}"
         )
         if step.operation == "check-readiness":
+            workspace = self.git.workspace
             text = self.profile_text_override
             if text is None:
                 try:
-                    text = read_profile_at_commit(self.workspace, self.start_commit)
+                    text = read_profile_at_commit(workspace, self.start_commit)
                 except GitFailure:
                     text = None
                 outcome = run_check_readiness(
-                    workspace=self.workspace,
+                    workspace=workspace,
                     profile_text=text,
                     matrix=self.matrix,
                     service_env=self.service_env,
@@ -1692,13 +1429,13 @@ class LocalOperationRunner:
             else:
                 try:
                     ignored = (
-                        read_profile_at_commit(self.workspace, self.start_commit)
+                        read_profile_at_commit(workspace, self.start_commit)
                         is not None
                     )
                 except GitFailure:
                     ignored = False
                 outcome = run_check_readiness(
-                    workspace=self.workspace,
+                    workspace=workspace,
                     profile_text=text,
                     matrix=self.matrix,
                     service_env=self.service_env,
@@ -1727,7 +1464,7 @@ class LocalOperationRunner:
                     facts={"error": "no pinned Validation Contract for this Attempt"},
                 )
             validation = run_run_validation(
-                workspace=self.workspace,
+                workspace=self.git.workspace,
                 profile=profile,
                 runner=self.runner,
                 evidence_dir=self.evidence_dir,
@@ -1742,13 +1479,10 @@ class LocalOperationRunner:
             )
         if step.operation == "update-from-base":
             outcome_base = run_update_from_base(
-                workspace=self.workspace,
+                git=self.git,
                 attempt_id=attempt_id,
                 input_type=self.input_type,
                 base_tip=self.base_tip,
-                author_name=self.author_name,
-                author_email=self.author_email,
-                git=self._git_ops(),
                 ledger=ledger,
                 step_id=step.id,
                 seq=seq,
@@ -1764,18 +1498,15 @@ class LocalOperationRunner:
         assert step.operation == "commit-and-push"
         branch = self.head_branch if self.input_type == "pull-request" else self.attempt_branch
         outcome_push = run_commit_and_push(
-            workspace=self.workspace,
+            git=self.git,
             attempt_id=attempt_id,
             input_type=self.input_type,
             branch=branch or self.attempt_branch,
             expected_head=self.expected_head,
-            author_name=self.author_name,
-            author_email=self.author_email,
             start_commit=self.start_commit,
             with_requires=step.with_requires,
             validation_registry=self.validation_registry,
             gate=self.gate,
-            git=self._git_ops(),
             ledger=ledger,
             step_id=step.id,
             seq=seq,

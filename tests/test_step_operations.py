@@ -34,7 +34,6 @@ from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from support.scripted_executor import ScriptedStepExecutor
 from coding_agent.runtime.step_operations import (
-    CommitPushGitOps,
     CommitPushOutcome,
     GateChecker,
     GateFailed,
@@ -47,6 +46,11 @@ from coding_agent.runtime.step_operations import (
     run_commit_and_push,
     run_run_validation,
     tree_identity,
+)
+from coding_agent.runtime.workspace_git import (
+    AttemptWorkspaceGit,
+    BareRepoRemote,
+    GitRemote,
 )
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
 from coding_agent.workflow.schema import AttemptCeiling, InputDecl, RouteTarget, WorkflowStep, Workflow
