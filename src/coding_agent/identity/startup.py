@@ -9,6 +9,7 @@ from coding_agent.identity.token import (
     assert_fine_grained_token,
     assert_no_oauth_scopes,
 )
+from coding_agent.inputs import github as github_adapter
 
 
 class StartupHttp(Protocol):
@@ -100,7 +101,7 @@ def run_startup_checks_for_token(
     credential and the Target Repository coordinates, never a client.
     """
     return run_startup_checks(
-        GitHubClient(token),
+        github_adapter.make_probe_transport(token),
         token,
         owner,
         repo,
