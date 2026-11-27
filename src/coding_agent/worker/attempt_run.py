@@ -29,10 +29,6 @@ from coding_agent.provider.price_table import TokenPrices
 from coding_agent.runtime.conversation_context import ContextWindowConfig
 from coding_agent.runtime.git import (
     GitFailure,
-    checkout_branch_at,
-    checkout_workspace,
-    ensure_mirror,
-    fetch_revision,
     head_revision,
     is_ancestor,
     remote_ref_sha,
@@ -60,6 +56,7 @@ from coding_agent.runtime.round_handoff import (
     hard_handoff_note,
     truncate_note,
 )
+from coding_agent.runtime.target_mirror import TargetMirror
 from coding_agent.runtime.shutdown import shutdown_grace_deadline
 from coding_agent.runtime.step_finalisation import (
     AttemptDecision,
@@ -279,17 +276,12 @@ def run_attempt(
     pin_facts = claimed.pin
     canonical_remote = ready.canonical_remote
     registry = ready.registry
+    mirror = TargetMirror(
+        ready.mirror_dir, canonical_remote, ready.token, registry
+    )
     with temporary_git_credential_helper(ready.token) as helper:
-        ensure_mirror(
-            ready.mirror_dir,
-            canonical_remote,
-            redact=registry,
-            helper=helper,
-        )
-        workspace = checkout_workspace(
-            ready.mirror_dir,
+        workspace = mirror.open_workspace(
             ready.workspace_dir,
-            origin_url=canonical_remote,
             branch=ready.config.target.base_branch,
         )
         branch = AttemptId(
@@ -311,13 +303,10 @@ def run_attempt(
         # model call — never model work on the base-branch tip.
         continuation_note: str | None = None
         if claimed.pickup_offer is not None:
-            checkout_continuation(
+            mirror.open_for_continuation(
                 workspace_path=workspace.path,
-                canonical_remote=canonical_remote,
                 offer=claimed.pickup_offer,
                 attempt_branch=branch,
-                helper=helper,
-                redact=registry,
             )
             continuation_note = claimed.pickup_offer.note
             working_branch = branch
@@ -330,13 +319,10 @@ def run_attempt(
                 raise GitFailure(
                     "pull-request: the pinned Input Head is missing"
                 )
-            checkout_pull_request(
+            mirror.open_for_pull_request(
                 workspace_path=workspace.path,
-                canonical_remote=canonical_remote,
                 input_head=pin_facts.input_head,
                 head_branch=pin_facts.head_branch,
-                helper=helper,
-                redact=registry,
             )
             working_branch = pin_facts.head_branch
         else:
@@ -704,156 +690,6 @@ def _read_live_remote_evidence(
     return work_commit, remote_sha, ancestor
 
 
-def verify_offer_remote(
-    *,
-    mirror_dir: Path,
-    canonical_remote: str,
-    offer: RoundHandoffOffer,
-    helper: GitCredentialHelper | None = None,
-    redact: Redactable = None,
-) -> bool:
-    """Whether the remote still serves the offer's revisions (§8).
-
-    The intake availability check: the named ref serves exactly the recorded
-    work commit and the recorded Base Revision is in its history (read in the
-    mirror, which the Worker keeps updated). Any transport failure or mismatch
-    reads ``False`` — the sweep leaves the signal untouched and claims
-    nothing, so a previously advertised revision that is no longer available
-    is refused without a pickup offer.
-    """
-    try:
-        remote_sha = remote_ref_sha(
-            canonical_remote, offer.ref, redact=redact, helper=helper
-        )
-    except Exception:
-        return False
-    if remote_sha != offer.work_commit:
-        return False
-    try:
-        return bool(
-            is_ancestor(
-                mirror_dir, offer.base_revision, offer.work_commit, redact=redact
-            )
-        )
-    except Exception:
-        return False
-
-
-def checkout_continuation(
-    *,
-    workspace_path: Path,
-    canonical_remote: str,
-    offer: RoundHandoffOffer,
-    attempt_branch: str,
-    helper: GitCredentialHelper | None = None,
-    redact: Redactable = None,
-) -> str:
-    """Open the Continuation workspace at the recorded work commit (§8).
-
-    Verifies the remote still serves the offer's work commit at its named
-    ref, fetches the exact work commit and Base Revision, proves the Base
-    Revision is an ancestor of the work commit, then opens the new Attempt
-    branch at the work commit with a clean tree. The recorded Base Revision
-    is retained even when the configured base branch has moved: ancestry is
-    proven against the recording, never the current tip. Returns the work
-    commit. Any failed verification raises :class:`GitFailure`: the Attempt
-    ends ``internal-failure`` through the poll loop's infrastructure path,
-    never model work on a moved or unavailable revision.
-    """
-    try:
-        remote_sha = remote_ref_sha(
-            canonical_remote, offer.ref, redact=redact, helper=helper
-        )
-    except GitFailure as exc:
-        raise GitFailure(
-            f"continuation: cannot verify ref {offer.ref!r} "
-            f"for {offer.attempt}: {exc}"
-        ) from exc
-    if remote_sha != offer.work_commit:
-        served = remote_sha if remote_sha is not None else "nothing"
-        raise GitFailure(
-            f"continuation: ref {offer.ref!r} serves {served}, "
-            f"not work commit {offer.work_commit} for {offer.attempt}"
-        )
-    fetch_revision(
-        workspace_path,
-        canonical_remote,
-        offer.work_commit,
-        redact=redact,
-        helper=helper,
-    )
-    fetch_revision(
-        workspace_path,
-        canonical_remote,
-        offer.base_revision,
-        redact=redact,
-        helper=helper,
-    )
-    try:
-        ancestor = is_ancestor(
-            workspace_path, offer.base_revision, offer.work_commit, redact=redact
-        )
-    except GitFailure as exc:
-        raise GitFailure(
-            f"continuation: cannot verify Base Revision "
-            f"{offer.base_revision} for {offer.attempt}: {exc}"
-        ) from exc
-    if not ancestor:
-        raise GitFailure(
-            f"continuation: Base Revision {offer.base_revision} is not an "
-            f"ancestor of work commit {offer.work_commit} for {offer.attempt}"
-        )
-    checkout_branch_at(workspace_path, attempt_branch, offer.work_commit)
-    return offer.work_commit
-
-
-def checkout_pull_request(
-    *,
-    workspace_path: Path,
-    canonical_remote: str,
-    input_head: str,
-    head_branch: str,
-    helper: GitCredentialHelper | None = None,
-    redact: Redactable = None,
-) -> str:
-    """Open a pull-request Attempt at its pinned Input Head (§7.2, §9.10).
-
-    Fetches the exact pinned head SHA the remote serves, then opens a local
-    branch named exactly after the pull request's head branch at that commit
-    with a clean tree. The Base Revision stays as pinned at Claim (the merge
-    base of the head and the base tip) and is never re-resolved here. Returns
-    the Input Head. Any failed fetch or checkout raises :class:`GitFailure`:
-    the Attempt ends ``internal-failure`` through the poll loop's
-    infrastructure path before any model call — never model work on the
-    base-branch tip.
-    """
-    if not head_branch:
-        raise GitFailure("pull-request: the pinned head branch is missing")
-    if not input_head:
-        raise GitFailure("pull-request: the pinned Input Head is missing")
-    try:
-        fetch_revision(
-            workspace_path,
-            canonical_remote,
-            input_head,
-            redact=redact,
-            helper=helper,
-        )
-    except GitFailure as exc:
-        raise GitFailure(
-            f"pull-request: cannot fetch Input Head {input_head} "
-            f"for head branch {head_branch!r}: {exc}"
-        ) from exc
-    try:
-        checkout_branch_at(workspace_path, head_branch, input_head)
-    except GitFailure as exc:
-        raise GitFailure(
-            f"pull-request: cannot check out Input Head {input_head} "
-            f"on head branch {head_branch!r}: {exc}"
-        ) from exc
-    return head_revision(workspace_path)
-
-
 def _decide_live_handoff(
     *,
     ledger: RunLedger,
@@ -1076,9 +912,6 @@ def _finalise_live_attempt(
 
 __all__ = [
     "WorkflowRunner",
-    "checkout_continuation",
-    "checkout_pull_request",
     "pinned_profile_text",
     "run_attempt",
-    "verify_offer_remote",
 ]

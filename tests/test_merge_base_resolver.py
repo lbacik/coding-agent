@@ -21,6 +21,8 @@ from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.runtime.redaction import SecretRegistry
+from coding_agent.runtime.target_mirror import TargetMirror
 from coding_agent.worker import startup as startup_module
 from coding_agent.worker import supervisor
 from support.fake_step_tracker import FakeStepTracker
@@ -257,14 +259,24 @@ def test_claim_on_a_fresh_state_volume_resolves_the_merge_base(
         ledger.close()
 
 
-def test_resolver_fetches_a_stale_mirror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _target_mirror(mirror_dir: Path, remote: str) -> TargetMirror:
+    """A TargetMirror over the given directory and a test token."""
+    return TargetMirror(
+        mirror_dir,
+        remote,
+        TOKEN,
+        SecretRegistry({"GITHUB_TOKEN": TOKEN}),
+    )
+
+
+def test_resolver_fetches_a_stale_mirror(tmp_path: Path) -> None:
     """A head pushed after the last fetch still resolves (§7.2).
 
     The mirror is cloned before the pull-request branch exists on the
-    remote; the resolver fetches first, so the merge base resolves to the
-    real base commit and the mirror then serves the head.
+    remote; the mirror fetches first, so the merge base resolves to the
+    real base commit and the mirror then serves the head. No startup
+    sequence is needed: the mirror builds from a directory, a remote URL, a
+    token string and a registry.
     """
     from conftest import commit_validation_profile, init_origin_repo
 
@@ -290,59 +302,57 @@ def test_resolver_fetches_a_stale_mirror(
     expected = _git(src, "merge-base", head, tip)
     assert expected == base
 
-    started = _ready_for_remote(tmp_path, monkeypatch, str(bare))
-    with started as ready:
-        stale = ready.mirror_dir
-        stale.parent.mkdir(parents=True, exist_ok=True)
-        # A ``--mirror`` clone, the way ``ensure_mirror`` builds one: only
-        # then does ``remote update --prune`` fetch new branches.
+    stale = tmp_path / "state" / "mirror.git"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    # A ``--mirror`` clone, the way the mirror builds one: only then does
+    # ``remote update --prune`` fetch new branches.
+    subprocess.run(
+        ["git", "clone", "-q", "--mirror", str(bare), str(stale)],
+        check=True,
+    )
+    # Rewind the mirror to the stale state: drop the pull-request branch
+    # and move the base branch back, as if both were pushed after the last
+    # fetch.
+    subprocess.run(
+        ["git", "update-ref", "-d", f"refs/heads/{HEAD_BRANCH}"],
+        cwd=stale,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "update-ref", f"refs/heads/{BASE_BRANCH}", base],
+        cwd=stale,
+        check=True,
+    )
+    # Dropping the refs is not enough: the objects stay until packed
+    # away, so prune them to make the mirror genuinely stale.
+    subprocess.run(
+        ["git", "reflog", "expire", "--expire=now", "--all"],
+        cwd=stale,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "gc", "--prune=now", "--quiet"], cwd=stale, check=True
+    )
+    assert (
         subprocess.run(
-            ["git", "clone", "-q", "--mirror", str(bare), str(stale)],
-            check=True,
-        )
-        # Rewind the Worker's mirror to the stale state: drop the
-        # pull-request branch and move the base branch back, as if both
-        # were pushed after the last fetch.
-        subprocess.run(
-            ["git", "update-ref", "-d", f"refs/heads/{HEAD_BRANCH}"],
-            cwd=stale,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "update-ref", f"refs/heads/{BASE_BRANCH}", base],
-            cwd=stale,
-            check=True,
-        )
-        # Dropping the refs is not enough: the objects stay until packed
-        # away, so prune them to make the mirror genuinely stale.
-        subprocess.run(
-            ["git", "reflog", "expire", "--expire=now", "--all"],
+            ["git", "cat-file", "-e", head],
             cwd=stale,
             capture_output=True,
-        )
+        ).returncode
+        != 0
+    )
+    mirror = _target_mirror(stale, str(bare))
+    assert mirror.resolve_base_revision(head, tip) == base
+    fetched = _git(stale, "rev-parse", f"refs/heads/{BASE_BRANCH}")
+    assert fetched == tip
+    assert (
         subprocess.run(
-            ["git", "gc", "--prune=now", "--quiet"], cwd=stale, check=True
-        )
-        assert (
-            subprocess.run(
-                ["git", "cat-file", "-e", head],
-                cwd=stale,
-                capture_output=True,
-            ).returncode
-            != 0
-        )
-        resolve = supervisor._merge_base_resolver(ready)
-        assert resolve(head, tip) == base
-        fetched = _git(stale, "rev-parse", f"refs/heads/{BASE_BRANCH}")
-        assert fetched == tip
-        assert (
-            subprocess.run(
-                ["git", "cat-file", "-e", head],
-                cwd=stale,
-                capture_output=True,
-            ).returncode
-            == 0
-        )
+            ["git", "cat-file", "-e", head],
+            cwd=stale,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
 
 
 def test_resolver_with_an_unreachable_remote_raises_git_failure(
@@ -364,20 +374,10 @@ def test_resolver_with_an_unreachable_remote_raises_git_failure(
         return descriptor, helper_path
 
     monkeypatch.setattr(tempfile, "mkstemp", _recording_mkstemp)
-    started = _ready_for_remote(tmp_path, monkeypatch, bad_remote)
-    with started as ready:
-        resolve = supervisor._merge_base_resolver(ready)
-        with pytest.raises(GitFailure) as excinfo:
-            resolve("a" * 40, "b" * 40)
+    mirror = _target_mirror(tmp_path / "mirror.git", bad_remote)
+    with pytest.raises(GitFailure) as excinfo:
+        mirror.resolve_base_revision("a" * 40, "b" * 40)
     assert TOKEN not in str(excinfo.value)
     assert created_helpers != []
     for helper_path in created_helpers:
         assert not Path(helper_path).exists()
-
-
-def test_resolver_docstring_describes_the_claim_interrupted_halt() -> None:
-    """The docstring no longer promises a retry on the next sweep (§4.4)."""
-    docstring = supervisor._merge_base_resolver.__doc__
-    assert docstring is not None
-    assert "claim-interrupted" in docstring
-    assert "next sweep" not in docstring

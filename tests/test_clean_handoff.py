@@ -34,12 +34,14 @@ from coding_agent.inputs.pickup import (
 )
 from coding_agent.inputs.port import InputComment, InputType, LabeledEvent, TrackedInput
 from coding_agent.ledger.store import AttemptPin, RunLedger
+from coding_agent.runtime.redaction import SecretRegistry
 from coding_agent.runtime.round_handoff import (
     HandoffDiagnostic,
     RoundHandoffOffer,
     parse_handoff_block,
     render_handoff_section,
 )
+from coding_agent.runtime.target_mirror import TargetMirror
 from coding_agent.runtime.step_finalisation import (
     FinalisationTarget,
     WorkflowEnded,
@@ -47,11 +49,7 @@ from coding_agent.runtime.step_finalisation import (
     render_terminal_comment,
 )
 from coding_agent.runtime.graph.agent_step import resolve_step_inputs
-from coding_agent.worker.attempt_run import (
-    _decide_live_handoff,
-    checkout_continuation,
-    verify_offer_remote,
-)
+from coding_agent.worker.attempt_run import _decide_live_handoff
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime.git import GitFailure
 from coding_agent.workflow.schema import (
@@ -499,10 +497,14 @@ def _seed_remote(root: Path) -> dict[str, str]:
     return {"remote": str(remote), "base": base, "work": head, "moved": moved}
 
 
-def _mirror(root: Path, remote: str) -> Path:
-    mirror = root / "mirror.git"
-    _git(root, "clone", "--bare", "-q", remote, "mirror.git")
-    return mirror
+def _target_mirror(root: Path, remote: str) -> TargetMirror:
+    """A TargetMirror over a fresh state directory and a test token."""
+    return TargetMirror(
+        root / "state-mirror.git",
+        remote,
+        "test-token",
+        SecretRegistry({"TEST_TOKEN": "test-token"}),
+    )
 
 
 def test_continuation_opens_at_the_recorded_commit(tmp_path: Path) -> None:
@@ -512,9 +514,8 @@ def test_continuation_opens_at_the_recorded_commit(tmp_path: Path) -> None:
     _git(tmp_path, "clone", "-q", seeded["remote"], "second")
     offer = _offer(work_commit=seeded["work"], base_revision=seeded["base"])
 
-    returned = checkout_continuation(
+    returned = _target_mirror(tmp_path, seeded["remote"]).open_for_continuation(
         workspace_path=workspace,
-        canonical_remote=seeded["remote"],
         offer=offer,
         attempt_branch=NEXT_BRANCH,
     )
@@ -543,9 +544,8 @@ def test_continuation_refuses_a_moved_ref(tmp_path: Path) -> None:
     offer = _offer(work_commit=seeded["work"], base_revision=seeded["base"])
 
     with pytest.raises(GitFailure, match="serves"):
-        checkout_continuation(
+        _target_mirror(tmp_path, seeded["remote"]).open_for_continuation(
             workspace_path=workspace,
-            canonical_remote=seeded["remote"],
             offer=offer,
             attempt_branch=NEXT_BRANCH,
         )
@@ -568,9 +568,8 @@ def test_continuation_refuses_a_missing_ref(tmp_path: Path) -> None:
     offer = _offer(work_commit=seeded["work"], base_revision=seeded["base"])
 
     with pytest.raises(GitFailure, match="serves nothing"):
-        checkout_continuation(
+        _target_mirror(tmp_path, seeded["remote"]).open_for_continuation(
             workspace_path=workspace,
-            canonical_remote=seeded["remote"],
             offer=offer,
             attempt_branch=NEXT_BRANCH,
         )
@@ -584,9 +583,8 @@ def test_continuation_refuses_an_unavailable_base(tmp_path: Path) -> None:
     offer = _offer(work_commit=seeded["work"], base_revision="e" * 40)
 
     with pytest.raises(GitFailure):
-        checkout_continuation(
+        _target_mirror(tmp_path, seeded["remote"]).open_for_continuation(
             workspace_path=workspace,
-            canonical_remote=seeded["remote"],
             offer=offer,
             attempt_branch=NEXT_BRANCH,
         )
@@ -595,17 +593,10 @@ def test_continuation_refuses_an_unavailable_base(tmp_path: Path) -> None:
 def test_remote_verifier_tracks_the_ref_and_history(tmp_path: Path) -> None:
     """Intake availability follows the named ref and the recorded history."""
     seeded = _seed_remote(tmp_path)
-    mirror = _mirror(tmp_path, seeded["remote"])
+    mirror = _target_mirror(tmp_path, seeded["remote"])
     offer = _offer(work_commit=seeded["work"], base_revision=seeded["base"])
 
-    assert (
-        verify_offer_remote(
-            mirror_dir=mirror,
-            canonical_remote=seeded["remote"],
-            offer=offer,
-        )
-        is True
-    )
+    assert mirror.offer_still_served(offer) is True
     _git(
         tmp_path / "work",
         "push",
@@ -613,19 +604,10 @@ def test_remote_verifier_tracks_the_ref_and_history(tmp_path: Path) -> None:
         "origin",
         f"{seeded['moved']}:refs/heads/{REF}",
     )
+    assert mirror.offer_still_served(offer) is False
     assert (
-        verify_offer_remote(
-            mirror_dir=mirror,
-            canonical_remote=seeded["remote"],
-            offer=offer,
-        )
-        is False
-    )
-    assert (
-        verify_offer_remote(
-            mirror_dir=mirror,
-            canonical_remote=seeded["remote"],
-            offer=_offer(work_commit=seeded["work"], base_revision="e" * 40),
+        mirror.offer_still_served(
+            _offer(work_commit=seeded["work"], base_revision="e" * 40)
         )
         is False
     )

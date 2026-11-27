@@ -30,20 +30,17 @@ write.
 from __future__ import annotations
 
 import functools
-import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 from coding_agent.inputs.pickup import PickupConfig, PickupRemoteVerifier
-from coding_agent.runtime.git import GitFailure, ensure_mirror
-from coding_agent.runtime.redaction import temporary_git_credential_helper
 from coding_agent.runtime.round_handoff import RoundHandoffOffer
+from coding_agent.runtime.target_mirror import TargetMirror
 from coding_agent.worker import run as _worker_run
 from coding_agent.worker.attempt_run import (
     WorkflowRunner as WorkflowRunner,
     run_attempt as run_attempt,
-    verify_offer_remote as verify_offer_remote,
 )
 from coding_agent.worker.run import (
     WorkerLoopConfig,
@@ -157,24 +154,12 @@ def _verified_pickup_config(ready: Ready) -> PickupConfig | None:
     if pickup is None:
         return None
 
+    mirror = TargetMirror(
+        ready.mirror_dir, ready.canonical_remote, ready.token, ready.registry
+    )
+
     def verify(offer: RoundHandoffOffer) -> bool:
-        with temporary_git_credential_helper(ready.token) as helper:
-            try:
-                ensure_mirror(
-                    ready.mirror_dir,
-                    ready.canonical_remote,
-                    redact=ready.registry,
-                    helper=helper,
-                )
-            except Exception:
-                return False
-            return verify_offer_remote(
-                mirror_dir=ready.mirror_dir,
-                canonical_remote=ready.canonical_remote,
-                offer=offer,
-                helper=helper,
-                redact=ready.registry,
-            )
+        return mirror.offer_still_served(offer)
 
     verifier: PickupRemoteVerifier = verify
     return replace(pickup, verify_remote=verifier)
@@ -185,57 +170,18 @@ def _merge_base_resolver(
 ) -> Callable[[str, str], str]:
     """Resolve the merge base of a pull-request head and the base tip (§7.2).
 
-    Brings the mirror up to date with :func:`ensure_mirror` — cloning it
-    where the state volume is fresh, fetching where it already exists — under
-    a short-lived credential helper, then runs ``git merge-base`` in it; the
-    helper lives only for this one resolution and output is redacted through
-    the Worker's registry. A failure raises ``GitFailure`` after the Claim
-    has opened, so the poll loop halts with ``claim-interrupted`` and leaves
-    the unfinished Attempt for restart recovery (§4.4, §16.1); no later
-    sweep retries it.
+    Delegates to the Target Repository mirror, which brings itself up to
+    date — cloning where the state volume is fresh, fetching where it
+    already exists — under its own short-lived credential helper. A failure
+    raises ``GitFailure`` after the Claim has opened, so the poll loop halts
+    with ``claim-interrupted`` and leaves the unfinished Attempt for restart
+    recovery (§4.4, §16.1); no later sweep retries it.
     """
-    mirror_dir = ready.mirror_dir
-    canonical_remote = ready.canonical_remote
-    token = ready.token
-    registry = ready.registry
+    mirror = TargetMirror(
+        ready.mirror_dir, ready.canonical_remote, ready.token, ready.registry
+    )
 
     def resolve(head_sha: str, base_tip: str) -> str:
-        with temporary_git_credential_helper(token) as helper:
-            try:
-                ensure_mirror(
-                    mirror_dir,
-                    canonical_remote,
-                    redact=registry,
-                    helper=helper,
-                )
-            except GitFailure:
-                raise
-            except OSError as exc:
-                raise GitFailure(
-                    registry.redact(
-                        f"'git ensure-mirror' failed in {mirror_dir}: {exc}"
-                    )
-                ) from exc
-            try:
-                completed = subprocess.run(
-                    ["git", "merge-base", head_sha, base_tip],
-                    cwd=mirror_dir,
-                    capture_output=True,
-                    text=True,
-                )
-            except OSError as exc:
-                raise GitFailure(
-                    registry.redact(
-                        f"'git merge-base' failed in {mirror_dir}: {exc}"
-                    )
-                ) from exc
-            if completed.returncode != 0:
-                raise GitFailure(
-                    registry.redact(
-                        f"'git merge-base' failed in {mirror_dir}: "
-                        f"{completed.stderr.strip()}"
-                    )
-                )
-            return completed.stdout.strip()
+        return mirror.resolve_base_revision(head_sha, base_tip)
 
     return resolve

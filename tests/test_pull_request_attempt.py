@@ -24,8 +24,10 @@ from coding_agent.inputs.port import LabeledEvent, TrackedInput
 from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
+from coding_agent.runtime.redaction import SecretRegistry
+from coding_agent.runtime.target_mirror import TargetMirror
 from coding_agent.worker import supervisor
-from coding_agent.worker.attempt_run import checkout_pull_request, run_attempt
+from coding_agent.worker.attempt_run import run_attempt
 from coding_agent.workflow.schema import (
     Agent,
     AttemptCeiling,
@@ -508,17 +510,26 @@ def test_pull_request_with_an_unavailable_head_fails_before_any_model_call(
         assert calls == []
 
 
+def _target_mirror(root: Path, remote: str) -> TargetMirror:
+    """A TargetMirror over a fresh state directory and a test token."""
+    return TargetMirror(
+        root / "state-mirror.git",
+        remote,
+        "test-token",
+        SecretRegistry({"TEST_TOKEN": "test-token"}),
+    )
+
+
 def test_checkout_pull_request_opens_the_head_branch(
     tmp_path: Path,
 ) -> None:
-    """The helper checks out the pinned head on the named branch."""
+    """The mirror checks out the pinned head on the named branch."""
     seeded = _seed_remote(tmp_path)
     workspace = tmp_path / "work"
     _git(tmp_path, "clone", "-q", seeded["remote"], str(workspace))
 
-    returned = checkout_pull_request(
+    returned = _target_mirror(tmp_path, seeded["remote"]).open_for_pull_request(
         workspace_path=workspace,
-        canonical_remote=seeded["remote"],
         input_head=seeded["head"],
         head_branch=HEAD_BRANCH,
     )
@@ -540,9 +551,8 @@ def test_checkout_pull_request_refuses_a_missing_head(
     before = _git(workspace, "rev-parse", "HEAD")
 
     with pytest.raises(GitFailure, match="cannot fetch Input Head"):
-        checkout_pull_request(
+        _target_mirror(tmp_path, seeded["remote"]).open_for_pull_request(
             workspace_path=workspace,
-            canonical_remote=seeded["remote"],
             input_head="d" * 40,
             head_branch=HEAD_BRANCH,
         )
