@@ -35,16 +35,15 @@ from coding_agent.inputs.port import InputType, TrackedInput
 from coding_agent.ledger.store import RunLedger, step_effect_marker
 from coding_agent.profile.services import ServiceProber
 from coding_agent.profile.toolchain import SupportedToolchainMatrix, load_toolchain_matrix
-from coding_agent.runtime.git import GitFailure
 from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from coding_agent.runtime.step_operations import (
-    CommitPushGitOps,
     GateChecker,
     GateFailed,
     LocalOperationRunner,
     ValidationRegistry,
 )
+from coding_agent.runtime.workspace_git import AttemptWorkspaceGit, BareRepoRemote
 from coding_agent.runtime.step_publication import (
     GITHUB_BODY_CHAR_LIMIT,
     PUBLISHING_OPERATIONS,
@@ -103,134 +102,31 @@ def _init_repo(path: Path) -> str:
     return _git("rev-parse", "HEAD", cwd=path)
 
 
-class FakeGitOps(CommitPushGitOps):
-    """A ``CommitPushGitOps`` fake over a real repo (publishing reads HEAD)."""
+def _init_bare(bare: Path) -> Path:
+    """Create a bare repository at ``bare`` for publication tests."""
+    completed = subprocess.run(
+        ["git", "init", "-q", "--bare", str(bare)],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return bare
 
-    def __init__(self, remote: dict[str, str] | None = None) -> None:
-        self.remote: dict[str, str] = dict(remote or {})
 
-    def is_clean(self, workspace: Path) -> bool:
-        completed = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-        )
-        assert completed.returncode == 0
-        return not completed.stdout.strip()
+def _pub_git(repo: Path) -> AttemptWorkspaceGit:
+    """An ``AttemptWorkspaceGit`` over the real repo (publishing reads HEAD).
 
-    def touches_workflows(self, workspace: Path) -> bool:
-        from coding_agent.runtime.git import tree_touches_workflows_path
-
-        return tree_touches_workflows_path(workspace)
-
-    def head_sha(self, workspace: Path) -> str:
-        return _git("rev-parse", "HEAD", cwd=workspace)
-
-    def stage_all(self, workspace: Path) -> None:
-        _git("add", "-A", cwd=workspace)
-
-    def clear_merge_state(self, workspace: Path) -> None:
-        from coding_agent.runtime.git import clear_merge_state
-
-        clear_merge_state(workspace)
-
-    def write_tree(self, workspace: Path) -> str:
-        return _git("write-tree", cwd=workspace)
-
-    def create_commit(
-        self,
-        workspace: Path,
-        tree: str,
-        parents: list[str],
-        message: str,
-        author_name: str,
-        author_email: str,
-    ) -> str:
-        from coding_agent.runtime.git import create_commit_with_parents
-
-        return create_commit_with_parents(
-            workspace,
-            tree,
-            parents,
-            message,
-            author_name=author_name,
-            author_email=author_email,
-        )
-
-    def move_branch(self, workspace: Path, branch: str, sha: str) -> None:
-        from coding_agent.runtime.git import update_branch_ref
-
-        update_branch_ref(workspace, branch, sha)
-
-    def advance_head(self, workspace: Path, sha: str) -> None:
-        _git("update-ref", "HEAD", sha, cwd=workspace)
-
-    def commit_tree(self, workspace: Path, revision: str) -> str:
-        return _git("rev-parse", f"{revision}^{{tree}}", cwd=workspace)
-
-    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]:
-        from coding_agent.runtime.git import diff_names_between
-
-        return diff_names_between(workspace, old, new)
-
-    def read_blob(
-        self, workspace: Path, revision: str, path: str
-    ) -> bytes | None:
-        from coding_agent.runtime.git import read_blob_at_revision
-
-        return read_blob_at_revision(workspace, revision, path)
-
-    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None:
-        completed = subprocess.run(
-            ["git", "show", f":{path}"],
-            cwd=workspace,
-            capture_output=True,
-        )
-        if completed.returncode != 0:
-            return None
-        return completed.stdout
-
-    def object_exists(self, workspace: Path, revision: str) -> bool:
-        from coding_agent.runtime.git import object_exists
-
-        return object_exists(workspace, revision)
-
-    def fetch_revision(self, workspace: Path, revision: str) -> None:
-        return None
-
-    def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool:
-        from coding_agent.runtime.git import is_ancestor
-
-        return is_ancestor(workspace, ancestor, descendant)
-
-    def merge_tip(
-        self,
-        workspace: Path,
-        tip: str,
-        *,
-        author_name: str,
-        author_email: str,
-    ) -> int:
-        from coding_agent.runtime.git import merge_tip_no_commit
-
-        return merge_tip_no_commit(
-            workspace, tip, author_name=author_name, author_email=author_email
-        )
-
-    def unmerged_paths(self, workspace: Path) -> list[str]:
-        from coding_agent.runtime.git import unmerged_paths
-
-        return unmerged_paths(workspace)
-
-    def remote_sha(self, branch: str) -> str | None:
-        return self.remote.get(branch)
-
-    def push_issue_branch(self, workspace: Path, branch: str) -> None:
-        raise GitFailure("FakeGitOps never pushes in publication tests")
-
-    def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None:
-        raise GitFailure("FakeGitOps never pushes in publication tests")
+    Publication tests never push, so one shared bare per test is fine.
+    """
+    bare = repo.parent / "pub-remote.git"
+    if not bare.exists():
+        _init_bare(bare)
+    return AttemptWorkspaceGit(
+        repo,
+        "agent",
+        "1+agent@users.noreply.github.com",
+        BareRepoRemote(repo, bare),
+    )
 
 
 def _seed_document(
@@ -284,7 +180,6 @@ def _open_pr_kwargs(
 ) -> dict[str, object]:
     _seed_document(ledger, ATTEMPT, text)
     return {
-        "workspace": repo,
         "attempt_id": ATTEMPT,
         "workflow_id": WORKFLOW_ID,
         "input_number": 7,
@@ -299,7 +194,7 @@ def _open_pr_kwargs(
         "validation_registry": registry,
         "gate": gate,
         "claim_active": claim_active,
-        "git": FakeGitOps(),
+        "git": _pub_git(repo),
         "tracker": tracker,
         "ledger": ledger,
         "step_id": step_id,
@@ -1045,22 +940,19 @@ def _publishing_runner(
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir(exist_ok=True)
     local = LocalOperationRunner(
-        workspace=repo,
+        git=_pub_git(repo),
         start_commit=_git("rev-parse", "HEAD", cwd=repo),
         matrix=_matrix(),
         service_env={},
         prober=_FakeProber(),
         runner=_QueueRunner(),
         evidence_dir=evidence_dir,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         attempt_branch="agent/implement/7/1-greeting",
         input_type=input_type,
         head_branch="feature" if input_type == "pull-request" else None,
         expected_head=expected_head,
         input_number=7,
         profile_text_override=None,
-        git=FakeGitOps(),
     )
     return PublishingOperationRunner(
         local=local,

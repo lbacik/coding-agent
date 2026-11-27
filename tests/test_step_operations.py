@@ -34,7 +34,6 @@ from coding_agent.runtime.graph.step_executor import ProductionStepExecutor
 from coding_agent.runtime.graph.workflow_graph import run_workflow
 from support.scripted_executor import ScriptedStepExecutor
 from coding_agent.runtime.step_operations import (
-    CommitPushGitOps,
     CommitPushOutcome,
     GateChecker,
     GateFailed,
@@ -47,6 +46,11 @@ from coding_agent.runtime.step_operations import (
     run_commit_and_push,
     run_run_validation,
     tree_identity,
+)
+from coding_agent.runtime.workspace_git import (
+    AttemptWorkspaceGit,
+    BareRepoRemote,
+    GitRemote,
 )
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
 from coding_agent.workflow.schema import AttemptCeiling, InputDecl, RouteTarget, WorkflowStep, Workflow
@@ -214,156 +218,76 @@ def _init_repo(path: Path) -> str:
     return _git("rev-parse", "HEAD", cwd=path)
 
 
-class FakeGitOps(CommitPushGitOps):
-    """A ``CommitPushGitOps`` fake over a real repo with a fake remote."""
+def _init_bare(bare: Path) -> Path:
+    """Create a bare repository to serve as the test remote."""
+    completed = subprocess.run(
+        ["git", "init", "-q", "--bare", str(bare)],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return bare
 
-    def __init__(self, remote: dict[str, str] | None = None) -> None:
-        self.remote: dict[str, str] = dict(remote or {})
-        self.pushes: list[tuple[str, str]] = []
-        self.fail_push: Exception | None = None
-        self.race_to: str | None = None
 
-    def is_clean(self, workspace: Path) -> bool:
-        completed = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=workspace,
-            capture_output=True,
-            text=True,
-        )
-        assert completed.returncode == 0
-        return not completed.stdout.strip()
+def _workspace_git(repo: Path, bare: Path) -> AttemptWorkspaceGit:
+    """One Attempt-bound workspace git over a real repo and a bare remote."""
+    return AttemptWorkspaceGit(
+        repo,
+        "agent",
+        "1+agent@users.noreply.github.com",
+        BareRepoRemote(repo, bare),
+    )
 
-    def touches_workflows(self, workspace: Path) -> bool:
-        from coding_agent.runtime.git import tree_touches_workflows_path
 
-        return tree_touches_workflows_path(workspace)
+def _push_to_bare(repo: Path, bare: Path, sha: str, branch: str) -> None:
+    """Serve ``sha`` at ``branch`` from the bare test remote."""
+    completed = subprocess.run(
+        ["git", "push", "-q", str(bare), f"{sha}:refs/heads/{branch}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
-    def head_sha(self, workspace: Path) -> str:
-        return _git("rev-parse", "HEAD", cwd=workspace)
 
-    def stage_all(self, workspace: Path) -> None:
-        _git("add", "-A", cwd=workspace)
+def _foreign_sha(repo: Path, base: str) -> str:
+    """A real commit sha that is not ``base`` (a foreign remote head)."""
+    tree = _git("rev-parse", f"{base}^{{tree}}", cwd=repo)
+    return _git("commit-tree", tree, "-m", "foreign", cwd=repo)
 
-    def clear_merge_state(self, workspace: Path) -> None:
-        from coding_agent.runtime.git import clear_merge_state
 
-        clear_merge_state(workspace)
+class _FailingPushRemote(GitRemote):
+    """A narrow-port remote whose push always fails (OP-13 transport)."""
 
-    def write_tree(self, workspace: Path) -> str:
-        return _git("write-tree", cwd=workspace)
-
-    def create_commit(
-        self,
-        workspace: Path,
-        tree: str,
-        parents: list[str],
-        message: str,
-        author_name: str,
-        author_email: str,
-    ) -> str:
-        from coding_agent.runtime.git import create_commit_with_parents
-
-        revision = create_commit_with_parents(
-            workspace,
-            tree,
-            parents,
-            message,
-            author_name=author_name,
-            author_email=author_email,
-        )
-        return revision
-
-    def move_branch(self, workspace: Path, branch: str, sha: str) -> None:
-        from coding_agent.runtime.git import update_branch_ref
-
-        update_branch_ref(workspace, branch, sha)
-
-    def advance_head(self, workspace: Path, sha: str) -> None:
-        _git("update-ref", "HEAD", sha, cwd=workspace)
-
-    def commit_tree(self, workspace: Path, revision: str) -> str:
-        return _git("rev-parse", f"{revision}^{{tree}}", cwd=workspace)
-
-    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]:
-        from coding_agent.runtime.git import diff_names_between
-
-        return diff_names_between(workspace, old, new)
-
-    def read_blob(
-        self, workspace: Path, revision: str, path: str
-    ) -> bytes | None:
-        from coding_agent.runtime.git import read_blob_at_revision
-
-        return read_blob_at_revision(workspace, revision, path)
-
-    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None:
-        completed = subprocess.run(
-            ["git", "show", f":{path}"],
-            cwd=workspace,
-            capture_output=True,
-        )
-        if completed.returncode != 0:
-            return None
-        return completed.stdout
-
-    def object_exists(self, workspace: Path, revision: str) -> bool:
-        from coding_agent.runtime.git import object_exists
-
-        return object_exists(workspace, revision)
-
-    def fetch_revision(self, workspace: Path, revision: str) -> None:
-        # Fake remote lives beside the repo: nothing to fetch; the object
-        # either exists locally or it does not.
-        return None
-
-    def is_ancestor(self, workspace: Path, ancestor: str, descendant: str) -> bool:
-        from coding_agent.runtime.git import is_ancestor
-
-        return is_ancestor(workspace, ancestor, descendant)
-
-    def merge_tip(
-        self,
-        workspace: Path,
-        tip: str,
-        *,
-        author_name: str,
-        author_email: str,
-    ) -> int:
-        from coding_agent.runtime.git import merge_tip_no_commit
-
-        return merge_tip_no_commit(
-            workspace, tip, author_name=author_name, author_email=author_email
-        )
-
-    def unmerged_paths(self, workspace: Path) -> list[str]:
-        from coding_agent.runtime.git import unmerged_paths
-
-        return unmerged_paths(workspace)
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
 
     def remote_sha(self, branch: str) -> str | None:
-        return self.remote.get(branch)
+        return None
 
-    def push_issue_branch(self, workspace: Path, branch: str) -> None:
-        self.pushes.append(("issue", branch))
-        if self.fail_push is not None:
-            raise self.fail_push
-        if self.race_to is not None:
-            self.remote[branch] = self.race_to
-            raise GitFailure("'git push' failed: non-fast-forward")
-        try:
-            local_sha = _git("rev-parse", "--verify", branch, cwd=workspace)
-        except Exception:
-            local_sha = self.head_sha(workspace)
-        self.remote[branch] = local_sha
+    def fetch_revision(self, revision: str) -> None:
+        return None
 
-    def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None:
-        self.pushes.append(("ref", branch))
-        if self.fail_push is not None:
-            raise self.fail_push
-        if self.race_to is not None:
-            self.remote[branch] = self.race_to
-            raise GitFailure("'git push' failed: non-fast-forward")
-        self.remote[branch] = local_sha
+    def push_ref(self, local_sha: str, branch: str) -> None:
+        raise self._exc
+
+
+class _RaceRemote(GitRemote):
+    """A narrow-port remote that moves between the read and the write (§10.4)."""
+
+    def __init__(self, expected: str, race_to: str) -> None:
+        self._current: str | None = expected
+        self._race_to = race_to
+
+    def remote_sha(self, branch: str) -> str | None:
+        return self._current
+
+    def fetch_revision(self, revision: str) -> None:
+        return None
+
+    def push_ref(self, local_sha: str, branch: str) -> None:
+        self._current = self._race_to
+        raise GitFailure("'git push' failed: non-fast-forward")
 
 
 # --- STEP-15: revision binding of evidence -------------------------------------
@@ -637,17 +561,15 @@ def test_commit_and_push_requirement_unmet_before_any_write(tmp_path: Path) -> N
     repo = tmp_path / "repo"
     head = _init_repo(repo)
     (repo / "work.txt").write_text("new\n", encoding="utf-8")
-    git = FakeGitOps()
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
     registry = ValidationRegistry()
     registry.record("some-earlier-tree", True)
     outcome = run_commit_and_push(
-        workspace=repo,
         attempt_id="implement#7/1",
         input_type="issue",
         branch="agent/implement/7/1-slug",
         expected_head=None,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         start_commit=head,
         with_requires=(("run-validation", "passed"),),
         validation_registry=registry,
@@ -655,23 +577,22 @@ def test_commit_and_push_requirement_unmet_before_any_write(tmp_path: Path) -> N
         git=git,
     )
     assert outcome.result == "requirement-unmet"
-    assert git.pushes == []
+    assert git.remote_sha("agent/implement/7/1-slug") is None
     assert outcome.revision is None
 
 
 # --- OP-5: commit-and-push on an issue branch ----------------------------------
 
 
-def _start_or_head(repo: Path, git: FakeGitOps, start_commit: str | None) -> str:
+def _start_or_head(git: AttemptWorkspaceGit, start_commit: str | None) -> str:
     """Default an omitted start commit to the current HEAD (test-only)."""
     if start_commit is not None:
         return start_commit
-    return git.head_sha(repo)
+    return git.head_sha()
 
 
 def _issue_push(
-    repo: Path,
-    git: FakeGitOps,
+    git: AttemptWorkspaceGit,
     ledger: RunLedger | None = None,
     gate: GateChecker | None = None,
     with_requires: tuple[tuple[str, str], ...] = (),
@@ -680,14 +601,11 @@ def _issue_push(
     start_commit: str | None = None,
 ) -> CommitPushOutcome:
     return run_commit_and_push(
-        workspace=repo,
         attempt_id="implement#7/1",
         input_type="issue",
         branch=branch,
         expected_head=None,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
-        start_commit=_start_or_head(repo, git, start_commit),
+        start_commit=_start_or_head(git, start_commit),
         with_requires=with_requires,
         validation_registry=validation_registry,
         gate=gate,
@@ -699,22 +617,18 @@ def _issue_push(
 
 
 def _pr_push(
-    repo: Path,
-    git: FakeGitOps,
+    git: AttemptWorkspaceGit,
     expected_head: str | None,
     ledger: RunLedger | None = None,
     branch: str = "pr-head",
     start_commit: str | None = None,
 ) -> CommitPushOutcome:
     return run_commit_and_push(
-        workspace=repo,
         attempt_id="implement#7/1",
         input_type="pull-request",
         branch=branch,
         expected_head=expected_head,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
-        start_commit=_start_or_head(repo, git, start_commit),
+        start_commit=_start_or_head(git, start_commit),
         with_requires=(),
         validation_registry=ValidationRegistry(),
         gate=None,
@@ -730,12 +644,12 @@ def test_commit_and_push_issue_with_changes(tmp_path: Path, ledger: RunLedger) -
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "work.txt").write_text("work\n", encoding="utf-8")
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git, ledger)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    outcome = _issue_push(git, ledger)
     assert outcome.result == "pushed"
     assert outcome.revision is not None
-    assert git.remote["agent/implement/7/1-greeting"] == outcome.revision
-    assert git.pushes == [("issue", "agent/implement/7/1-greeting")]
+    assert git.remote_sha("agent/implement/7/1-greeting") == outcome.revision
     message = _git("log", "-1", "--pretty=%B", outcome.revision, cwd=repo)
     assert "Attempt: implement#7/1" in message
     assert commit_message_for_attempt("implement#7/1").startswith("implement#7/1")
@@ -749,11 +663,13 @@ def test_commit_and_push_issue_no_changes(tmp_path: Path, ledger: RunLedger) -> 
     """OP-5: a clean, up-to-date branch yields `no-changes`; no push."""
     repo = tmp_path / "repo"
     head = _init_repo(repo)
-    git = FakeGitOps(remote={"agent/implement/7/1-greeting": head})
-    outcome = _issue_push(repo, git, ledger)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, "agent/implement/7/1-greeting")
+    outcome = _issue_push(git, ledger)
     assert outcome.result == "no-changes"
     assert outcome.revision == head
-    assert git.pushes == []
+    assert git.remote_sha("agent/implement/7/1-greeting") == head
     assert ledger.get_step_effect("implement#7/1", "push", 1, 0) is None
 
 
@@ -763,12 +679,12 @@ def test_commit_and_push_issue_clean_without_attempt_commit_is_no_changes(
     """§10.4: clean, HEAD == start, no remote branch → `no-changes`; no push."""
     repo = tmp_path / "repo"
     head = _init_repo(repo)
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git, ledger, start_commit=head)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    outcome = _issue_push(git, ledger, start_commit=head)
     assert outcome.result == "no-changes"
     assert outcome.revision == head
-    assert git.pushes == []
-    assert "agent/implement/7/1-greeting" not in git.remote
+    assert git.remote_sha("agent/implement/7/1-greeting") is None
     assert ledger.get_step_effect("implement#7/1", "push", 1, 0) is None
 
 
@@ -783,12 +699,12 @@ def test_commit_and_push_issue_clean_past_start_pushes(
     _git("commit", "-qm", "an earlier Attempt commit", cwd=repo)
     head = _git("rev-parse", "HEAD", cwd=repo)
     assert head != base
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git, ledger, start_commit=base)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    outcome = _issue_push(git, ledger, start_commit=base)
     assert outcome.result == "pushed"
     assert outcome.revision == head
-    assert git.remote["agent/implement/7/1-greeting"] == head
-    assert git.pushes == [("issue", "agent/implement/7/1-greeting")]
+    assert git.remote_sha("agent/implement/7/1-greeting") == head
     record = ledger.get_step_effect("implement#7/1", "push", 1, 0)
     assert record is not None
     assert record.status == "receipt"
@@ -799,35 +715,28 @@ def test_commit_and_push_issue_remote_moved_is_error(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     head = _init_repo(repo)
     (repo / "work.txt").write_text("work\n", encoding="utf-8")
-    git = FakeGitOps(remote={"agent/implement/7/1-greeting": "f" * 40})
-    outcome = _issue_push(repo, git)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, _foreign_sha(repo, head), "agent/implement/7/1-greeting")
+    outcome = _issue_push(git)
     assert outcome.result == "error"
-    assert git.pushes == []
+    assert git.remote_sha("agent/implement/7/1-greeting") != head
     assert _git("rev-parse", "HEAD", cwd=repo) == head
 
 
 def test_commit_and_push_pushes_fast_forward_only(tmp_path: Path) -> None:
     """OP-5: the live push path is fast-forward only (a divergent head fails)."""
-    from coding_agent.runtime.step_operations import LiveCommitPushGitOps
-
     repo = tmp_path / "repo"
     base = _init_repo(repo)
-    bare = tmp_path / "remote.git"
-    completed = subprocess.run(
-        ["git", "init", "--bare", str(bare)], capture_output=True, text=True
-    )
-    assert completed.returncode == 0
+    bare = _init_bare(tmp_path / "remote.git")
     branch = "agent/implement/7/1-greeting"
-    git = LiveCommitPushGitOps(str(bare))
+    git = _workspace_git(repo, bare)
     (repo / "work.txt").write_text("work\n", encoding="utf-8")
     first = run_commit_and_push(
-        workspace=repo,
         attempt_id="implement#7/1",
         input_type="issue",
         branch=branch,
         expected_head=None,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         start_commit=base,
         git=git,
     )
@@ -844,13 +753,10 @@ def test_commit_and_push_pushes_fast_forward_only(tmp_path: Path) -> None:
     _git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=clone)
     (repo / "more.txt").write_text("more\n", encoding="utf-8")
     second = run_commit_and_push(
-        workspace=repo,
         attempt_id="implement#7/1",
         input_type="issue",
         branch=branch,
         expected_head=None,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         start_commit=base,
         git=git,
     )
@@ -865,13 +771,15 @@ def test_commit_and_push_pr_compare_and_swap_advances_head(
 ) -> None:
     """OP-6: remote == Input Head, so the CAS push lands and advances it."""
     repo = tmp_path / "repo"
-    _init_repo(repo)
+    head = _init_repo(repo)
     (repo / "fix.txt").write_text("fix\n", encoding="utf-8")
-    git = FakeGitOps(remote={"pr-head": "a" * 40})
-    outcome = _pr_push(repo, git, "a" * 40, ledger)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, "pr-head")
+    outcome = _pr_push(git, head, ledger)
     assert outcome.result == "pushed"
     assert outcome.revision is not None
-    assert git.remote["pr-head"] == outcome.revision
+    assert git.remote_sha("pr-head") == outcome.revision
     assert outcome.facts["input_head"] == outcome.revision
     record = ledger.get_step_effect("implement#7/1", "push", 1, 0)
     assert record is not None
@@ -883,10 +791,12 @@ def test_commit_and_push_pr_moved_head_is_stale_head(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     head = _init_repo(repo)
     (repo / "fix.txt").write_text("fix\n", encoding="utf-8")
-    git = FakeGitOps(remote={"pr-head": "b" * 40})
-    outcome = _pr_push(repo, git, "a" * 40)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, "pr-head")
+    outcome = _pr_push(git, "a" * 40)
     assert outcome.result == "stale-head"
-    assert git.pushes == []
+    assert git.remote_sha("pr-head") == head
     assert _git("rev-parse", "HEAD", cwd=repo) == head
     assert (repo / "fix.txt").read_text(encoding="utf-8") == "fix\n"
 
@@ -896,9 +806,13 @@ def test_commit_and_push_pr_race_is_stale_head(tmp_path: Path, ledger: RunLedger
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "fix.txt").write_text("fix\n", encoding="utf-8")
-    git = FakeGitOps(remote={"pr-head": "a" * 40})
-    git.race_to = "c" * 40
-    outcome = _pr_push(repo, git, "a" * 40, ledger)
+    git = AttemptWorkspaceGit(
+        repo,
+        "agent",
+        "1+agent@users.noreply.github.com",
+        _RaceRemote("a" * 40, "c" * 40),
+    )
+    outcome = _pr_push(git, "a" * 40, ledger)
     assert outcome.result == "stale-head"
     record = ledger.get_step_effect("implement#7/1", "push", 1, 0)
     assert record is not None
@@ -915,11 +829,12 @@ def test_commit_and_push_workflows_path_is_error(tmp_path: Path) -> None:
     workflows = repo / ".github" / "workflows"
     workflows.mkdir(parents=True)
     (workflows / "ci.yml").write_text("name: ci\n", encoding="utf-8")
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    outcome = _issue_push(git)
     assert outcome.result == "error"
     assert ".github/workflows/" in outcome.detail
-    assert git.pushes == []
+    assert git.remote_sha("agent/implement/7/1-greeting") is None
     assert _git("rev-parse", "HEAD", cwd=repo) == head
 
 
@@ -928,9 +843,13 @@ def test_commit_and_push_permission_refusal_is_error(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "work.txt").write_text("work\n", encoding="utf-8")
-    git = FakeGitOps()
-    git.fail_push = GitFailure("'git push' failed: permission denied")
-    outcome = _issue_push(repo, git)
+    git = AttemptWorkspaceGit(
+        repo,
+        "agent",
+        "1+agent@users.noreply.github.com",
+        _FailingPushRemote(GitFailure("'git push' failed: permission denied")),
+    )
+    outcome = _issue_push(git)
     assert outcome.result == "error"
 
 
@@ -939,22 +858,24 @@ def test_commit_and_push_gate_drift_raises(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "work.txt").write_text("work\n", encoding="utf-8")
-    git = FakeGitOps()
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
 
     def drift() -> GateResult:
         return GateResult(status="drift", reason="content-changed")
 
     with pytest.raises(GateFailed) as excinfo:
-        _issue_push(repo, git, gate=drift)
+        _issue_push(git, gate=drift)
     assert excinfo.value.status == "drift"
-    assert git.pushes == []
+    assert git.remote_sha("agent/implement/7/1-greeting") is None
 
 
 def test_commit_and_push_gate_withdrawal_raises(tmp_path: Path) -> None:
     """§10.1: withdrawal at the Gate before the write is never routed."""
     repo = tmp_path / "repo"
     _init_repo(repo)
-    git = FakeGitOps()
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
 
     def withdrawn() -> GateResult:
         current = TrackedInput(
@@ -971,9 +892,9 @@ def test_commit_and_push_gate_withdrawal_raises(tmp_path: Path) -> None:
         return GateResult(status="withdrawn", reason="selection-label-removed")
 
     with pytest.raises(GateFailed) as excinfo:
-        _issue_push(repo, git, gate=withdrawn)
+        _issue_push(git, gate=withdrawn)
     assert excinfo.value.status == "withdrawn"
-    assert git.pushes == []
+    assert git.remote_sha("agent/implement/7/1-greeting") is None
 
 
 # --- Graph integration ---------------------------------------------------------
@@ -1086,24 +1007,23 @@ def test_graph_scripted_adapter_answers_operations(ledger: RunLedger) -> None:
 def test_local_runner_advances_pr_head_on_own_push(tmp_path: Path) -> None:
     """§7.2: the Attempt's own CAS push advances the Input Head, not Drift."""
     repo = tmp_path / "repo"
-    _init_repo(repo)
+    head = _init_repo(repo)
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
-    git = FakeGitOps(remote={"pr-head": "a" * 40})
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, "pr-head")
     runner = LocalOperationRunner(
-        workspace=repo,
         start_commit=_git("rev-parse", "HEAD", cwd=repo),
         matrix=_matrix(),
         service_env={},
         prober=FakeProber(),
         runner=QueueRunner(evidence_dir, []),
         evidence_dir=evidence_dir,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         attempt_branch="agent/review/9/1-slug",
         input_type="pull-request",
         head_branch="pr-head",
-        expected_head="a" * 40,
+        expected_head=head,
         profile_text_override=GOOD_PROFILE,
         git=git,
     )
@@ -1115,7 +1035,7 @@ def test_local_runner_advances_pr_head_on_own_push(tmp_path: Path) -> None:
     finally:
         handle.close()
     assert execution.result == "pushed"
-    assert runner.expected_head == git.remote["pr-head"]
+    assert runner.expected_head == git.remote_sha("pr-head")
 
 
 def test_local_runner_check_readiness_then_run_validation(tmp_path: Path) -> None:
@@ -1132,19 +1052,16 @@ def test_local_runner_check_readiness_then_run_validation(tmp_path: Path) -> Non
         ],
     )
     runner = LocalOperationRunner(
-        workspace=repo,
         start_commit=head,
         matrix=_matrix(),
         service_env={"DB_URL": "tcp://db.local:5432"},
         prober=FakeProber(reachable=True),
         runner=queue,
         evidence_dir=evidence_dir,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         attempt_branch="agent/implement/7/1-slug",
         input_type="issue",
         profile_text_override=None,
-        git=FakeGitOps(),
+        git=_workspace_git(repo, _init_bare(tmp_path / "remote.git")),
     )
     (repo / "docs" / "agents").mkdir(parents=True)
     (repo / "docs" / "agents" / "project-profile.yml").write_text(
@@ -1175,19 +1092,16 @@ def test_local_runner_run_validation_without_profile_fails(tmp_path: Path) -> No
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
     runner = LocalOperationRunner(
-        workspace=repo,
         start_commit=head,
         matrix=_matrix(),
         service_env={},
         prober=FakeProber(),
         runner=QueueRunner(evidence_dir, []),
         evidence_dir=evidence_dir,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         attempt_branch="agent/implement/7/1-slug",
         input_type="issue",
         profile_text_override="schema: [unclosed\n",
-        git=FakeGitOps(),
+        git=_workspace_git(repo, _init_bare(tmp_path / "remote.git")),
     )
     handle = RunLedger(tmp_path / "ledger.sqlite3")
     try:
@@ -1260,8 +1174,8 @@ def test_commit_and_push_inherits_passed_validation_to_new_revision(
     assert pre_commit_tree.startswith("dirty:")
     registry = ValidationRegistry()
     registry.record(pre_commit_tree, True)
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git, validation_registry=registry)
+    git = _workspace_git(repo, _init_bare(tmp_path / "remote.git"))
+    outcome = _issue_push(git, validation_registry=registry)
     assert outcome.result == "pushed"
     assert outcome.revision is not None
     assert outcome.facts["tree_id"] == pre_commit_tree
@@ -1284,8 +1198,8 @@ def test_commit_and_push_does_not_inherit_after_workspace_changed(
     # The workspace moves on before the commit: a different dirty identity.
     (repo / "work.txt").write_text("second\n", encoding="utf-8")
     assert tree_identity(repo) != validated_tree
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git, validation_registry=registry)
+    git = _workspace_git(repo, _init_bare(tmp_path / "remote.git"))
+    outcome = _issue_push(git, validation_registry=registry)
     assert outcome.result == "pushed"
     assert outcome.revision is not None
     assert registry.holds((("run-validation", "passed"),), outcome.revision) is False
@@ -1299,8 +1213,8 @@ def test_commit_and_push_binds_failed_results_too(tmp_path: Path) -> None:
     pre_commit_tree = tree_identity(repo)
     registry = ValidationRegistry()
     registry.record(pre_commit_tree, False)
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git, validation_registry=registry)
+    git = _workspace_git(repo, _init_bare(tmp_path / "remote.git"))
+    outcome = _issue_push(git, validation_registry=registry)
     assert outcome.result == "pushed"
     assert outcome.revision is not None
     assert registry.passed[outcome.revision] is False
@@ -1319,9 +1233,13 @@ def test_commit_and_push_records_inheritance_even_when_push_fails(
     pre_commit_tree = tree_identity(repo)
     registry = ValidationRegistry()
     registry.record(pre_commit_tree, True)
-    git = FakeGitOps()
-    git.fail_push = _GitFailure("'git push' failed: permission denied")
-    outcome = _issue_push(repo, git, validation_registry=registry)
+    git = AttemptWorkspaceGit(
+        repo,
+        "agent",
+        "1+agent@users.noreply.github.com",
+        _FailingPushRemote(_GitFailure("'git push' failed: permission denied")),
+    )
+    outcome = _issue_push(git, validation_registry=registry)
     assert outcome.result == "error"
     assert outcome.revision is not None
     assert registry.holds((("run-validation", "passed"),), outcome.revision) is True
@@ -1333,8 +1251,10 @@ def test_commit_and_push_clean_workspace_binds_nothing_new(tmp_path: Path) -> No
     head = _init_repo(repo)
     registry = ValidationRegistry()
     registry.record(head, True)
-    git = FakeGitOps(remote={"agent/implement/7/1-greeting": head})
-    outcome = _issue_push(repo, git, validation_registry=registry)
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, "agent/implement/7/1-greeting")
+    outcome = _issue_push(git, validation_registry=registry)
     assert outcome.result == "no-changes"
     assert outcome.revision == head
     assert registry.holds((("run-validation", "passed"),), head) is True
@@ -1358,8 +1278,8 @@ def test_commit_and_push_inherits_run_validation_end_to_end(tmp_path: Path) -> N
     assert validated.result == "passed"
     registry = ValidationRegistry()
     registry.record(validated.tree_id, validated.result == "passed")
-    git = FakeGitOps()
-    outcome = _issue_push(repo, git, validation_registry=registry)
+    git = _workspace_git(repo, _init_bare(tmp_path / "remote.git"))
+    outcome = _issue_push(git, validation_registry=registry)
     assert outcome.result == "pushed"
     assert outcome.revision is not None
     assert registry.holds((("run-validation", "passed"),), outcome.revision) is True
@@ -1393,15 +1313,12 @@ def test_implement_shape_open_pr_after_validated_commit(
     registry = ValidationRegistry()
     registry.record(validated.tree_id, validated.result == "passed")
     branch = "agent/implement/7/1-greeting"
-    git = FakeGitOps()
+    git = _workspace_git(repo, _init_bare(tmp_path / "remote.git"))
     push = run_commit_and_push(
-        workspace=repo,
         attempt_id="implement#7/1",
         input_type="issue",
         branch=branch,
         expected_head=None,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         start_commit=base,
         validation_registry=registry,
         git=git,
@@ -1425,7 +1342,6 @@ def test_implement_shape_open_pr_after_validated_commit(
     )
     tracker = FakeStepTracker(agent_id=1001)
     pr = run_open_pull_request(
-        workspace=repo,
         attempt_id="implement#7/1",
         workflow_id="implement",
         input_number=7,
@@ -1462,15 +1378,14 @@ def test_pr_shape_publish_review_after_validated_commit(
     pre_commit_tree = tree_identity(repo)
     registry = ValidationRegistry()
     registry.record(pre_commit_tree, True)
-    git = FakeGitOps(remote={"pr-head": "a" * 40})
+    bare = _init_bare(tmp_path / "remote.git")
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, pr_base, "pr-head")
     push = run_commit_and_push(
-        workspace=repo,
         attempt_id="review#9/1",
         input_type="pull-request",
         branch="pr-head",
-        expected_head="a" * 40,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
+        expected_head=pr_base,
         start_commit=pr_base,
         validation_registry=registry,
         git=git,

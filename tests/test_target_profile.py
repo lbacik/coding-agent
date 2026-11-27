@@ -26,6 +26,7 @@ from coding_agent.profile.toolchain import (
     load_toolchain_matrix,
 )
 from coding_agent.runtime.step_operations import LocalOperationRunner, run_check_readiness
+from coding_agent.runtime.workspace_git import AttemptWorkspaceGit, BareRepoRemote
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
 from coding_agent.worker.attempt_run import pinned_profile_text
 from coding_agent.worker.startup import (
@@ -862,15 +863,18 @@ def test_pinned_override_runs_ahead_of_the_repository_profile(
     evidence_dir.mkdir()
     command_runner = _Runner(evidence_dir)
     runner = LocalOperationRunner(
-        workspace=repo,
+        git=AttemptWorkspaceGit(
+            repo,
+            "agent",
+            "1+agent@users.noreply.github.com",
+            BareRepoRemote(repo, tmp_path / "remote.git"),
+        ),
         start_commit=head,
         matrix=_matrix(),
         service_env={"DB_URL": "tcp://db.local:5432"},
         prober=_Prober(),
         runner=command_runner,
         evidence_dir=evidence_dir,
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         attempt_branch="agent/w/1/1-slug",
         input_type="issue",
         profile_text_override=GOOD_PROFILE,
@@ -923,15 +927,18 @@ def test_unpinned_attempt_reads_the_repository_profile(
     try:
         command_runner = _Runner(evidence_dir)
         runner = LocalOperationRunner(
-            workspace=repo,
+            git=AttemptWorkspaceGit(
+                repo,
+                "agent",
+                "1+agent@users.noreply.github.com",
+                BareRepoRemote(repo, tmp_path / "remote.git"),
+            ),
             start_commit=head,
             matrix=_matrix(),
             service_env={"DB_URL": "tcp://db.local:5432"},
             prober=_Prober(),
             runner=command_runner,
             evidence_dir=evidence_dir,
-            author_name="agent",
-            author_email="1+agent@users.noreply.github.com",
             attempt_branch="agent/w/1/1-slug",
             input_type="issue",
             profile_text_override=None,

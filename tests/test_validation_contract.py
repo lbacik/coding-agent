@@ -32,6 +32,7 @@ from coding_agent.runtime.step_operations import (
     LocalOperationRunner,
     ProfileUnavailable,
 )
+from coding_agent.runtime.workspace_git import AttemptWorkspaceGit, BareRepoRemote
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
 from coding_agent.worker.run import WorkerLoopConfig, run_worker_loop
 from coding_agent.worker.startup import (
@@ -221,15 +222,18 @@ def _pin_runner(
     )
     runner: CommandRunner = _NeverRunner()
     return LocalOperationRunner(
-        workspace=tmp_path / "workspace",
+        git=AttemptWorkspaceGit(
+            tmp_path / "workspace",
+            "agent",
+            "1+agent@users.noreply.github.com",
+            BareRepoRemote(tmp_path / "workspace", tmp_path / "remote.git"),
+        ),
         start_commit=start_commit,
         matrix=matrix,
         service_env={},
         prober=SocketServiceProber(),
         runner=runner,
         evidence_dir=tmp_path / "evidence",
-        author_name="agent",
-        author_email="1+agent@users.noreply.github.com",
         attempt_branch="agent/w/1/1-slug",
         input_type="issue",
         profile_text_override=profile_text_override,

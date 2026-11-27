@@ -226,9 +226,10 @@ def test_startup_started_comes_before_any_expensive_phase(
         home: Path,
     ) -> VerifiedRunInputs | RunVerificationRefusal:
         seen.append(capsys.readouterr().err)
-        return real_verify(
+        result: VerifiedRunInputs | RunVerificationRefusal = real_verify(
             config=config, policy=policy, bundle_dir=bundle_dir, home=home
         )
+        return result
 
     monkeypatch.setattr(fakes.skills, "verify_run_inputs", _recording)
 
