@@ -39,7 +39,12 @@ from typing import Literal, Protocol
 
 from coding_agent.inputs.gates import GateResult
 from coding_agent.ledger.store import RunLedger
-from coding_agent.profile.parser import InvalidProfile, MissingReadinessFacts
+from coding_agent.profile.parser import (
+    InvalidProfile,
+    MissingReadinessFacts,
+    UnknownSchema,
+    parse_profile_yaml,
+)
 from coding_agent.profile.readiness import (
     ProfileSources,
     Ready,
@@ -80,6 +85,21 @@ from coding_agent.workflow.schema import WorkflowStep
 
 PROFILE_RELPATH = "docs/agents/project-profile.yml"
 """The Project Profile path, fixed by contract §10.2 (never configurable)."""
+
+
+class ProfileUnavailable(Exception):
+    """A Workflow that needs a Validation Contract cannot pin one.
+
+    Raised after the Claim where the profile is missing or broken at the
+    Attempt's start commit. The poll loop ends the Attempt
+    ``internal-failure`` through finalisation and records the durable Halt
+    ``profile-unavailable``. Carries the full Attempt reason, naming the
+    searched path and revision.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 OPERATION_TIMEOUT_SECONDS = 600.0
 """Code-owned bound for one local-operation command run (§10, §11.5).
@@ -1556,12 +1576,11 @@ class LocalOperationRunner:
     profile_text_override: str | None = None
     _profile: ProjectProfile | None = field(default=None, init=False, repr=False)
     _profile_loaded: bool = field(default=False, init=False, repr=False)
+    _profile_error: str | None = field(default=None, init=False, repr=False)
     validation_registry: ValidationRegistry = field(default_factory=ValidationRegistry)
 
-    def _pinned_profile(self) -> ProjectProfile | None:
-        if self._profile_loaded:
-            return self._profile
-        self._profile_loaded = True
+    def _pinned_text_and_sources(self) -> tuple[str | None, tuple[str, ...]]:
+        """The pinned profile text and the locations searched for it."""
         text = self.profile_text_override
         if text is None:
             try:
@@ -1571,21 +1590,57 @@ class LocalOperationRunner:
             sources = (f"{self.start_commit}:{PROFILE_RELPATH}",)
         else:
             sources = ("workflow-configuration",)
+        return text, sources
+
+    def pin_validation_contract(self) -> tuple[ProjectProfile | None, str | None]:
+        """Pin the Validation Contract: parse plus schema only.
+
+        Parses the profile (the instance-supplied text where the deployment
+        supplies one, else the Target Repository's profile at the start
+        commit) and checks its schema. Toolchain and service reachability
+        are never part of the pin: they stay in ``check-readiness``, which
+        reports them as ``not-ready``. Returns the parsed profile and
+        ``None``, or ``None`` and the short failure detail naming the
+        searched location.
+        """
+        if self._profile_loaded:
+            return self._profile, self._profile_error
+        self._profile_loaded = True
+        text, sources = self._pinned_text_and_sources()
+        searched = ", ".join(sources)
         if text is None:
-            return None
-        resolution = evaluate_readiness(
-            ProfileSources(
-                profile_yaml_text=text,
-                sources_searched=sources,
-            ),
-            self.matrix,
-            self.service_env,
-            self.prober,
-        )
-        if isinstance(resolution, Ready):
-            self._profile = resolution.profile
-            return self._profile
-        return None
+            self._profile_error = f"no Project Profile at {searched}"
+            return None, self._profile_error
+        outcome = parse_profile_yaml(text)
+        if isinstance(outcome, ProjectProfile):
+            self._profile = outcome
+            self._profile_error = None
+            return outcome, None
+        if isinstance(outcome, UnknownSchema):
+            detail = (
+                f"declared schema {outcome.declared!r} is not one this "
+                "image understands"
+            )
+        elif isinstance(outcome, MissingReadinessFacts):
+            detail = "missing Readiness Facts: " + "; ".join(outcome.missing)
+        elif isinstance(outcome, InvalidProfile):
+            detail = outcome.detail
+        else:  # pragma: no cover - the parser's outcome set is closed
+            raise AssertionError(
+                f"unexpected profile outcome {type(outcome).__name__}"
+            )
+        self._profile_error = f"invalid Project Profile at {searched}: {detail}"
+        return None, self._profile_error
+
+    def _pinned_profile(self) -> ProjectProfile | None:
+        """The pinned profile, or ``None`` where none can be pinned.
+
+        Parse plus schema only; see :meth:`pin_validation_contract` for the
+        failure detail. Toolchain and service fit stay in
+        ``check-readiness``.
+        """
+        profile, _ = self.pin_validation_contract()
+        return profile
 
     def _git_ops(self) -> CommitPushGitOps:
         if self.git is not None:
@@ -1646,6 +1701,7 @@ class LocalOperationRunner:
             if outcome.profile is not None:
                 self._profile = outcome.profile
                 self._profile_loaded = True
+                self._profile_error = None
             return OperationExecution(
                 result=outcome.result,
                 payload={"result": outcome.result, "detail": outcome.detail},

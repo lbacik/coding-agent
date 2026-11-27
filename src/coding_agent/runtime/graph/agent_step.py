@@ -954,8 +954,19 @@ class AgentStepDeps:
     """The settlement prices behind every response (§11.4)."""
     output_cap: int
     """The per-request output cap carried into every model call (§11)."""
-    profile: ProjectProfile
-    """The pinned Validation Contract binding ``shell`` and ``tests`` (§9.4)."""
+    profile: ProjectProfile | None
+    """The pinned Validation Contract binding the ``tests`` tools (§9.4).
+
+    ``None`` where the Workflow needs no Validation Contract and none
+    could be pinned: no tool such a step holds binds against it, and the
+    ``shell`` tool runs in the workspace root instead of the contract's
+    working directory.
+    """
+    profile_source: str = "target-repository"
+    """Where the pinned profile came from: ``target-repository``,
+    ``workflow-configuration`` or ``none`` (§10.2, ADR 0030)."""
+    profile_error: str | None = None
+    """Why no profile could be pinned, where ``profile_source`` is ``none``."""
     runner: CommandRunner
     """The credential-free command runner behind ``shell`` and ``tests`` (§9.4)."""
     evidence_dir: Path
@@ -1482,11 +1493,21 @@ def build_agent_step_tools(step: WorkflowStep, deps: AgentStepDeps) -> tuple[Bas
 
 def _run_check_unbound(deps: AgentStepDeps) -> bool:
     """Whether ``run_check`` is legitimately absent (``checks: none``)."""
+    if deps.profile is None:
+        return True
     return len(deps.profile.checks) == 0
 
 
 def _production_working_directory(deps: AgentStepDeps) -> Path:
-    """The directory Validation Contract commands run in."""
+    """The directory Validation Contract commands run in.
+
+    The contract's working directory where a profile is pinned; the
+    workspace root where the Workflow needs no Validation Contract and
+    none was pinned (only the ``shell`` tool runs there, which binds no
+    contract command).
+    """
+    if deps.profile is None:
+        return deps.workspace
     return deps.workspace / deps.profile.working_directory
 
 
@@ -1563,6 +1584,9 @@ def _record_test_targeted_evidence(deps: AgentStepDeps, path: str, result: str) 
 def _build_test_targeted_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
     """The step's ``test_targeted``: the Validation Contract command (§9.4)."""
     _ = step
+    assert deps.profile is not None, (
+        "the tests tool group needs a pinned Validation Contract"
+    )
     working_directory = _production_working_directory(deps)
     context = CommandContext(
         deps.runner,
@@ -1605,11 +1629,15 @@ def _build_run_check_tool(
     builder and tracks the call for the Execution Summary.
     """
     _ = step
-    if len(deps.profile.checks) == 0:
+    profile = deps.profile
+    assert profile is not None, (
+        "the tests tool group needs a pinned Validation Contract"
+    )
+    if len(profile.checks) == 0:
         return None
     working_directory = _production_working_directory(deps)
     inner = build_toolset_run_check_tool(
-        deps.profile,
+        profile,
         working_directory,
         deps.runner,
         deps.evidence_dir,
