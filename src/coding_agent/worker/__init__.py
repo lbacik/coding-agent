@@ -8,6 +8,7 @@ before the first selection, legacy unfinished Attempts refuse startup).
 Matrix row ids: REC-11, OPC-8, OP-15, OP-16.
 """
 
+from coding_agent.worker.halt_policy import HaltPolicy, HaltVerdict
 from coding_agent.worker.run import (
     CREDENTIAL_REASON,
     HALT_PIN_VIOLATION,
@@ -23,6 +24,8 @@ from coding_agent.worker.run import (
 __all__ = [
     "CREDENTIAL_REASON",
     "HALT_PIN_VIOLATION",
+    "HaltPolicy",
+    "HaltVerdict",
     "INFRASTRUCTURE_PREFIX",
     "MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES",
     "WorkerLoopConfig",
