@@ -36,7 +36,7 @@ from coding_agent.conformance.harness import (
     docker_run_agentctl,
     spawn_sleeper,
 )
-from support.fake_tracker import FakeTracker
+from support.fake_step_tracker import FakeStepTracker
 
 
 def test_harness_implements_every_operation() -> None:
@@ -56,9 +56,9 @@ def test_harness_implements_every_operation() -> None:
 def test_make_issue_eligible_is_claimable() -> None:
     """A planted issue is open, unassigned and carries the Selection Label."""
     harness = ConformanceHarness()
-    tracker = FakeTracker()
+    tracker = FakeStepTracker()
     candidate = harness.make_issue_eligible(tracker, 42)
-    assert tracker.candidates[42] is candidate
+    assert tracker.inputs[42] is candidate
     assert candidate.is_open is True
     assert candidate.assignees == ()
     assert "ready-for-agent" in candidate.labels
