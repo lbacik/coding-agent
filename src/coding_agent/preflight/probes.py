@@ -3,10 +3,10 @@ from __future__ import annotations
 import base64
 import uuid
 from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 import requests
 
-from coding_agent.github.client import GitHubClient
 from coding_agent.github.profile import GITHUB, CodeHostProfile
 
 PROBE_FILENAME = "coding-agent-preflight-probe.yml"
@@ -16,6 +16,34 @@ WORKFLOWS_PROBE_PATH = f"{GITHUB.protected_ci_paths[0]}{PROBE_FILENAME}"
 """The probe file path, derived from the code-host profile (no literal here)."""
 
 PROBE_LABEL = "coding-agent-preflight"
+
+
+class ProbeHttp(Protocol):
+    """The narrow HTTP surface the preflight probes need.
+
+    Structural: the GitHub adapter's client satisfies it, and so does any
+    test double. The probes never name the concrete client type.
+    """
+
+    def get(self, path: str, **kwargs: Any) -> requests.Response:
+        """One authenticated ``GET`` against the code host."""
+        ...
+
+    def post(self, path: str, **kwargs: Any) -> requests.Response:
+        """One authenticated ``POST`` against the code host."""
+        ...
+
+    def patch(self, path: str, **kwargs: Any) -> requests.Response:
+        """One authenticated ``PATCH`` against the code host."""
+        ...
+
+    def put(self, path: str, **kwargs: Any) -> requests.Response:
+        """One authenticated ``PUT`` against the code host."""
+        ...
+
+    def delete(self, path: str, **kwargs: Any) -> requests.Response:
+        """One authenticated ``DELETE`` against the code host."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -41,7 +69,7 @@ class PreflightError(Exception):
     """A probe could not even be attempted (as opposed to failing as its result)."""
 
 
-def _bootstrap_empty_repository(client: GitHubClient, owner: str, repo: str) -> str:
+def _bootstrap_empty_repository(client: ProbeHttp, owner: str, repo: str) -> str:
     """Create the first commit on the default branch via the Contents API.
 
     A sandbox repository created empty (no initial commit) has no ref to
@@ -67,7 +95,7 @@ def _bootstrap_empty_repository(client: GitHubClient, owner: str, repo: str) -> 
     return str(response.json()["commit"]["sha"])
 
 
-def _default_branch_head(client: GitHubClient, owner: str, repo: str) -> tuple[str, str]:
+def _default_branch_head(client: ProbeHttp, owner: str, repo: str) -> tuple[str, str]:
     repo_response = client.get(f"/repos/{owner}/{repo}")
     if repo_response.status_code != 200:
         raise PreflightError(
@@ -86,7 +114,7 @@ def _default_branch_head(client: GitHubClient, owner: str, repo: str) -> tuple[s
     return default_branch, ref_response.json()["object"]["sha"]
 
 
-def _open_probe_issue(client: GitHubClient, owner: str, repo: str, run_id: str) -> int:
+def _open_probe_issue(client: ProbeHttp, owner: str, repo: str, run_id: str) -> int:
     response = client.post(
         f"/repos/{owner}/{repo}/issues",
         json={
@@ -103,7 +131,7 @@ def _open_probe_issue(client: GitHubClient, owner: str, repo: str, run_id: str) 
     return int(response.json()["number"])
 
 
-def _resolve_agent_login(client: GitHubClient) -> str:
+def _resolve_agent_login(client: ProbeHttp) -> str:
     """The Agent Identity's login, read back from `GET /user`.
 
     A read, never a write: preflight assigns the Agent Identity itself
@@ -118,7 +146,7 @@ def _resolve_agent_login(client: GitHubClient) -> str:
     return login
 
 
-def _issue_assignees(client: GitHubClient, owner: str, repo: str, issue_number: int) -> set[str]:
+def _issue_assignees(client: ProbeHttp, owner: str, repo: str, issue_number: int) -> set[str]:
     """The issue's current assignee logins, read back from the API."""
     response = client.get(f"/repos/{owner}/{repo}/issues/{issue_number}")
     if response.status_code != 200:
@@ -130,7 +158,7 @@ def _issue_assignees(client: GitHubClient, owner: str, repo: str, issue_number: 
 
 
 def probe_assignment_add_remove(
-    client: GitHubClient, owner: str, repo: str, issue_number: int, agent_login: str
+    client: ProbeHttp, owner: str, repo: str, issue_number: int, agent_login: str
 ) -> ProbeResult:
     """Assign the Agent Identity, read it back, remove it, verify removal.
 
@@ -175,7 +203,7 @@ def probe_assignment_add_remove(
 
 
 def _close_probe_issue(
-    client: GitHubClient, owner: str, repo: str, issue_number: int, report: PreflightReport
+    client: ProbeHttp, owner: str, repo: str, issue_number: int, report: PreflightReport
 ) -> None:
     summary = "\n".join(f"- {'✓' if r.passed else '✗'} {r.name}: {r.detail}" for r in report.results)
     client.post(
@@ -185,7 +213,7 @@ def _close_probe_issue(
     client.patch(f"/repos/{owner}/{repo}/issues/{issue_number}", json={"state": "closed"})
 
 
-def probe_issue_comment(client: GitHubClient, owner: str, repo: str, issue_number: int) -> ProbeResult:
+def probe_issue_comment(client: ProbeHttp, owner: str, repo: str, issue_number: int) -> ProbeResult:
     response = client.post(
         f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
         json={"body": "coding-agent preflight probe: issue comment."},
@@ -196,7 +224,7 @@ def probe_issue_comment(client: GitHubClient, owner: str, repo: str, issue_numbe
 
 
 def probe_label_add_remove(
-    client: GitHubClient, owner: str, repo: str, issue_number: int
+    client: ProbeHttp, owner: str, repo: str, issue_number: int
 ) -> ProbeResult:
     label_get = client.get(f"/repos/{owner}/{repo}/labels/{PROBE_LABEL}")
     if label_get.status_code == 404:
@@ -241,7 +269,7 @@ def probe_label_add_remove(
 
 
 def _put_contents(
-    client: GitHubClient,
+    client: ProbeHttp,
     owner: str,
     repo: str,
     path: str,
@@ -261,7 +289,7 @@ def _put_contents(
 
 
 def probe_branch_push(
-    client: GitHubClient, owner: str, repo: str, *, branch: str, base_sha: str, run_id: str
+    client: ProbeHttp, owner: str, repo: str, *, branch: str, base_sha: str, run_id: str
 ) -> ProbeResult:
     ref = client.post(
         f"/repos/{owner}/{repo}/git/refs",
@@ -285,7 +313,7 @@ def probe_branch_push(
 
 
 def probe_pull_request(
-    client: GitHubClient, owner: str, repo: str, *, branch: str, base_branch: str, run_id: str
+    client: ProbeHttp, owner: str, repo: str, *, branch: str, base_branch: str, run_id: str
 ) -> ProbeResult:
     open_response = client.post(
         f"/repos/{owner}/{repo}/pulls",
@@ -315,7 +343,7 @@ def probe_pull_request(
 
 
 def probe_workflows_write_rejected(
-    client: GitHubClient,
+    client: ProbeHttp,
     owner: str,
     repo: str,
     *,
@@ -359,7 +387,7 @@ def probe_workflows_write_rejected(
     )
 
 
-def run_preflight(client: GitHubClient, owner: str, repo: str) -> PreflightReport:
+def run_preflight(client: ProbeHttp, owner: str, repo: str) -> PreflightReport:
     """Every write probe contract §18's Preflight subsection lists.
 
     Run against a sandbox Target Repository, never at Worker startup.

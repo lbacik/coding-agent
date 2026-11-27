@@ -1,7 +1,9 @@
 """Provider-neutral tracker/host failure types for the step-workflow runtime.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §14.4 and
-``docs/contract/mvp-runtime-contract.md`` §13 (rate limits and refusals).
+``docs/contract/mvp-runtime-contract.md`` §13 (rate limits and refusals),
+plus step-workflow §13/§18 (a confirmed bad credential halts the Worker; a
+permission refusal ends the Attempt ``failed``).
 This module is the single canonical home for the failure vocabulary the
 core programs against: the effect intent driver, the step publication /
 recovery / finalisation paths and the worker run loop import these names,
@@ -12,29 +14,30 @@ existing ``isinstance`` check keeps passing: there is exactly one class
 object per name.
 
 Row ids: L3-ERR-3…6, C-ERR-2 (classification outcomes and reason /
-failure-class values are unchanged from the adapter originals).
+failure-class values are unchanged from the adapter originals);
+INP-1 … INP-20, OP-14 (with S7b), REC-22 (port operations raising them).
 """
 
 from __future__ import annotations
 
-MAX_IN_PLACE_ATTEMPTS = 3
-"""Total requests per operation before the in-place retry bound is exhausted."""
-
-MAX_IN_PLACE_WAIT_SECONDS = 5 * 60.0
-"""Total waited seconds per operation before the in-place retry bound is exhausted."""
-
-INITIAL_BACKOFF_SECONDS = 1.0
-"""First wait of the exponential backoff for a limit without ``Retry-After``."""
+from coding_agent.inputs.retry import (
+    INITIAL_BACKOFF_SECONDS,
+    MAX_IN_PLACE_ATTEMPTS,
+    MAX_IN_PLACE_WAIT_SECONDS,
+)
 
 __all__ = [
     "CredentialFailure",
     "HostFailure",
     "INITIAL_BACKOFF_SECONDS",
+    "InputError",
+    "InputNotFound",
     "MAX_IN_PLACE_ATTEMPTS",
     "MAX_IN_PLACE_WAIT_SECONDS",
     "PermissionRefusal",
     "RateLimitExhausted",
     "StepTrackerError",
+    "TransientInputError",
 ]
 
 
@@ -56,6 +59,7 @@ class HostFailure(Exception):
         *,
         reason: str,
         failure_class: str,
+        transient: bool = False,
     ) -> None:
         super().__init__(f"{method} {path} returned {status_code} ({reason})")
         self.method = method
@@ -63,6 +67,43 @@ class HostFailure(Exception):
         self.status_code = status_code
         self.reason = reason
         self.failure_class = failure_class
+        self.transient = transient
+
+
+InputError = HostFailure
+"""Alias of :class:`HostFailure`: the neutral port-operation failure.
+
+The Workflow Inputs ports document their failures as ``InputError``; the
+step-workflow runtime historically names the same class ``HostFailure``.
+Both names resolve to the very same class object, so core code catching
+either spelling catches the adapter's failures.
+"""
+
+
+class TransientInputError(HostFailure):
+    """A transient port failure: safe to repeat after a marker lookup (§14.4).
+
+    A write that failed with a 5xx may have landed, so the effect driver
+    re-looks it up by Attempt Marker before repeating it.
+    """
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        status_code: int,
+        *,
+        reason: str = "transient-failure",
+        failure_class: str = "github",
+    ) -> None:
+        super().__init__(
+            method,
+            path,
+            status_code,
+            reason=reason,
+            failure_class=failure_class,
+            transient=True,
+        )
 
 
 class CredentialFailure(HostFailure):
@@ -126,6 +167,24 @@ class RateLimitExhausted(HostFailure):
         )
         self.attempts = attempts
         self.waited_seconds = waited_seconds
+
+
+class InputNotFound(HostFailure):
+    """The port reports the read target absent (an HTTP 404).
+
+    Read callers that treat absence as configuration — the deferred project
+    profile read — catch this class specifically; every other read failure
+    stays a generic :class:`HostFailure`.
+    """
+
+    def __init__(self, method: str, path: str, status_code: int = 404) -> None:
+        super().__init__(
+            method,
+            path,
+            status_code,
+            reason="not-found",
+            failure_class="not-found",
+        )
 
 
 class StepTrackerError(Exception):

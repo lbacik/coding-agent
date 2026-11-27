@@ -28,26 +28,33 @@ transient, so the effect driver retries it by Attempt-Marker lookup.
 
 from __future__ import annotations
 
+import base64
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import requests
 
-from coding_agent.github.client import GitHubClient
+from coding_agent.github.client import DEFAULT_BASE_URL, GitHubClient
 from coding_agent.github.errors import request_with_retry
+from coding_agent.inputs.errors import InputError, InputNotFound
 from coding_agent.inputs.errors import StepTrackerError as StepTrackerError
 from coding_agent.inputs.port import (
     AgentFacts,
     InputComment,
+    InputPort,
     InputPullRequest,
     InputReview,
     InputType,
     LabeledEvent,
     TrackedInput,
 )
+from coding_agent.inputs.profile import GITHUB_PROFILE, CodeHostProfile
+
+if TYPE_CHECKING:
+    from coding_agent.identity.startup import StartupCheckResult
 
 _PAGE_SIZE = 100
 """One candidate, comment or pull-request page (reads paginate)."""
@@ -131,11 +138,29 @@ class GitHubStepTracker:
     agent_id: int | None = None
     sleep: Callable[[float], None] = time.sleep
     now: Callable[[], float] = time.time
+    profile: CodeHostProfile = GITHUB_PROFILE
 
     @property
     def target_repo(self) -> str:
         """The Target Repository, ``owner/name`` (§2.1)."""
         return f"{self.owner}/{self.repo}"
+
+    @property
+    def pull_requests(self) -> InputPort:
+        """The pull-request facet: pull-request Workflows claim through it.
+
+        Issues and pull requests share the GitHub issues API, so the facet
+        is this tracker itself.
+        """
+        return self
+
+    def delivery_reference(self, ref: str, *, draft: bool = False) -> str:
+        """The pull-request-to-issue link line for issue ``ref`` (§10.5).
+
+        Composed through this host's :class:`CodeHostProfile`: core passes
+        the semantic reference and never formats vendor text itself.
+        """
+        return self.profile.delivery_reference(ref, draft=draft)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         """One §14.4-classified call; statuses outside 401/403/429 are returned."""
@@ -915,3 +940,124 @@ class GitHubStepTracker:
             raise _write_error(
                 "POST", f"{self._issue_path(number)}/labels", response
             )
+
+
+def make_step_tracker(
+    *,
+    owner: str,
+    repo: str,
+    token: str,
+    agent_login: str,
+    agent_id: int | None = None,
+    base_url: str = DEFAULT_BASE_URL,
+) -> GitHubStepTracker:
+    """Build the production step tracker for the Agent Identity (§5, §14, §18).
+
+    The adapter owns the concrete client: core startup and the port
+    factory pass the token, never the client type. No configuration can
+    select a fake: production always builds this one.
+    """
+    return GitHubStepTracker(
+        owner=owner,
+        repo=repo,
+        client=GitHubClient(token, base_url=base_url),
+        agent_login=agent_login,
+        agent_id=agent_id,
+    )
+
+
+def run_startup_checks(
+    token: str,
+    owner: str,
+    repo: str,
+    *,
+    rate_limit_minimum: int | None = None,
+) -> StartupCheckResult:
+    """Run every non-mutating check contract §18 "Worker startup" requires.
+
+    Adapter-owned: the token-shape assertion, the identity resolution, the
+    rate-limit headroom read and the push-permission probe all live
+    GitHub-side. Raises :class:`StartupCheckFailed` or
+    :class:`TokenRejected` from the identity layer — never a GitHub type
+    core must name.
+    """
+    from coding_agent.identity.startup import (
+        DEFAULT_RATE_LIMIT_MINIMUM,
+        run_startup_checks as _identity_startup_checks,
+    )
+
+    return _identity_startup_checks(
+        GitHubClient(token),
+        token,
+        owner,
+        repo,
+        rate_limit_minimum=(
+            DEFAULT_RATE_LIMIT_MINIMUM
+            if rate_limit_minimum is None
+            else rate_limit_minimum
+        ),
+    )
+
+
+def read_text_at_revision(
+    *,
+    token: str,
+    owner: str,
+    repo: str,
+    path: str,
+    ref: str,
+) -> str:
+    """Read a text file at a revision through the Contents API (§10.2).
+
+    The deferred project-profile read: the bytes at ``path`` as committed
+    at ``ref``, decoded as UTF-8. Raises :class:`InputNotFound` where the
+    path is absent at that revision and :class:`InputError` where the read
+    otherwise fails. The Contents response shape and its base64 decoding
+    are adapter-side; the caller maps the neutral errors to its own
+    refusal. Mirrors the previously raw read: no retry classification, so
+    a 401 reads as a failed read, never a halt.
+    """
+    client = GitHubClient(token)
+    api_path = f"/repos/{owner}/{repo}/contents/{path}?ref={ref}"
+    try:
+        response = client.get(api_path)
+    except requests.RequestException as exc:
+        raise InputError(
+            "GET", api_path, 0, reason="read-failed", failure_class="github"
+        ) from exc
+    if response.status_code == 404:
+        raise InputNotFound("GET", api_path)
+    if response.status_code != 200:
+        raise InputError(
+            "GET",
+            api_path,
+            response.status_code,
+            reason="read-failed",
+            failure_class="github",
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise InputError(
+            "GET", api_path, 200, reason="bad-body", failure_class="github"
+        ) from exc
+    content = payload.get("content") if isinstance(payload, dict) else None
+    if not isinstance(content, str):
+        raise InputError(
+            "GET", api_path, 200, reason="bad-body", failure_class="github"
+        )
+    try:
+        return base64.b64decode(content).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise InputError(
+            "GET", api_path, 200, reason="bad-body", failure_class="github"
+        ) from exc
+
+
+def make_probe_transport(token: str) -> GitHubClient:
+    """Build the narrow HTTP transport the preflight probes need.
+
+    The adapter owns the concrete client: the probes program against a
+    structural HTTP surface and never name the client type.
+    """
+    return GitHubClient(token)
