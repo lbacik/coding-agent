@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 import requests
 
-from coding_agent.github.errors import GitHubFailure
+from coding_agent.inputs.errors import InputError
 from coding_agent.inputs.github import StepTrackerError
 from coding_agent.inputs.port import InputComment, InputType, TrackedInput
 from coding_agent.ledger.store import RunLedger, step_effect_marker
@@ -366,7 +366,7 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
         input_type=input_type,
     )
     assert settled == {"receipt": 4, "performed": 1, "not-performed": 0}
-    assert len(tracker.pull_requests) == 1
+    assert len(tracker.opened_pull_requests) == 1
     for step_id in ("explain", "publish", "open-pr", "legacy"):
         record = ledger.get_step_effect(ATTEMPT, step_id, 1, 0)
         assert record is not None
@@ -601,7 +601,7 @@ def test_transient_exhaustion_is_infrastructure_class(ledger: RunLedger) -> None
     )
 
     assert isinstance(outcome, Failed)
-    assert isinstance(outcome.error, GitHubFailure)
+    assert isinstance(outcome.error, InputError)
     assert outcome.error.failure_class == "github"
     assert outcome.error.reason == "infrastructure-failure"
     assert _post_comment_calls(tracker) == 3

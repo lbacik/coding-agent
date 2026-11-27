@@ -13,12 +13,8 @@ from coding_agent.github.errors import (
     classify_github_failure,
     request_with_retry,
 )
-from coding_agent.github.profile import GITHUB, CodeHostProfile
-
 __all__ = [
-    "CodeHostProfile",
     "CredentialFailure",
-    "GITHUB",
     "GitHubClient",
     "GitHubFailure",
     "PermissionRefusal",

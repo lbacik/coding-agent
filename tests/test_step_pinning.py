@@ -477,8 +477,7 @@ def test_cfg41_publication_bodies_carry_the_attempt_digest(ledger: RunLedger) ->
         workflow_id="implement",
         step_id="work",
         config_digest=digest,
-        issue_number=7,
-        draft=False,
+        delivery_reference="Closes #7",
         base_revision="abc123",
         effect_marker="marker",
     )

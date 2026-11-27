@@ -1,9 +1,8 @@
 """The coding-agent conformance harness (issue #260).
 
-Contract: ``agent-operator-contract`` major 1 at ``06ee46c`` (parent
-#245). The upstream ``v1.0.0`` harness API does not exist yet, so this
-module implements the five operations the issue names over the
-existing test doubles — the step-workflow fake tracker
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §5 (Workflow
+Inputs and selection). This module implements the five operations the issue
+names over the existing test doubles — the fake step tracker
 (``tests/support/fake_step_tracker.py``) and the scripted model
 (``tests/support/scripted_model.py``) — in the same shape the future
 contract will pin:

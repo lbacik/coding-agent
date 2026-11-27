@@ -1,4 +1,4 @@
-"""The ``StepTrackerPort`` Protocol the step-workflow runtime programs against.
+"""The ``InputPort`` / ``IssueTrackerPort`` / ``CodeHostPort`` Protocols.
 
 Contract: ``docs/contract/step-workflow-runtime-contract.md`` §5 (Workflow
 Inputs and selection: candidates are open inputs of the Workflow's type
@@ -11,23 +11,36 @@ Marker; lookups filter by the Agent Identity's numeric id; a write by
 another account carrying our marker is not our receipt) and §18 (identity
 mode detection from the Agent Identity's numeric id and the Target
 Repository owner's id; the Worker never edits an input's title or body and
-never applies a Selection Label — the port cannot express either).
+never applies a Selection Label — no port can express either).
 
 Row ids: INP-1 … INP-20, OP-14 (with S7b), REC-22.
 
+``InputPort`` is a claimable input, either an issue or a pull request;
+``IssueTrackerPort`` extends it with the pull-request-to-issue link line;
+``CodeHostPort`` is the Target Repository, its pull requests and reviews,
+plus a ``pull_requests`` facet reusing ``InputPort`` for pull-request
+Workflows. Each port carries its own identity operations, because the
+agent has a separate account in each system. ``StepTrackerPort`` is the
+combined production port both adapters serve today: the single ``target:``
+Workflow Configuration block wires both ports to the GitHub adapter.
+
 There is deliberately no operation that applies the Selection Label and
 none that edits an input's title or body — those two structural abstentions
-(§18) hold because the port cannot express them, not because any caller
+(§18) hold because no port can express them, not because any caller
 promises restraint.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal, Protocol
+
+from coding_agent.inputs.profile import CodeHostProfile
 
 InputType = Literal["issue", "pull-request"]
 """The Workflow's one input type (§5.1)."""
+
+
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -146,8 +159,11 @@ class InputPullRequest:
     draft: bool = False
 
 
-class StepTrackerPort(Protocol):
-    """The tracker operations the step-workflow runtime may call."""
+class InputPort(Protocol):
+    """A claimable Workflow input, either an issue or a pull request.
+
+    Row ids: INP-1 … INP-13, INP-19, INP-20 (§5–§7, §14, §18).
+    """
 
     @property
     def target_repo(self) -> str:
@@ -199,14 +215,6 @@ class StepTrackerPort(Protocol):
         """
         ...
 
-    def list_open_pull_requests(self) -> list[TrackedInput]:
-        """List every open pull request with its body (§5.3).
-
-        Read-only: the ``skip-open-agent-pr`` scan looks for the Agent
-        Identity's open pull request bearing an issue's Attempt Marker.
-        """
-        ...
-
     def read_labeled_event(
         self, number: int, input_type: InputType, label: str
     ) -> LabeledEvent | None:
@@ -219,10 +227,6 @@ class StepTrackerPort(Protocol):
 
     def has_open_blocker(self, number: int, input_type: InputType) -> bool:
         """Whether the input has an open native blocker (§5.2)."""
-        ...
-
-    def fetch_base_tip(self, base_branch: str) -> str:
-        """Resolve the base-branch tip at Claim (§7.1, §7.2)."""
         ...
 
     def assign_input(self, number: int, input_type: InputType) -> None:
@@ -274,6 +278,96 @@ class StepTrackerPort(Protocol):
         """Post one comment on the input, body already rendered (§10.7)."""
         ...
 
+    def remove_label(self, number: int, input_type: InputType, label: str) -> None:
+        """Remove one label from the input (§15.3).
+
+        Idempotent: a label already absent is the successful no-op, not a
+        failure. The Worker never applies a Selection Label (§18): the port
+        cannot express that write, and finalisation filters it at runtime.
+        """
+        ...
+
+    def add_labels(
+        self, number: int, input_type: InputType, labels: tuple[str, ...]
+    ) -> None:
+        """Apply end labels declared for the Terminal Outcome (§15.3).
+
+        Empty is a no-op. The runtime guard in finalisation drops the
+        Workflow's own Selection Label before this is called (REC-26).
+        """
+        ...
+
+
+class IssueTrackerPort(InputPort, Protocol):
+    """The Issue Tracker: where the issues a Workflow works live.
+
+    Row ids: INP-14 (the link line), with INP-1 … INP-13, INP-19, INP-20
+    inherited from :class:`InputPort`.
+    """
+
+    def delivery_reference(self, ref: str, *, draft: bool = False) -> str:
+        """The pull-request-to-issue link line for issue ``ref`` (§10.5).
+
+        ``ref`` is the issue reference without vendor syntax; the adapter
+        composes the vendor link line through its :class:`CodeHostProfile`
+        (today's closing keyword). A draft carries the non-closing line.
+        Core passes semantic fields and never formats vendor text itself.
+        """
+        ...
+
+
+class CodeHostPort(Protocol):
+    """The Code Host: the Target Repository, its pull requests and reviews.
+
+    Row ids: INP-15 … INP-18, OP-14 (with S7b), REC-22 (§5.3, §7, §10.5,
+    §10.6, §14, §18).
+    """
+
+    @property
+    def target_repo(self) -> str:
+        """The Target Repository, ``owner/name`` (§2.1)."""
+        ...
+
+    @property
+    def agent_login(self) -> str:
+        """The Agent Identity's login on this host."""
+        ...
+
+    @property
+    def agent_id(self) -> int | None:
+        """The Agent Identity's numeric id on this host, where known."""
+        ...
+
+    @property
+    def profile(self) -> CodeHostProfile:
+        """This host's facts: body limit, workflows paths, link rendering."""
+        ...
+
+    @property
+    def pull_requests(self) -> InputPort:
+        """The pull-request facet: pull-request Workflows claim through it."""
+        ...
+
+    def fetch_agent_identity(self) -> AgentFacts:
+        """Resolve the Agent Identity: login and numeric id (§18)."""
+        ...
+
+    def fetch_repository_owner_id(self) -> int:
+        """Resolve the Target Repository owner's numeric id (§18)."""
+        ...
+
+    def fetch_base_tip(self, base_branch: str) -> str:
+        """Resolve the base-branch tip at Claim (§7.1, §7.2)."""
+        ...
+
+    def list_open_pull_requests(self) -> list[TrackedInput]:
+        """List every open pull request with its body (§5.3).
+
+        Read-only: the ``skip-open-agent-pr`` scan looks for the Agent
+        Identity's open pull request bearing an issue's Attempt Marker.
+        """
+        ...
+
     def publish_review(
         self, number: int, *, commit_id: str, body: str
     ) -> InputReview:
@@ -309,7 +403,7 @@ class StepTrackerPort(Protocol):
 
         The title is the fixed runtime template over the Target Issue title
         and the body is the rendered publication body. ``draft`` opens a
-        draft; the ready/draft closing keyword is already in the body.
+        draft; the ready/draft delivery reference is already in the body.
         """
         ...
 
@@ -323,21 +417,29 @@ class StepTrackerPort(Protocol):
         """
         ...
 
-    def remove_label(self, number: int, input_type: InputType, label: str) -> None:
-        """Remove one label from the input (§15.3).
 
-        Idempotent: a label already absent is the successful no-op, not a
-        failure. The Worker never applies a Selection Label (§18): the port
-        cannot express that write, and finalisation filters it at runtime.
-        """
-        ...
+class StepTrackerPort(IssueTrackerPort, CodeHostPort, Protocol):
+    """The combined production port the step-workflow runtime programs against.
 
-    def add_labels(
-        self, number: int, input_type: InputType, labels: tuple[str, ...]
-    ) -> None:
-        """Apply end labels declared for the Terminal Outcome (§15.3).
+    Both ports wired to the one adapter the single ``target:`` Workflow
+    Configuration block names — today the GitHub adapter serving issues
+    and the Target Repository from the same host. New code should depend
+    on :class:`InputPort`, :class:`IssueTrackerPort` or
+    :class:`CodeHostPort` directly; this union stays so the one-port call
+    sites keep working unchanged.
+    """
 
-        Empty is a no-op. The runtime guard in finalisation drops the
-        Workflow's own Selection Label before this is called (REC-26).
-        """
-        ...
+
+__all__ = [
+    "AgentFacts",
+    "CodeHostPort",
+    "InputComment",
+    "InputPort",
+    "InputPullRequest",
+    "InputReview",
+    "InputType",
+    "IssueTrackerPort",
+    "LabeledEvent",
+    "StepTrackerPort",
+    "TrackedInput",
+]

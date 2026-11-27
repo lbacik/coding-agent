@@ -226,8 +226,7 @@ def test_open_pr_body_is_keyword_document_footer_marker() -> None:
         workflow_id=WORKFLOW_ID,
         step_id="open-pr",
         config_digest=CONFIG_DIGEST,
-        issue_number=7,
-        draft=False,
+        delivery_reference="Closes #7",
         base_revision="b" * 40,
         effect_marker=marker,
     )
@@ -302,10 +301,10 @@ def test_open_pr_opened_from_the_pushed_revision(
     assert outcome.revision == head
     assert outcome.pull_number is not None
     assert outcome.pull_url is not None
-    assert tracker.pull_requests[0].title == "Add a greeting"
-    assert tracker.pull_requests[0].draft is False
-    assert "Closes #7" in tracker.pull_requests[0].body
-    assert "Implements the greeting." in tracker.pull_requests[0].body
+    assert tracker.opened_pull_requests[0].title == "Add a greeting"
+    assert tracker.opened_pull_requests[0].draft is False
+    assert "Closes #7" in tracker.opened_pull_requests[0].body
+    assert "Implements the greeting." in tracker.opened_pull_requests[0].body
     record = ledger.get_step_effect(ATTEMPT, "open-pr", 1, 0)
     assert record is not None
     assert record.status == "receipt"
@@ -322,9 +321,9 @@ def test_open_pr_draft_flag_and_keyword(tmp_path: Path, ledger: RunLedger) -> No
         **_open_pr_kwargs(repo, tracker, ledger, "Draft work.", draft=True)  # type: ignore[arg-type]
     )
     assert outcome.result == "opened"
-    assert tracker.pull_requests[0].draft is True
-    assert "Part of #7" in tracker.pull_requests[0].body
-    assert "Closes #7" not in tracker.pull_requests[0].body
+    assert tracker.opened_pull_requests[0].draft is True
+    assert "Part of #7" in tracker.opened_pull_requests[0].body
+    assert "Closes #7" not in tracker.opened_pull_requests[0].body
 
 
 def test_open_pr_already_open_is_idempotent(tmp_path: Path, ledger: RunLedger) -> None:
@@ -341,7 +340,7 @@ def test_open_pr_already_open_is_idempotent(tmp_path: Path, ledger: RunLedger) -
     )
     assert second.result == "already-open"
     assert second.pull_number == first.pull_number
-    assert len(tracker.pull_requests) == 1
+    assert len(tracker.opened_pull_requests) == 1
     record = ledger.get_step_effect(ATTEMPT, "open-pr", 1, 0)
     assert record is not None
     assert record.status == "receipt"
@@ -360,13 +359,13 @@ def test_open_pr_human_closed_is_reported_never_recreated(
         **_open_pr_kwargs(repo, tracker, ledger, "Implements the greeting.")  # type: ignore[arg-type]
     )
     assert first.result == "opened"
-    tracker.pull_requests[0] = replace(tracker.pull_requests[0], state="closed")
+    tracker.opened_pull_requests[0] = replace(tracker.opened_pull_requests[0], state="closed")
     second = run_open_pull_request(
         **_open_pr_kwargs(repo, tracker, ledger, "Implements the greeting.")  # type: ignore[arg-type]
     )
     assert second.result == "already-open"
     assert second.pull_number == first.pull_number
-    assert len(tracker.pull_requests) == 1
+    assert len(tracker.opened_pull_requests) == 1
 
 
 def test_open_pr_foreign_marker_pull_request_is_ignored(
@@ -384,7 +383,7 @@ def test_open_pr_foreign_marker_pull_request_is_ignored(
         **_open_pr_kwargs(repo, tracker, ledger, "Implements the greeting.")  # type: ignore[arg-type]
     )
     assert outcome.result == "opened"
-    assert len(tracker.pull_requests) == 2
+    assert len(tracker.opened_pull_requests) == 2
 
 
 # --- OP-8: publish-review -------------------------------------------------------
@@ -666,7 +665,7 @@ def test_requires_unmet_before_any_write_all_ops(
     )
     assert comment_outcome.result == "requirement-unmet"
 
-    assert tracker.pull_requests == []
+    assert tracker.opened_pull_requests == []
     assert tracker.reviews == []
     assert tracker.comments == []
     assert ledger.get_step_effect(ATTEMPT, "open-pr", 1, 0) is None
@@ -701,7 +700,7 @@ def test_gate_and_claim_hold_for_every_publishing_operation(
             run_post_comment(
                 **_comment_kwargs(tracker, ledger, "doc", gate=gate_fn)  # type: ignore[arg-type]
             )
-        assert tracker.pull_requests == []
+        assert tracker.opened_pull_requests == []
         assert tracker.reviews == []
         assert tracker.comments == []
     tracker = FakeStepTracker(agent_id=1001)
@@ -756,7 +755,7 @@ def test_missing_document_is_error_without_a_write(
         )
     )
     assert outcome.result == "error"
-    assert tracker.pull_requests == []
+    assert tracker.opened_pull_requests == []
 
     with pytest.raises(DocumentResolutionError):
         resolve_document(ledger, ATTEMPT, None)
@@ -786,8 +785,7 @@ def test_huge_document_truncates_only_the_document() -> None:
         workflow_id=WORKFLOW_ID,
         step_id="open-pr",
         config_digest=CONFIG_DIGEST,
-        issue_number=7,
-        draft=False,
+        delivery_reference="Closes #7",
         base_revision="b" * 40,
         effect_marker=marker,
     )
@@ -804,8 +802,7 @@ def test_huge_document_truncates_only_the_document() -> None:
         workflow_id=WORKFLOW_ID,
         step_id="open-pr",
         config_digest=CONFIG_DIGEST,
-        issue_number=7,
-        draft=False,
+        delivery_reference="Closes #7",
         base_revision="b" * 40,
         effect_marker=marker,
     )
@@ -835,7 +832,7 @@ def test_huge_document_end_to_end_records_rendered_body_with_intent(
         **_open_pr_kwargs(repo, tracker, ledger, "z" * 70_000)  # type: ignore[arg-type]
     )
     assert outcome.result == "opened"
-    stored = tracker.pull_requests[0].body
+    stored = tracker.opened_pull_requests[0].body
     assert len(stored) <= GITHUB_BODY_CHAR_LIMIT
     assert "Closes #7" in stored
     record = ledger.get_step_effect(ATTEMPT, "open-pr", 1, 0)
@@ -855,7 +852,7 @@ def test_document_containing_a_closing_keyword_publishes_verbatim(
         **_open_pr_kwargs(repo, tracker, ledger, text)  # type: ignore[arg-type]
     )
     assert outcome.result == "opened"
-    stored = tracker.pull_requests[0].body
+    stored = tracker.opened_pull_requests[0].body
     assert "Closes #12" in stored
     assert stored.startswith("Closes #7\n\nFixes the bug.\n\nCloses #12")
 
@@ -1006,7 +1003,7 @@ def test_graph_runs_open_pr_for_real(tmp_path: Path, ledger: RunLedger) -> None:
         step_executor=ProductionStepExecutor(operation_runner=runner),
     )
     assert outcome.outcome == "completed"
-    assert len(tracker.pull_requests) == 1
+    assert len(tracker.opened_pull_requests) == 1
     executions = ledger.list_step_executions(attempt_id)
     assert [(item.step_id, item.result) for item in executions] == [
         ("process", "done"),

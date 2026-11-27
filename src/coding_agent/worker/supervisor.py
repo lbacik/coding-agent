@@ -53,7 +53,6 @@ from coding_agent.worker.startup import (
     _emit_startup_event as _emit_startup_event,
     configured_pin as configured_pin,
     credential_env_vars as credential_env_vars,
-    github_tracker as github_tracker,
     start as start,
 )
 

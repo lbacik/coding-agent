@@ -405,7 +405,7 @@ def test_human_closed_pull_request_never_recreated(ledger: RunLedger) -> None:
     opened = tracker.open_pull_request(
         title="t", head_branch="agent/branch", base_branch="main", body=body
     )
-    tracker.pull_requests[0] = tracker.pull_requests[0].__class__(
+    tracker.opened_pull_requests[0] = tracker.opened_pull_requests[0].__class__(
         **{**opened.__dict__, "state": "closed"},
     )
     ledger.record_step_effect_intent(
@@ -435,7 +435,7 @@ def test_human_closed_pull_request_never_recreated(ledger: RunLedger) -> None:
     assert "open_pull_request" not in [
         name for name in tracker.call_names()[len(calls_before):]
     ]
-    assert len(tracker.pull_requests) == 1
+    assert len(tracker.opened_pull_requests) == 1
 
 
 # --- REC-9: drift keeps the pull request -----------------------------------------
@@ -479,7 +479,7 @@ def test_drift_keeps_pull_request_and_lists_it(ledger: RunLedger) -> None:
         gate=lambda: GateResult(status="drift", reason="head-changed"),
     )
     assert recovered.outcome == "drift"
-    assert len(tracker.pull_requests) == 1
+    assert len(tracker.opened_pull_requests) == 1
     stored = ledger.get_outcome(ATTEMPT)
     assert stored is not None
     assert "open-pull-request 101" in stored.terminal_comment_body
@@ -619,8 +619,8 @@ def test_failed_attempt_reverts_nothing(ledger: RunLedger) -> None:
         comment_body=comment,
         writes=terminal_writes_for_outcome(),
     )
-    assert len(tracker.pull_requests) == 1
-    assert tracker.pull_requests[0].state == "open"
+    assert len(tracker.opened_pull_requests) == 1
+    assert tracker.opened_pull_requests[0].state == "open"
     assert len(tracker.comments) == 2
 
 
