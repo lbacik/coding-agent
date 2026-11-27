@@ -20,9 +20,10 @@ import pytest
 import requests
 
 from coding_agent.inputs.errors import InputError
-from coding_agent.inputs.github import StepTrackerError
+from coding_agent.inputs.github import StepTrackerError, format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputComment, InputType, TrackedInput
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.effects.driver import (
     EffectOutcome,
     Failed,
@@ -278,7 +279,9 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
     number = 7
     input_type: InputType = "issue"
 
-    comment_marker = step_effect_marker(ATTEMPT, "explain", 1, 0, kind="post-comment")
+    comment_marker = AttemptMarker(
+        attempt=ATTEMPT, kind="post-comment", step="explain", execution_number=1, ordinal=0
+    )
     ledger.record_step_effect_intent(
         ATTEMPT,
         "explain",
@@ -291,9 +294,16 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
             "input_type": "issue",
         },
     )
-    tracker.post_comment(number, input_type, f"already landed\n{comment_marker}")
+    tracker.post_comment(
+        number,
+        input_type,
+        f"already landed\n{format_attempt_marker(comment_marker)}",
+        comment_marker,
+    )
 
-    review_marker = step_effect_marker(ATTEMPT, "publish", 1, 0, kind="publish-review")
+    review_marker = AttemptMarker(
+        attempt=ATTEMPT, kind="publish-review", step="publish", execution_number=1, ordinal=0
+    )
     ledger.record_step_effect_intent(
         ATTEMPT,
         "publish",
@@ -306,10 +316,19 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
             "commit_id": "h" * 40,
         },
     )
-    tracker.publish_review(31, commit_id="h" * 40, body=f"landed\n{review_marker}")
+    tracker.publish_review(
+        31,
+        commit_id="h" * 40,
+        body=f"landed\n{format_attempt_marker(review_marker)}",
+        marker=review_marker,
+    )
 
-    pr_marker = step_effect_marker(
-        ATTEMPT, "open-pr", 1, 0, kind="open-pull-request"
+    pr_marker = AttemptMarker(
+        attempt=ATTEMPT,
+        kind="open-pull-request",
+        step="open-pr",
+        execution_number=1,
+        ordinal=0,
     )
     ledger.record_step_effect_intent(
         ATTEMPT,
@@ -330,11 +349,14 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
         title="Title",
         head_branch="agent/effects/7/1",
         base_branch="main",
-        body=f"landed\n{pr_marker}",
+        body=f"landed\n{format_attempt_marker(pr_marker)}",
         draft=False,
+        marker=pr_marker,
     )
 
-    legacy_marker = step_effect_marker(ATTEMPT, "legacy", 1, 0, kind="terminal")
+    legacy_marker = AttemptMarker(
+        attempt=ATTEMPT, kind="terminal", step="legacy", execution_number=1, ordinal=0
+    )
     ledger.record_step_effect_intent(
         ATTEMPT,
         "legacy",
@@ -343,7 +365,12 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
         rendered_payload="legacy payload",
         expected_target={"operation": ""},
     )
-    tracker.post_comment(number, input_type, f"legacy landed\n{legacy_marker}")
+    tracker.post_comment(
+        number,
+        input_type,
+        f"legacy landed\n{format_attempt_marker(legacy_marker)}",
+        legacy_marker,
+    )
 
     ledger.record_step_effect_intent(
         ATTEMPT,
@@ -375,12 +402,12 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
     assert late is not None
     assert late.status == "receipt"
 
-    terminal_marker = step_effect_marker(
-        ATTEMPT,
-        FINALISATION_STEP,
-        FINALISATION_EXECUTION,
-        TERMINAL_COMMENT_ORDINAL,
+    terminal_marker = AttemptMarker(
+        attempt=ATTEMPT,
         kind="terminal",
+        step=FINALISATION_STEP,
+        execution_number=FINALISATION_EXECUTION,
+        ordinal=TERMINAL_COMMENT_ORDINAL,
     )
     ledger.record_step_effect_intent(
         ATTEMPT,
@@ -390,7 +417,12 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
         rendered_payload="terminal body",
         expected_target={"terminal-write": "terminal"},
     )
-    tracker.post_comment(number, input_type, f"terminal\n{terminal_marker}")
+    tracker.post_comment(
+        number,
+        input_type,
+        f"terminal\n{format_attempt_marker(terminal_marker)}",
+        terminal_marker,
+    )
     terminal = ledger.get_step_effect(
         ATTEMPT, FINALISATION_STEP, FINALISATION_EXECUTION, TERMINAL_COMMENT_ORDINAL
     )
@@ -413,8 +445,9 @@ def test_credential_failure_propagates_from_the_driver(ledger: RunLedger) -> Non
 
     class _BadTracker(FakeStepTracker):
         def find_comment_by_marker(
-            self, number: int, input_type: InputType, marker: str
+            self, number: int, input_type: InputType, marker: AttemptMarker
         ) -> InputComment | None:
+            _ = (number, input_type, marker)
             raise CredentialFailure("GET", "/repos/o/s/issues/7/comments")
 
     tracker = _BadTracker(agent_id=1001)
@@ -468,17 +501,17 @@ class _ScriptedPostTracker(FakeStepTracker):
         self._plant_before_fail = plant_before_fail
 
     def post_comment(
-        self, number: int, input_type: InputType, body: str
+        self, number: int, input_type: InputType, body: str, marker: AttemptMarker
     ) -> InputComment:
         if self._script:
             action = self._script.pop(0)
             if action is not None:
                 if self._plant_before_fail:
-                    super().post_comment(number, input_type, body)
+                    super().post_comment(number, input_type, body, marker)
                 else:
                     self._record("post_comment", number, input_type, body)
                 raise action
-        return super().post_comment(number, input_type, body)
+        return super().post_comment(number, input_type, body, marker)
 
 
 def _drive_post_comment(
@@ -521,7 +554,15 @@ def test_transient_5xx_then_success_posts_once(
 ) -> None:
     """§14.4: a 502, 503 or 504 then a 201 posts exactly one comment."""
     sleeps: list[float] = []
-    marker = step_effect_marker(ATTEMPT, "work", 1, 0, kind="post-comment")
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt=ATTEMPT,
+            kind="post-comment",
+            step="work",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
     tracker = _ScriptedPostTracker([_transient_error(status_code)], agent_id=1001)
 
     outcome = _drive_post_comment(
@@ -545,7 +586,15 @@ def test_transient_504_that_landed_posts_nothing_more(ledger: RunLedger) -> None
     """§14.4: where the write landed despite the 504, the re-lookup finds
     it: the receipt is recorded and no second comment is posted."""
     sleeps: list[float] = []
-    marker = step_effect_marker(ATTEMPT, "work", 1, 0, kind="post-comment")
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt=ATTEMPT,
+            kind="post-comment",
+            step="work",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
     tracker = _ScriptedPostTracker(
         [_transient_error(504)], agent_id=1001, plant_before_fail=True
     )

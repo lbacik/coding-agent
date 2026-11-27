@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from support.fake_step_tracker import FakeStepTracker
+from support.markers import terminal_marker_text
 from support.workflow_config import load_config
 
 from coding_agent.inputs.authorisation import detect_identity_mode
@@ -39,8 +40,10 @@ from coding_agent.inputs.comments import (
     select_trusted_comments,
 )
 from coding_agent.inputs.gates import check_gate
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputComment, LabeledEvent, TrackedInput
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 from coding_agent.operator import archive as attempt_archives
 from coding_agent.operator.store import OperatorStore
 from coding_agent.runtime.graph.agent_step import StepAttemptFacts, comments_block_for
@@ -61,10 +64,24 @@ OWNER_ID = 22
 AGENT_ID = 33
 THIRD_PARTY_ID = 44
 
-CLAIM_MARKER = step_effect_marker("triage#7/1", "", 0, 1, kind="claim")
-TERMINAL_MARKER = step_effect_marker("triage#7/1", "", 0, 0, kind="terminal")
-PUBLICATION_MARKER = step_effect_marker(
-    "triage#7/1", "brief", 2, 0, kind="post-comment"
+CLAIM_MARKER = format_attempt_marker(
+    AttemptMarker(
+        attempt="triage#7/1", kind="claim", step="", execution_number=0, ordinal=1
+    )
+)
+TERMINAL_MARKER = format_attempt_marker(
+    AttemptMarker(
+        attempt="triage#7/1", kind="terminal", step="", execution_number=0, ordinal=0
+    )
+)
+PUBLICATION_MARKER = format_attempt_marker(
+    AttemptMarker(
+        attempt="triage#7/1",
+        kind="post-comment",
+        step="brief",
+        execution_number=2,
+        ordinal=0,
+    )
 )
 
 PUBLICATION_BODY = (
@@ -757,12 +774,15 @@ def test_recovery_of_pre_change_attempts(tmp_path: Path) -> None:
             is None
         )
         comment = render_terminal_comment(
-            attempt_id="implement#7/1", outcome="completed"
+            attempt_id="implement#7/1",
+            outcome="completed",
+            marker_text=terminal_marker_text("implement#7/1"),
         )
         assert "Trusted comments" not in comment
         assert "Trusted comments after Claim: none" in render_terminal_comment(
             attempt_id="implement#7/1",
             outcome="completed",
+            marker_text=terminal_marker_text("implement#7/1"),
             comments_section=render_comments_disclosure([]),
         )
     finally:

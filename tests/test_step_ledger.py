@@ -30,8 +30,9 @@ from coding_agent.ledger.store import (
     STEP_TRANSITION_ROUTE,
     RunLedger,
     step_effect_key,
-    step_effect_marker,
 )
+from coding_agent.inputs.github import format_attempt_marker
+from coding_agent.inputs.marker import AttemptMarker
 
 
 def _open(path: Path) -> RunLedger:
@@ -403,10 +404,18 @@ def test_step_effect_not_performed_carries_its_reason(tmp_path: Path) -> None:
 
 def test_step_effect_marker_carries_the_intent_key(tmp_path: Path) -> None:
     """§14.1, §14.4: the Attempt Marker carries the key for remote lookup."""
-    marker = step_effect_marker("#7/1", "process", 1, 0, kind="push")
+    _ = tmp_path
+    marker = format_attempt_marker(
+        AttemptMarker(
+            attempt="#7/1",
+            kind="push",
+            step="process",
+            execution_number=1,
+            ordinal=0,
+        )
+    )
 
+    assert marker == "<!-- coding-agent attempt=#7/1 kind=push step=process n=1 ordinal=0 -->"
     assert "#7/1" in marker
     assert "process" in marker
-    assert "1" in marker
-    assert "0" in marker
     assert "push" in marker

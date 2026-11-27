@@ -26,8 +26,9 @@ from coding_agent.inputs.claim import (
     terminal_marker_for,
     trusted_terminal_attempt_ids,
 )
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.port import InputComment, InputType, LabeledEvent, TrackedInput
-from coding_agent.ledger.store import RunLedger, step_effect_marker
+from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.step_finalisation import (
     FinalisationTarget,
     WorkflowEnded,
@@ -45,6 +46,7 @@ from coding_agent.workflow.schema import (
 )
 from support.fake_step_tracker import FakeStepTracker
 from support.effective_config import full_effective_configuration
+from support.markers import claim_marker_text, terminal_marker_text
 
 LABEL = "agent:implement"
 AGENT_ID = 1001
@@ -95,8 +97,7 @@ def _config(tracker: FakeStepTracker) -> ClaimConfig:
 
 
 def _claim_body(attempt: str) -> str:
-    marker = step_effect_marker(attempt, "", 0, 1, kind="claim")
-    return f"coding-agent claims {attempt}.\n\n{marker}\n"
+    return f"coding-agent claims {attempt}.\n\n{claim_marker_text(attempt)}\n"
 
 
 @pytest.fixture
@@ -125,8 +126,12 @@ def _seed_claim(tracker: FakeStepTracker, attempt: str) -> InputComment:
 
 
 def _seed_trusted_terminal(tracker: FakeStepTracker, attempt: str) -> InputComment:
-    body = render_terminal_comment(attempt_id=attempt, outcome="completed")
-    return tracker.post_comment(42, "issue", body)
+    body = render_terminal_comment(
+        attempt_id=attempt,
+        outcome="completed",
+        marker_text=terminal_marker_text(attempt),
+    )
+    return tracker.post_comment(42, "issue", body, terminal_marker_for(attempt))
 
 
 def test_trusted_terminal_matches_exact_attempt_and_author(
@@ -146,7 +151,11 @@ def test_trusted_terminal_matches_exact_attempt_and_author(
 def test_forged_author_terminal_is_ignored(tracker: FakeStepTracker) -> None:
     """A terminal comment by another account never ends the Claim."""
     _seed_claim(tracker, "implement#42/1")
-    body = render_terminal_comment(attempt_id="implement#42/1", outcome="completed")
+    body = render_terminal_comment(
+        attempt_id="implement#42/1",
+        outcome="completed",
+        marker_text=terminal_marker_text("implement#42/1"),
+    )
     tracker.comments.append(
         InputComment(
             comment_id=tracker._next_comment_id,
@@ -233,7 +242,11 @@ def test_independent_volume_blocked_by_forged_terminal(
 ) -> None:
     """A forged terminal never releases the old Claim."""
     _seed_claim(tracker, "implement#42/1")
-    body = render_terminal_comment(attempt_id="implement#42/1", outcome="completed")
+    body = render_terminal_comment(
+        attempt_id="implement#42/1",
+        outcome="completed",
+        marker_text=terminal_marker_text("implement#42/1"),
+    )
     tracker.comments.append(
         InputComment(
             comment_id=tracker._next_comment_id,
@@ -266,8 +279,16 @@ def test_guards_still_apply_past_trusted_terminal(
 
 def test_terminal_marker_is_canonical() -> None:
     """The trusted marker is the finalisation position with kind=terminal."""
-    assert terminal_marker_for("implement#42/1") == (
-        "<!-- coding-agent attempt=implement#42/1 kind=terminal step=- n=0 ordinal=0 -->"
+    assert terminal_marker_for("implement#42/1") == AttemptMarker(
+        attempt="implement#42/1",
+        kind="terminal",
+        step="",
+        execution_number=0,
+        ordinal=0,
+    )
+    assert (
+        terminal_marker_text("implement#42/1")
+        == "<!-- coding-agent attempt=implement#42/1 kind=terminal step=- n=0 ordinal=0 -->"
     )
 
 

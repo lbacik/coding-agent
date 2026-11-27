@@ -125,7 +125,7 @@ def terminal_marker_for(raw_attempt_id: str) -> AttemptMarker:
 def trusted_terminal_attempt_ids(
     comments: Sequence[InputComment],
     agent_id: int | None,
-    format_marker: Callable[[AttemptMarker], str],
+    format_marker: Callable[[AttemptMarker], str] | None = None,
 ) -> set[str]:
     """The Attempt ids a trusted terminal comment ends (§6.1, §14).
 
@@ -133,8 +133,13 @@ def trusted_terminal_attempt_ids(
     terminal marker for its exact Attempt id and is authored by the
     configured Agent Identity's numeric id. A forged author, a malformed
     marker or a mismatched Attempt never enters the set. ``None`` where the
-    numeric id is unknown trusts nothing.
+    numeric id is unknown trusts nothing. The GitHub rendering stands in
+    where no renderer is supplied; production passes the tracker's own.
     """
+    if format_marker is None:
+        from coding_agent.inputs.github import format_attempt_marker as _format
+
+        format_marker = _format
     if agent_id is None:
         return set()
     trusted: set[str] = set()
@@ -157,7 +162,7 @@ def has_trusted_terminal_comment(
     comments: Sequence[InputComment],
     raw_attempt_id: str,
     agent_id: int | None,
-    format_marker: Callable[[AttemptMarker], str],
+    format_marker: Callable[[AttemptMarker], str] | None = None,
 ) -> bool:
     """Whether a trusted terminal comment ends ``raw_attempt_id`` (§6.1).
 

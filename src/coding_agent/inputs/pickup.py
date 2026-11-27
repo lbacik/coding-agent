@@ -43,6 +43,7 @@ from coding_agent.inputs.claim import (
     in_force_claim_comments,
     terminal_marker_for,
 )
+from coding_agent.inputs.marker import AttemptMarker
 from coding_agent.inputs.numbering import parse_attempt_marker
 from coding_agent.inputs.pinning import PinnedInput, pin_from_readback
 from coding_agent.inputs.port import (
@@ -148,6 +149,7 @@ def newest_pickup_offer(
     agent_id: int | None,
     workflow_id: str,
     issue_number: int,
+    format_marker: Callable[[AttemptMarker], str] | None = None,
 ) -> tuple[RoundHandoffOffer, InputComment] | None:
     """The newest trusted terminal record's live offer, if any (§8).
 
@@ -162,7 +164,15 @@ def newest_pickup_offer(
     record (replaced by an ordinary terminal), or where the numeric
     identity is unknown. A forged author, a malformed marker, a mismatched
     record or a newer writer's version all read as absent.
+
+    ``format_marker`` renders the canonical terminal marker; the GitHub
+    rendering stands in where none is supplied. Production passes the
+    tracker's own renderer.
     """
+    if format_marker is None:
+        from coding_agent.inputs.github import format_attempt_marker as _format
+
+        format_marker = _format
     if agent_id is None:
         return None
     best_id: int | None = None
@@ -175,7 +185,7 @@ def newest_pickup_offer(
         if parsed is None:
             continue
         raw_attempt = str(parsed)
-        if terminal_marker_for(raw_attempt) not in comment.body:
+        if format_marker(terminal_marker_for(raw_attempt)) not in comment.body:
             continue
         if parsed.workflow != workflow_id or parsed.input_number != issue_number:
             continue
@@ -254,7 +264,9 @@ def _pickup_guard_reason(
     comments = inputs.list_comments(candidate.number, candidate.input_type)
     in_force = [
         comment
-        for comment in in_force_claim_comments(comments, ledger, agent_id)
+        for comment in in_force_claim_comments(
+            comments, ledger, agent_id, inputs.format_marker
+        )
         if comment.comment_id != exclude_comment_id
     ]
     agent_pr_open = False
@@ -335,7 +347,7 @@ def _pickup_readback_failure(
     if pickup.agent_login not in readback.assignees:
         return "assignment-missing"
     comments = inputs.list_comments(candidate.number, candidate.input_type)
-    winner = winning_claim(comments, ledger, agent_id)
+    winner = winning_claim(comments, ledger, agent_id, inputs.format_marker)
     if winner is None or winner.comment_id != own_comment_id:
         return "claim-lost"
     current = newest_pickup_offer(
@@ -343,6 +355,7 @@ def _pickup_readback_failure(
         agent_id=agent_id,
         workflow_id=pickup.workflow_id,
         issue_number=candidate.number,
+        format_marker=inputs.format_marker,
     )
     if (
         current is None
@@ -519,6 +532,7 @@ def sweep_pickup(
             agent_id=claim_agent_id,
             workflow_id=pickup.workflow_id,
             issue_number=candidate.number,
+            format_marker=inputs.format_marker,
         )
         offer = found[0] if found is not None else None
         guard = _pickup_guard_reason(

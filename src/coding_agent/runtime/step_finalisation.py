@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from coding_agent.inputs.comments import SelectedComment
 
-from coding_agent.inputs.claim import attempt_finished_in_ledger
+from coding_agent.inputs.claim import attempt_finished_in_ledger, terminal_marker_for
 from coding_agent.inputs.port import CodeHostPort, InputPort, InputType
 from coding_agent.ledger.store import (
     STEP_EFFECT_STATUS_INTENT,
@@ -39,7 +39,6 @@ from coding_agent.ledger.store import (
     RunLedger,
     StepEffectRecord,
     StepTransitionRecord,
-    step_effect_marker,
 )
 from coding_agent.operator.step_projection import describe_limit_fact
 from coding_agent.runtime.effects.driver import Failed, drive_effect
@@ -192,6 +191,7 @@ def render_terminal_comment(
     *,
     attempt_id: str,
     outcome: str,
+    marker_text: str,
     ending_step: str = "",
     step_result: str = "",
     workflow_end: str = "",
@@ -213,14 +213,11 @@ def render_terminal_comment(
     or the no-pickup diagnostic) and the optional post-Claim Trusted
     Comments disclosure ride above the Attempt Marker, which stays
     the last line, so the Claim Comment stops being in force (§6.1).
+
+    ``marker_text`` is the adapter's rendering of the terminal Attempt
+    Marker; core never formats marker text itself.
     """
-    marker = step_effect_marker(
-        attempt_id,
-        FINALISATION_STEP,
-        FINALISATION_EXECUTION,
-        TERMINAL_COMMENT_ORDINAL,
-        kind=TERMINAL_COMMENT_KIND,
-    )
+    marker = marker_text
     lines = [
         f"coding-agent {attempt_id}: {outcome}",
         "",
@@ -413,7 +410,9 @@ def other_claim_in_force(
     narrowed: list[InputComment] = [
         comment for comment in comments if isinstance(comment, InputComment)
     ]
-    trusted: set[str] = trusted_terminal_attempt_ids(narrowed, inputs.agent_id)
+    trusted: set[str] = trusted_terminal_attempt_ids(
+        narrowed, inputs.agent_id, inputs.format_marker
+    )
     for comment in comments:
         body = getattr(comment, "body", "")
         if not isinstance(body, str) or "kind=claim" not in body:
@@ -1163,6 +1162,7 @@ def finish_attempt(
     comment = render_terminal_comment(
         attempt_id=attempt_id,
         outcome=resolved.outcome,
+        marker_text=inputs.format_marker(terminal_marker_for(attempt_id)),
         ending_step=resolved.ending_step,
         step_result=resolved.step_result,
         workflow_end=resolved.workflow_end,
