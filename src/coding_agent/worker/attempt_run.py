@@ -19,9 +19,10 @@ from coding_agent.inputs.claim import ConfirmedClaim
 from coding_agent.inputs.gates import GateResult, check_gate
 from coding_agent.inputs.pinning import PinnedInput
 from coding_agent.inputs.port import InputType, StepTrackerPort
-from coding_agent.ledger.store import RunLedger
+from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.profile.schema import ProjectProfile
 from coding_agent.profile.services import SocketServiceProber
+from coding_agent.runtime.ceilings import UsageTotals
 from coding_agent.provider.observed_identity import PIN_VIOLATION_REASON
 from coding_agent.provider.pinned_model import PinnedModel
 from coding_agent.provider.price_table import TokenPrices
@@ -79,6 +80,7 @@ from coding_agent.runtime.step_recovery import (
 from coding_agent.runtime.step_operations import (
     LiveCommitPushGitOps,
     LocalOperationRunner,
+    ProfileUnavailable,
     tree_identity,
 )
 from coding_agent.runtime.step_publication import (
@@ -145,12 +147,14 @@ def build_agent_step_deps(
     pin: PinnedModel,
     redactions: Redactable,
     attempt_branch: str | None,
-    profile: ProjectProfile,
+    profile: ProjectProfile | None,
     command_runner: CommandRunner,
     evidence_dir: Path,
     transcript: TranscriptWriter,
     archive_dir: Path | None,
     on_activity: Callable[[], None] | None = None,
+    profile_source: str = "target-repository",
+    profile_error: str | None = None,
     handoff_note: str | None = None,
     pins: Mapping[str, PinnedModel] | None = None,
     pin_prices: Mapping[str, TokenPrices] | None = None,
@@ -189,6 +193,8 @@ def build_agent_step_deps(
         redactions=redactions,
         attempt_branch=attempt_branch,
         profile=profile,
+        profile_source=profile_source,
+        profile_error=profile_error,
         runner=command_runner,
         evidence_dir=evidence_dir,
         on_activity=on_activity,
@@ -389,6 +395,9 @@ def run_attempt(
             is_gateway=ready.pin.is_gateway,
         )
         author_name, author_email = noreply_author(ready.identity)
+        pinned_override_text = pinned_profile_text(
+            ready.ledger, claimed.attempt_id
+        )
         local_runner = LocalOperationRunner(
             workspace=workspace.path,
             start_commit=start_commit,
@@ -413,18 +422,36 @@ def run_attempt(
             remote_url=canonical_remote,
             helper=helper,
             redact=registry,
-            profile_text_override=pinned_profile_text(
-                ready.ledger, claimed.attempt_id
-            ),
+            profile_text_override=pinned_override_text,
         )
-        profile = local_runner._pinned_profile()
-        if profile is None:
-            raise ValueError(
-                f"cannot run Attempt {claimed.attempt_id!r}: "
-                "no pinned Validation Contract profile at the Attempt commit "
-                "(production must supply the profile; "
-                "the shell and tests tools bind against it)"
+        profile, profile_detail = local_runner.pin_validation_contract()
+        if profile is not None:
+            profile_source = (
+                "workflow-configuration"
+                if pinned_override_text is not None
+                else "target-repository"
             )
+            profile_error: str | None = None
+        elif ready.workflow.needs_validation_contract:
+            raise ProfileUnavailable(
+                f"cannot run Attempt {claimed.attempt_id!r}: {profile_detail}"
+            )
+        else:
+            profile_source = "none"
+            profile_error = profile_detail
+            try:
+                ready.ledger.record(
+                    claimed.attempt_id,
+                    "profile",
+                    BudgetSnapshot(elapsed_seconds=0.0, usage=UsageTotals()),
+                    detail=f"no Validation Contract: {profile_detail}",
+                    payload={
+                        "profile_source": profile_source,
+                        "profile_error": profile_detail,
+                    },
+                )
+            except Exception:
+                pass
         live = ready.live
         phase_hook = live.set_phase if live is not None else None
         deps = build_agent_step_deps(
@@ -448,6 +475,8 @@ def run_attempt(
             transcript=transcript,
             archive_dir=archive_dir,
             on_activity=(live.touch if live is not None else None),
+            profile_source=profile_source,
+            profile_error=profile_error,
             handoff_note=continuation_note,
             pins=ready.pins,
             pin_prices=ready.pin_prices,

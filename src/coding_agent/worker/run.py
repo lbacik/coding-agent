@@ -74,6 +74,7 @@ from coding_agent.runtime.step_finalisation import (
     UnsettledEffectsError,
     finish_attempt,
 )
+from coding_agent.runtime.step_operations import ProfileUnavailable
 from coding_agent.runtime.step_recovery import (
     GateCheck,
     RecoveredAttempt,
@@ -123,6 +124,9 @@ HALT_LEGACY_ATTEMPT = "legacy-attempt"
 
 HALT_MALFORMED_ATTEMPT = "malformed-attempt"
 """Halt reason: an unfinished Attempt whose stored id is not an Attempt Id."""
+
+HALT_PROFILE_UNAVAILABLE = "profile-unavailable"
+"""Halt reason: a validating Workflow's profile missing at Attempt start (§4.4)."""
 
 
 def is_credential_reason(reason: str) -> bool:
@@ -946,6 +950,136 @@ def _poll_loop(
             if live_view is not None:
                 live_view.clear_attempt()
             reason = f"{INFRASTRUCTURE_PREFIX}: {_failure_class(exc)}"
+        except ProfileUnavailable as exc:
+            # A validating Workflow whose contract cannot be pinned at the
+            # Attempt's start commit: the Attempt ends ``internal-failure``
+            # through the normal finalisation path, and the Worker halts —
+            # the cause belongs to the repository, so retrying would fail
+            # every Attempt the same way (§4.4, ADR 0037). No exception
+            # escapes: the Attempt is finished, never left open.
+            print(
+                f"run: profile unavailable in {claimed.attempt_id} "
+                f"({exc.reason}); halting",
+                file=sys.stderr,
+            )
+            try:
+                finish_attempt(
+                    tracker=tracker,
+                    ledger=ledger,
+                    attempt_id=claimed.attempt_id,
+                    target=FinalisationTarget(
+                        number=claimed.input_number,
+                        input_type=loop_config.claim_config.input_type,
+                        selection_label=loop_config.claim_config.selection_label,
+                    ),
+                    decision=InternalFailure(reason=exc.reason),
+                    end_labels_for=dict(loop_config.workflow.outcomes),
+                )
+            except CredentialFailure as cred_exc:
+                print(
+                    f"run: credential failure during finalisation of "
+                    f"{claimed.attempt_id} ({cred_exc}); halting",
+                    file=sys.stderr,
+                )
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_CREDENTIAL_FAILURE,
+                    detail=(
+                        "credential failure during finalisation of "
+                        f"{claimed.attempt_id} ({cred_exc}); halting"
+                    ),
+                )
+                return 1
+            except (
+                GitHubFailure,
+                RateLimitExhausted,
+                PermissionRefusal,
+                StepTrackerError,
+                GitFailure,
+                OSError,
+                UnsettledEffectsError,
+            ) as fin_exc:
+                # Best-effort finalisation failed: the Attempt stays recorded
+                # and unfinished, and the next cycle's recovery pass finishes
+                # it from the recorded row — the halt below still stops the
+                # retry loop.
+                print(
+                    f"run: finalisation failed for {claimed.attempt_id} "
+                    f"({fin_exc}); leaving it for recovery",
+                    file=sys.stderr,
+                )
+            if live_view is not None:
+                live_view.clear_attempt()
+            _record_loop_halt(
+                ledger,
+                reason=HALT_PROFILE_UNAVAILABLE,
+                detail=(
+                    f"profile unavailable in {claimed.attempt_id} "
+                    f"({exc.reason}); halting"
+                ),
+            )
+            return 1
+        except Exception as exc:
+            # Any other escaped exception after the Claim: this Attempt ends
+            # ``internal-failure`` through finalisation and the Worker keeps
+            # polling. It counts toward the halt-after-three bound under the
+            # ``unexpected`` failure class (§4.4). BaseExceptions
+            # (KeyboardInterrupt, SystemExit) still propagate.
+            print(
+                f"run: unexpected failure in {claimed.attempt_id} "
+                f"({exc!r}); ending internal-failure",
+                file=sys.stderr,
+            )
+            try:
+                finish_attempt(
+                    tracker=tracker,
+                    ledger=ledger,
+                    attempt_id=claimed.attempt_id,
+                    target=FinalisationTarget(
+                        number=claimed.input_number,
+                        input_type=loop_config.claim_config.input_type,
+                        selection_label=loop_config.claim_config.selection_label,
+                    ),
+                    decision=InternalFailure(
+                        reason=f"{INFRASTRUCTURE_PREFIX}: unexpected {exc}"
+                    ),
+                    end_labels_for=dict(loop_config.workflow.outcomes),
+                )
+            except CredentialFailure as cred_exc:
+                print(
+                    f"run: credential failure during finalisation of "
+                    f"{claimed.attempt_id} ({cred_exc}); halting",
+                    file=sys.stderr,
+                )
+                _record_loop_halt(
+                    ledger,
+                    reason=HALT_CREDENTIAL_FAILURE,
+                    detail=(
+                        "credential failure during finalisation of "
+                        f"{claimed.attempt_id} ({cred_exc}); halting"
+                    ),
+                )
+                return 1
+            except (
+                GitHubFailure,
+                RateLimitExhausted,
+                PermissionRefusal,
+                StepTrackerError,
+                GitFailure,
+                OSError,
+                UnsettledEffectsError,
+            ) as fin_exc:
+                # Best-effort finalisation failed: the Attempt stays recorded
+                # and unfinished, and the next cycle's recovery pass finishes
+                # it from the recorded row.
+                print(
+                    f"run: finalisation failed for {claimed.attempt_id} "
+                    f"({fin_exc}); leaving it for recovery",
+                    file=sys.stderr,
+                )
+            if live_view is not None:
+                live_view.clear_attempt()
+            reason = f"{INFRASTRUCTURE_PREFIX}: unexpected"
         else:
             _finalize(ledger, claimed.attempt_id)
             if live_view is not None:
@@ -1074,6 +1208,7 @@ __all__ = [
     "HALT_LEGACY_ATTEMPT",
     "HALT_MALFORMED_ATTEMPT",
     "HALT_PIN_VIOLATION",
+    "HALT_PROFILE_UNAVAILABLE",
     "HALT_RECOVERY_REFUSED",
     "HALT_RECOVERY_WRITE_FAILURE",
     "HALT_STARTUP_CHECK_REFUSED",

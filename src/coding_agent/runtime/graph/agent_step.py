@@ -962,11 +962,6 @@ class AgentStepDeps:
     ``shell`` tool runs in the workspace root instead of the contract's
     working directory.
     """
-    profile_source: str = "target-repository"
-    """Where the pinned profile came from: ``target-repository``,
-    ``workflow-configuration`` or ``none`` (§10.2, ADR 0030)."""
-    profile_error: str | None = None
-    """Why no profile could be pinned, where ``profile_source`` is ``none``."""
     runner: CommandRunner
     """The credential-free command runner behind ``shell`` and ``tests`` (§9.4)."""
     evidence_dir: Path
@@ -1051,6 +1046,11 @@ class AgentStepDeps:
     ``advisor_started`` / ``advisor_ended`` ledger events pair across Step
     Executions and never collide with a Sub-agent's call ids.
     """
+    profile_source: str = "target-repository"
+    """Where the pinned profile came from: ``target-repository``,
+    ``workflow-configuration`` or ``none`` (§10.2, ADR 0030, ADR 0037)."""
+    profile_error: str | None = None
+    """Why no profile could be pinned, where ``profile_source`` is ``none``."""
 
 
 def compose_attempt_header(attempt: StepAttemptFacts) -> str:
@@ -1584,7 +1584,8 @@ def _record_test_targeted_evidence(deps: AgentStepDeps, path: str, result: str) 
 def _build_test_targeted_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTool:
     """The step's ``test_targeted``: the Validation Contract command (§9.4)."""
     _ = step
-    assert deps.profile is not None, (
+    profile = deps.profile
+    assert profile is not None, (
         "the tests tool group needs a pinned Validation Contract"
     )
     working_directory = _production_working_directory(deps)
@@ -1595,7 +1596,7 @@ def _build_test_targeted_tool(deps: AgentStepDeps, step: WorkflowStep) -> BaseTo
         workspace_root=deps.workspace,
     )
     inner = build_toolset_test_targeted_tool(
-        deps.profile,
+        profile,
         context,
         artifact_store=deps.artifact_store,
         attempt_id=deps.attempt.attempt_id,
