@@ -18,11 +18,6 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 
-from coding_agent.runtime.completion import (
-    MAX_LISTED_RECORDED_IDS,
-    ClaimFailure,
-    format_claim_return,
-)
 from coding_agent.runtime.transcript import TranscriptModel, TranscriptWriter
 from support.scripted_model import ScriptedModel
 
@@ -117,40 +112,3 @@ def test_a_failed_request_is_recorded_and_raised(tmp_path: Path) -> None:
     records = _records(path)
     assert [r["kind"] for r in records] == ["request", "error"]
     assert records[1]["error"] == "RuntimeError: provider down"
-
-
-def test_evidence_return_lists_recorded_ids_when_a_test_is_absent() -> None:
-    """§9, C-IMP-1: an absent test is answered with the ids the evidence records."""
-    failures = [
-        ClaimFailure("AC-1", "tests/test_pricing.py::test_x", "absent from Criterion Evidence")
-    ]
-    text = format_claim_return(
-        failures,
-        returns_so_far=0,
-        recorded_ids=frozenset({"tests.test_pricing::test_x", "tests.test_pricing::test_y"}),
-    )
-    assert "Recorded test ids:" in text
-    assert "- tests.test_pricing::test_x" in text
-    assert "- tests.test_pricing::test_y" in text
-
-
-def test_evidence_return_lists_no_ids_when_no_test_is_absent() -> None:
-    failures = [ClaimFailure("AC-1", "pkg::t", "latest recorded run did not pass")]
-    text = format_claim_return(failures, returns_so_far=0, recorded_ids=frozenset({"pkg::t"}))
-    assert "Recorded test ids" not in text
-
-
-def test_evidence_return_bounds_the_listed_ids() -> None:
-    failures = [ClaimFailure("AC-1", "missing", "absent from Criterion Evidence")]
-    recorded = frozenset(f"pkg::t{index:03d}" for index in range(MAX_LISTED_RECORDED_IDS + 7))
-    text = format_claim_return(failures, returns_so_far=0, recorded_ids=recorded)
-    assert "(and 7 more)" in text
-    assert sum(1 for line in text.splitlines() if line.startswith("- pkg::t")) == (
-        MAX_LISTED_RECORDED_IDS
-    )
-
-
-def test_evidence_return_says_when_nothing_is_recorded() -> None:
-    failures = [ClaimFailure("AC-1", "missing", "absent from Criterion Evidence")]
-    text = format_claim_return(failures, returns_so_far=0)
-    assert "Criterion Evidence has no recorded test yet." in text

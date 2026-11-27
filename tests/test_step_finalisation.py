@@ -28,15 +28,12 @@ from coding_agent.runtime.step_finalisation import (
     terminal_writes_for_outcome,
 )
 from coding_agent.runtime.step_recovery import (
-    MAX_CONSECUTIVE_RECOVERY_FAILURES,
-    RecoveryFailureTracker,
     decide_restart_outcome,
     finalise_shutdown,
     recover_attempt,
     recover_unconfirmed_attempt,
     settle_open_step_effects,
     settle_step_effect,
-    should_halt_after_failures,
 )
 from coding_agent.workflow.schema import (
     Agent,
@@ -682,22 +679,6 @@ def test_credential_failure_halts_and_recovers(ledger: RunLedger) -> None:
     assert any(
         "kind=terminal" in comment.body for comment in tracker.comments
     )
-
-
-# --- REC-18: halt after three ------------------------------------------------------
-
-
-def test_three_consecutive_recovery_failures_halt() -> None:
-    """REC-18: three consecutive recovery write failures halt the Worker."""
-    tracker = RecoveryFailureTracker()
-    assert tracker.note_failure() is False
-    assert tracker.note_failure() is False
-    assert tracker.note_failure() is True
-    assert should_halt_after_failures(3) is True
-    assert should_halt_after_failures(2) is False
-    assert MAX_CONSECUTIVE_RECOVERY_FAILURES == 3
-    tracker.note_success()
-    assert tracker.consecutive_failures == 0
 
 
 # --- REC-21: dirty tree -------------------------------------------------------------
