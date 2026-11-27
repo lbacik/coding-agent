@@ -30,12 +30,15 @@ import pytest
 
 from coding_agent.github.client import DEFAULT_BASE_URL, GitHubClient
 from coding_agent.inputs import github as github_adapter
+from coding_agent.inputs import jira as jira_adapter
 from coding_agent.inputs.errors import (
     CredentialFailure,
     InputError,
     InputNotFound,
     PermissionRefusal,
 )
+from coding_agent.inputs.jira import JiraTracker
+from coding_agent.jira.client import JiraClient
 from coding_agent.inputs.claim import claim_marker_for
 from coding_agent.inputs.github import GitHubStepTracker
 from coding_agent.inputs.port import (
@@ -379,16 +382,27 @@ _ADAPTER_FILES = frozenset(
         _SRC_ROOT / "github" / "errors.py",
         _SRC_ROOT / "github" / "issues.py",
         _SRC_ROOT / "inputs" / "github.py",
+        _SRC_ROOT / "jira" / "__init__.py",
+        _SRC_ROOT / "jira" / "client.py",
+        _SRC_ROOT / "jira" / "errors.py",
+        _SRC_ROOT / "inputs" / "jira.py",
     }
 )
-"""Every module allowed to name the GitHub client, errors or API modules."""
+"""Every module allowed to name the GitHub/Jira client, errors or API modules."""
 
 _GITHUB_IMPORT_RE = re.compile(
     r"^\s*(?:from\s+coding_agent\.github\b|import\s+coding_agent\.github\b)"
 )
+_JIRA_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+coding_agent\.jira\b|import\s+coding_agent\.jira\b)"
+)
 _CLIENT_IMPORT_RE = re.compile(
     r"^\s*(?:from\s+\S+\s+import\s+[^\n]*|import\s+[^\n]*)\bGitHubClient\b"
 )
+_JIRA_CLIENT_IMPORT_RE = re.compile(
+    r"^\s*(?:from\s+\S+\s+import\s+[^\n]*|import\s+[^\n]*)\bJiraClient\b"
+)
+_HOST_LITERAL_RE = re.compile(r"atlassian", re.IGNORECASE)
 
 
 def _python_files() -> list[Path]:
@@ -491,3 +505,151 @@ def test_body_limit_literal_lives_only_in_the_profile() -> None:
         and "65536" in path.read_text(encoding="utf-8")
     ]
     assert bare == []
+
+
+TEST_JIRA_BASE_URL = "https://jira.test"
+
+
+def _make_jira_adapter() -> JiraTracker:
+    """The Jira adapter over no network: the constructor performs no I/O."""
+    return JiraTracker(
+        project="PROJ",
+        client=JiraClient("jira-token-secret", base_url=TEST_JIRA_BASE_URL),
+        agent_login="Agent Display",
+        account_id="agent-acct-1",
+    )
+
+
+def test_jira_adapter_serves_the_issue_tracker_port_only() -> None:
+    """INP-14: the Jira adapter serves ``IssueTrackerPort``, never the code host."""
+    adapter = _make_jira_adapter()
+    assert isinstance(adapter, JiraTracker)
+    for operation in ISSUE_TRACKER_PORT_OPS:
+        assert hasattr(adapter, operation), operation
+        if operation not in PORT_PROPERTIES:
+            assert callable(getattr(adapter, operation, None)), operation
+    for operation in CODE_HOST_PORT_OPS - ISSUE_TRACKER_PORT_OPS:
+        assert not hasattr(adapter, operation), operation
+    for operation in FORBIDDEN_PORT_OPS:
+        assert not hasattr(adapter, operation), operation
+
+
+def test_jira_delivery_reference_is_link_by_key_only(
+    requests_mock: Any,
+) -> None:
+    """INP-14, ADR 0038: the Jira key link; draft ignored; delivery writes nothing."""
+    adapter = _make_jira_adapter()
+    assert adapter.delivery_reference("42") == "PROJ-42"
+    assert adapter.delivery_reference("42", draft=True) == "PROJ-42"
+    assert adapter.delivery_reference("PROJ-42") == "PROJ-42"
+    assert requests_mock.request_history == []
+
+
+def test_jira_format_marker_uses_no_github_html() -> None:
+    """§14.1: the Jira marker line is human-readable, never the HTML fence."""
+    from coding_agent.inputs.marker import AttemptMarker
+
+    marker = AttemptMarker(
+        attempt="implement#42/1",
+        kind="post-comment",
+        step="process",
+        execution_number=1,
+        ordinal=0,
+    )
+    rendered = _make_jira_adapter().format_marker(marker)
+    assert "<!--" not in rendered
+    assert "coding-agent attempt=" not in rendered
+    assert "attempt=implement#42/1" in rendered
+
+
+def test_jira_production_factory_hides_the_concrete_client_type() -> None:
+    """Core startup passes the token; only the adapter names ``JiraClient``."""
+    tracker = jira_adapter.make_issue_tracker(
+        project="PROJ",
+        base_url=TEST_JIRA_BASE_URL,
+        email="agent@example.test",
+        token="jira-token-secret",
+        agent_login="Agent Display",
+        account_id="agent-acct-1",
+    )
+    assert tracker.target_repo == "PROJ"
+    assert tracker.agent_login == "Agent Display"
+
+
+def test_jira_adapter_permission_refusal_is_caught_as_the_neutral_type(
+    requests_mock: Any,
+) -> None:
+    """A permission-shaped 403 raises neutral ``PermissionRefusal`` (``jira``)."""
+    adapter = _make_jira_adapter()
+    requests_mock.get(
+        f"{TEST_JIRA_BASE_URL}/rest/api/3/issue/PROJ-42",
+        status_code=403,
+        json={"errorMessages": ["Forbidden"]},
+    )
+    with pytest.raises(PermissionRefusal):
+        adapter.fetch_input(42, "issue")
+    with pytest.raises(InputError):
+        adapter.fetch_input(42, "issue")
+
+
+def test_jira_adapter_transient_write_failure_is_caught_as_neutral_input_error(
+    requests_mock: Any,
+) -> None:
+    """§14.4: a 5xx comment write raises a transient neutral ``InputError`` (``jira``)."""
+    adapter = _make_jira_adapter()
+    requests_mock.post(
+        f"{TEST_JIRA_BASE_URL}/rest/api/3/issue/PROJ-42/comment",
+        status_code=500,
+        json={"errorMessages": ["boom"]},
+    )
+    with pytest.raises(InputError) as exc_info:
+        adapter.post_claim_comment(
+            42, "issue", "a body", claim_marker_for("implement#42/1")
+        )
+    assert exc_info.value.transient is True
+    assert exc_info.value.failure_class == "jira"
+
+
+def test_no_module_outside_the_adapters_imports_the_jira_modules() -> None:
+    """The port boundary: core never imports ``coding_agent.jira``."""
+    offenders = [
+        str(path.relative_to(_SRC_ROOT.parent.parent))
+        for path in _python_files()
+        if path not in _ADAPTER_FILES
+        and any(
+            _JIRA_IMPORT_RE.match(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    ]
+    assert offenders == []
+
+
+def test_core_startup_never_names_the_jira_client_type() -> None:
+    """Adapter-owned transport: only the adapters name ``JiraClient``."""
+    offenders = [
+        str(path.relative_to(_SRC_ROOT.parent.parent))
+        for path in _python_files()
+        if path not in _ADAPTER_FILES
+        and any(
+            _JIRA_CLIENT_IMPORT_RE.match(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    ]
+    assert offenders == []
+
+
+def test_jira_host_literal_lives_only_in_the_adapter() -> None:
+    """Core never names the Jira host: no ``atlassian`` literal outside the adapter."""
+    offenders = [
+        str(path.relative_to(_SRC_ROOT.parent.parent))
+        for path in _python_files()
+        if path
+        not in {
+            _SRC_ROOT / "jira" / "__init__.py",
+            _SRC_ROOT / "jira" / "client.py",
+            _SRC_ROOT / "jira" / "errors.py",
+            _SRC_ROOT / "inputs" / "jira.py",
+        }
+        and _HOST_LITERAL_RE.search(path.read_text(encoding="utf-8")) is not None
+    ]
+    assert offenders == []
