@@ -162,7 +162,7 @@ def closing_keyword_line(issue_number: int, *, draft: bool) -> str:
     non-closing line. The vendor text comes from today's host profile —
     core never formats the keyword itself — and the ``document`` is never
     rewritten for it (OP-20). New code should call
-    ``tracker.delivery_reference`` and pass the line to
+    ``code_host.delivery_reference`` and pass the line to
     :func:`render_open_pull_request_body` instead.
     """
     return GITHUB_PROFILE.delivery_reference(str(issue_number), draft=draft)

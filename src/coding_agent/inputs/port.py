@@ -344,7 +344,6 @@ class CodeHostPort(IssueTrackerPort, Protocol):
     def pull_requests(self) -> InputPort:
         """The pull-request facet: pull-request Workflows claim through it."""
         ...
-        ...
 
     def fetch_base_tip(self, base_branch: str) -> str:
         """Resolve the base-branch tip at Claim (§7.1, §7.2)."""

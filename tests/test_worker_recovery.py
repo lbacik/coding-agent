@@ -294,7 +294,7 @@ def test_rec_10_the_input_is_claimable_as_n_plus_one(ledger: RunLedger) -> None:
         inputs=tracker, code_host=tracker, ledger=ledger, workflow=_workflow()
     )
 
-    claimed = sweep_and_claim(tracker=tracker, ledger=ledger, config=_claim_config())
+    claimed = sweep_and_claim(inputs=tracker, code_host=tracker, ledger=ledger, config=_claim_config())
 
     assert isinstance(claimed, ConfirmedClaim)
     assert (claimed.attempt_id, claimed.n) == ("implement#7/2", 2)
@@ -756,7 +756,7 @@ def test_settle_open_step_effects_with_no_intents_settles_nothing(
     ledger.open_attempt("implement#7/1", effective_configuration=full_effective_configuration(_workflow()))
 
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id="implement#7/1",
         number=7,

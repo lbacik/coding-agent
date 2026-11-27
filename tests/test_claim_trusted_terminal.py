@@ -258,7 +258,7 @@ def test_guards_still_apply_past_trusted_terminal(
     _seed_trusted_terminal(tracker, "implement#42/1")
     tracker.inputs[42] = _issue(assignees=("human",))
     claimed = attempt_claim(
-        tracker, ledger, _config(tracker), tracker.inputs[42], identity_mode="dedicated"
+        tracker, tracker, ledger, _config(tracker), tracker.inputs[42], identity_mode="dedicated"
     )
     assert isinstance(claimed, ReleasedClaim)
     assert claimed.reason == "assigned"

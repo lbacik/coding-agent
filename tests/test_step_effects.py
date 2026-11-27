@@ -221,7 +221,7 @@ def test_settle_publish_review_refuses_moved_head_without_gate(
     assert intent is not None
     assert (
         settle_step_effect(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             intent=intent,
             number=31,
@@ -256,7 +256,7 @@ def test_settle_failure_leaves_the_intent_open(ledger: RunLedger) -> None:
     assert intent is not None
     with pytest.raises(RuntimeError, match="fake tracker failure"):
         settle_step_effect(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             intent=intent,
             number=31,
@@ -359,7 +359,7 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
     )
 
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=number,
@@ -397,7 +397,7 @@ def test_ledger_fixture_in_todays_format_settles(ledger: RunLedger) -> None:
     assert terminal is not None
     assert (
         settle_step_effect(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             intent=terminal,
             number=number,

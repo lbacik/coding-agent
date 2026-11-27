@@ -354,7 +354,7 @@ def test_pickup_claim_pins_recorded_revision_and_evidence(
     source = _seed_offer(tracker, _offer())
     assert tracker.base_tip != BASE
     claimed = attempt_pickup_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         _pickup_config(tracker),
@@ -453,7 +453,7 @@ def test_readback_replacement_releases_the_claim(
     tracker.list_comments = _appending_list  # type: ignore[method-assign]
     try:
         claimed = attempt_pickup_claim(
-            tracker,
+            tracker, tracker,
             ledger,
             _claim_config(tracker),
             _pickup_config(tracker),

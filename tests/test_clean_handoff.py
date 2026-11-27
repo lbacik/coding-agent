@@ -624,7 +624,7 @@ def test_sweep_refuses_an_unavailable_revision_without_a_claim(
     _trusted_comment(tracker, ATTEMPT, _offer())
 
     claimed = sweep_pickup(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         _pickup_config(tracker, verify_remote=lambda offer: False),
@@ -643,7 +643,7 @@ def test_sweep_with_an_available_revision_still_claims(
     _trusted_comment(tracker, ATTEMPT, _offer())
 
     claimed = sweep_pickup(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         _pickup_config(tracker, verify_remote=lambda offer: True),
@@ -678,7 +678,7 @@ def test_readback_unavailability_releases_the_claim(
     source = _trusted_comment(tracker, ATTEMPT, _offer())
 
     claimed = attempt_pickup_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _claim_config(tracker),
         _pickup_config(tracker, verify_remote=lambda offer: False),
@@ -704,7 +704,7 @@ def test_raising_verifier_reads_as_unavailable(
 
     assert (
         sweep_pickup(
-            tracker,
+            tracker, tracker,
             ledger,
             _claim_config(tracker),
             _pickup_config(tracker, verify_remote=_boom),

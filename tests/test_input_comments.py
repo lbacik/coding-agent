@@ -649,7 +649,7 @@ def test_unreadable_comments_release_the_claim(tmp_path: Path) -> None:
         # that fails.
         tracker.owner_calls = 1
         released = attempt_claim(
-            tracker,
+            tracker, tracker,
             ledger,
             _claim_config(tracker, comments_declared=True),
             _claim_issue(),

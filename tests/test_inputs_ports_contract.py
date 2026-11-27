@@ -178,7 +178,7 @@ PORT_PROPERTIES = frozenset(
 
 def _assert_serves_all_ports(servant: object) -> None:
     """Every port operation is present: methods callable, properties readable."""
-    for operation in STEP_TRACKER_PORT_OPS:
+    for operation in CODE_HOST_PORT_OPS:
         assert hasattr(servant, operation), operation
         if operation not in PORT_PROPERTIES:
             assert callable(getattr(servant, operation, None)), operation

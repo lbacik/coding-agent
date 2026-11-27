@@ -157,7 +157,7 @@ def test_terminal_writes_comment_labels_assignment(
     assert f"coding-agent {ATTEMPT}: completed" in comment
     assert f"Attempt: {ATTEMPT}" in comment
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -186,7 +186,7 @@ def test_terminal_comment_posted_on_closed_input(
     _open_attempt(ledger)
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="withdrawn")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -212,7 +212,7 @@ def test_assignment_kept_while_another_claim_in_force(
     _open_attempt(ledger, "implement#7/2")
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="completed")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -241,7 +241,7 @@ def test_perform_never_writes_selection_label(ledger: RunLedger) -> None:
     _open_attempt(ledger)
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="completed")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -268,7 +268,7 @@ def test_restart_finds_landed_write_by_key(ledger: RunLedger) -> None:
     tracker.post_comment(NUMBER, "issue", body)
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, body)
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -289,7 +289,7 @@ def test_restart_performs_absent_write_once(ledger: RunLedger) -> None:
     body = f"a fresh comment\n{marker}"
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, body)
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -311,7 +311,7 @@ def test_restart_records_not_performed_where_gate_fails(
     marker = step_effect_marker(ATTEMPT, "handoff-comment", 1, 0, kind="post-comment")
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, f"body\n{marker}")
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -330,7 +330,7 @@ def test_no_intent_means_no_write_at_restart(ledger: RunLedger) -> None:
     tracker.inputs[NUMBER] = _issue()
     _open_attempt(ledger)
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -355,7 +355,7 @@ def test_receipt_recovered_after_write_before_receipt(
     assert intent is not None and intent.status == "intent"
     assert (
         settle_step_effect(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             intent=intent,
             number=NUMBER,
@@ -378,7 +378,7 @@ def test_recovery_publishes_recorded_truncated_body_unchanged(
     _comment_intent(ledger, ATTEMPT, "handoff-comment", 1, truncated)
     assert (
         settle_open_step_effects(
-            tracker=tracker,
+            inputs=tracker, code_host=tracker,
             ledger=ledger,
             attempt_id=ATTEMPT,
             number=NUMBER,
@@ -424,7 +424,7 @@ def test_human_closed_pull_request_never_recreated(ledger: RunLedger) -> None:
     )
     calls_before = list(tracker.call_names())
     settled = settle_open_step_effects(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,
@@ -609,7 +609,7 @@ def test_failed_attempt_reverts_nothing(ledger: RunLedger) -> None:
     tracker.post_comment(NUMBER, "issue", "a review note")
     comment = render_terminal_comment(attempt_id=ATTEMPT, outcome="failed")
     perform_terminal_writes(
-        tracker=tracker,
+        inputs=tracker, code_host=tracker,
         ledger=ledger,
         attempt_id=ATTEMPT,
         number=NUMBER,

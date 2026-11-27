@@ -222,7 +222,7 @@ def test_pull_request_claim_pins_head_and_merge_base(
     tracker.inputs[42] = _pull_input(labels=(LABEL,))
     tracker.labeled_events[(42, LABEL)] = _human_event(42)
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -313,13 +313,13 @@ def test_competing_claim_lowest_comment_id_wins(
 ) -> None:
     """INP-5: two Workers, one Agent Identity — the lowest comment id wins."""
     first = attempt_claim(
-        tracker, ledger, _config(tracker), tracker.inputs[42], identity_mode="dedicated"
+        tracker, tracker, ledger, _config(tracker), tracker.inputs[42], identity_mode="dedicated"
     )
     assert isinstance(first, ConfirmedClaim)
 
     second_ledger = RunLedger(ledger.path.parent / "ledger-b.db")
     loser = attempt_claim(
-        tracker,
+        tracker, tracker,
         second_ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -357,7 +357,7 @@ def test_readback_failure_releases_and_cleans_up(
 
     tracker.on_assign = _close
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -394,7 +394,7 @@ def test_other_assignee_at_readback_releases(
 
     tracker.on_assign = _race
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],
@@ -532,7 +532,7 @@ def test_next_n_rebuilt_from_marks_where_ledger_lost(
         )
     )
     claimed = attempt_claim(
-        tracker,
+        tracker, tracker,
         ledger,
         _config(tracker),
         tracker.inputs[42],
