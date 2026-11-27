@@ -68,13 +68,6 @@ PROCESS_LOSS_REASON = "process-loss"
 SHUTDOWN_REASON = "shutdown"
 """The ``interrupted`` reason for a SIGTERM-ended live Attempt (§12)."""
 
-RECOVERY_WRITE_HALT_REASON = "recovery-write-failure"
-"""The Worker halt after three consecutive recovery write failures (§16.3)."""
-
-MAX_CONSECUTIVE_RECOVERY_FAILURES = 3
-"""The halt bound for consecutive recovery write failures (§16.3)."""
-
-
 GateCheck = Callable[[], GateResult]
 """Re-read the input and answer the Gate before a settled write (§7.3)."""
 
@@ -299,31 +292,6 @@ def _finish_after_settling(
         end_labels_for=end_labels_for,
         uncommitted_count=uncommitted_count,
     )
-
-
-@dataclass
-class RecoveryFailureTracker:
-    """Count consecutive recovery write failures toward the halt (REC-18).
-
-    Three consecutive recovery write failures halt the Worker with
-    ``recovery-write-failure`` (§16.3). A success resets the count.
-    """
-
-    consecutive_failures: int = 0
-
-    def note_success(self) -> None:
-        """Reset the count after a recovery pass with no write failure."""
-        self.consecutive_failures = 0
-
-    def note_failure(self) -> bool:
-        """Count one failed recovery pass; ``True`` where the Worker halts."""
-        self.consecutive_failures += 1
-        return self.consecutive_failures >= MAX_CONSECUTIVE_RECOVERY_FAILURES
-
-
-def should_halt_after_failures(consecutive_failures: int) -> bool:
-    """Whether the halt-after-three bound is reached (REC-18) (§16.3)."""
-    return consecutive_failures >= MAX_CONSECUTIVE_RECOVERY_FAILURES
 
 
 @dataclass(frozen=True)

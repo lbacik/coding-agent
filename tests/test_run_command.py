@@ -28,7 +28,6 @@ from langchain_core.tools import BaseTool
 from coding_agent.ledger.store import BudgetSnapshot, RunLedger
 from coding_agent.profile.schema import Evidence, ProjectProfile, Toolchain
 from coding_agent.runtime.ceilings import UsageTotals
-from coding_agent.runtime.completion import CriterionEvidence
 from coding_agent.runtime.footprint import (
     FOOTPRINT_KIND,
     FootprintEntry,
@@ -292,7 +291,6 @@ def test_c_run_5_test_through_run_command_produces_no_evidence(
     repo = _attempt_repo(tmp_path)
     evidence_dir = tmp_path / "ev"
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    evidence = CriterionEvidence()
     tool, _, _ = _run_tool(repo, SubprocessCommandRunner())
     junit = "<testsuite tests=\"1\"><testcase classname=\"a\" name=\"t1\"/></testsuite>"
     result = str(
@@ -302,7 +300,6 @@ def test_c_run_5_test_through_run_command_produces_no_evidence(
     )
     assert "ran" in result
     assert (evidence_dir / "targeted.xml").exists()
-    assert evidence.history() == ()
 
 
 def test_c_run_6_attempt_header_states_run_command_and_commit_rules() -> None:

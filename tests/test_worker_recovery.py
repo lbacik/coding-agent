@@ -33,12 +33,10 @@ from coding_agent.ledger.store import RunLedger
 from coding_agent.runtime.graph.workflow_graph import WorkflowResult
 from coding_agent.runtime import step_recovery
 from coding_agent.runtime.step_recovery import (
-    RecoveryFailureTracker,
     decide_restart_outcome,
     recover_attempt,
     recover_unconfirmed_attempt,
     settle_open_step_effects,
-    should_halt_after_failures,
 )
 from coding_agent.worker import run as worker_run
 from coding_agent.worker import supervisor
@@ -745,19 +743,6 @@ def test_rec_18_a_success_resets_the_failure_count(ledger: RunLedger) -> None:
     assert ledger.get_attempt(claimed.attempt_id).state == "released"
     assert ran == [7]
     assert ledger.get_attempt("implement#7/2").state == "finished"
-
-
-def test_recovery_failure_tracker_counts_to_three() -> None:
-    """REC-18: the unit predicate halts exactly at three consecutive failures."""
-    tracker = RecoveryFailureTracker()
-    assert should_halt_after_failures(0) is False
-    assert tracker.note_failure() is False
-    assert tracker.note_failure() is False
-    assert should_halt_after_failures(2) is False
-    assert tracker.note_failure() is True
-    assert should_halt_after_failures(3) is True
-    tracker.note_success()
-    assert tracker.consecutive_failures == 0
 
 
 # --- REC-5 … REC-8: effect settlement ------------------------------------------
