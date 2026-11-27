@@ -693,13 +693,19 @@ def test_lim7_spawn_group_holds_each_member(
     outcome = run_agent_step(workflow.steps["process"], 1, deps, {})
     # Only the first spawn ran: the second was refused while the first hold
     # was in force. The refused spawn's tool result names the fact.
-    started = [event for event in outcome.events if event["kind"] == "subagent_started"]
-    assert [event["payload"]["call_id"] for event in started] == ["spawn-1"]
-    ended = {
-        event["payload"]["call_id"]: event["payload"]
-        for event in outcome.events
-        if event["kind"] == "subagent_ended"
-    }
+    started_ids: list[object] = []
+    ended_by_call: dict[object, dict[str, object]] = {}
+    for event in outcome.events:
+        if event["kind"] not in ("subagent_started", "subagent_ended"):
+            continue
+        payload = event.get("payload")
+        assert isinstance(payload, dict)
+        if event["kind"] == "subagent_started":
+            started_ids.append(payload["call_id"])
+        else:
+            ended_by_call[payload["call_id"]] = dict(payload)
+    assert started_ids == ["spawn-1"]
+    ended = ended_by_call
     assert ended["spawn-1"]["ending"] == "reported"
     assert ended["spawn-2"]["ending"] == "refused"
     lines = (tmp_path / "archive" / "transcript.jsonl").read_text(
@@ -775,18 +781,20 @@ def test_lim7_spawn_admissions_are_recorded_durably(
         request_messages: list[BaseMessage],
         request_tools: list[Any],
     ) -> BaseMessage:
-        assert member.hold_id is not None
-        seen.append(member.hold_id)
+        assert admitted_hold in deps.budgets.open_hold_ids()
+        seen.append(admitted_hold)
         open_holds = ledger.list_open_admission_holds("implement#7/1")
         assert len(open_holds) == 1
         assert open_holds[0].step_id == "process"
-        return AIMessage(
+        response = AIMessage(
             content="",
             tool_calls=[
                 _call("report_subagent", {"report": "findings"}, "sub-1")
             ],
             usage_metadata=_usage(100, 10),
         )
+        request_messages.append(response)
+        return response
 
     outcome = member.run(
         deps, workflow.steps["process"], record_event, request_model=_request

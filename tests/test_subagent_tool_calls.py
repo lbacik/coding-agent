@@ -204,8 +204,9 @@ def _run(
 def _count_subagent_tool_runs(
     monkeypatch: pytest.MonkeyPatch, counter: list[int]
 ) -> None:
-    """Count every Sub-agent tool invocation behind ``run_subagent``."""
+    """Count every Sub-agent tool invocation behind the member."""
     import coding_agent.runtime.graph.subagent as subagent_module
+    import coding_agent.runtime.graph.subagent_member as member_module
 
     real_build = subagent_module.build_subagent_tools
 
@@ -225,6 +226,8 @@ def _count_subagent_tool_runs(
             monkeypatch.setattr(tool, "func", _counting)
         return tools
 
+    # The member owns the single toolset build: patch where it looks it up.
+    monkeypatch.setattr(member_module, "build_subagent_tools", _wrapped)
     monkeypatch.setattr(subagent_module, "build_subagent_tools", _wrapped)
 
 

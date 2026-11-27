@@ -801,18 +801,21 @@ def test_subagents_run_read_only_and_count_against_the_step(
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
-    queued = [
-        event
-        for event in outcome.events
-        if event["kind"] == "subagent_queued"
-    ]
-    assert [event["payload"]["call_id"] for event in queued] == ["s1"]
-    assert queued[0]["payload"]["description"] == "check diff"
-    ended = [
-        event for event in outcome.events if event["kind"] == "subagent_ended"
-    ]
-    assert len(ended) == 1
-    assert ended[0]["payload"]["reported"] is True
+    queued_payloads: list[dict[str, object]] = []
+    ended_payloads: list[dict[str, object]] = []
+    for event in outcome.events:
+        if event["kind"] not in ("subagent_queued", "subagent_ended"):
+            continue
+        payload = event.get("payload")
+        assert isinstance(payload, dict)
+        if event["kind"] == "subagent_queued":
+            queued_payloads.append(dict(payload))
+        else:
+            ended_payloads.append(dict(payload))
+    assert [payload["call_id"] for payload in queued_payloads] == ["s1"]
+    assert queued_payloads[0]["description"] == "check diff"
+    assert len(ended_payloads) == 1
+    assert ended_payloads[0]["reported"] is True
     tool_calls = outcome.usage["tool_calls"]
     assert isinstance(tool_calls, int) and tool_calls >= 1
     kinds = [event["kind"] for event in outcome.events]
@@ -820,6 +823,7 @@ def test_subagents_run_read_only_and_count_against_the_step(
         "model_response",
         "subagent_queued",
         "subagent_started",
+        "model_response",
         "subagent_ended",
         "model_response",
     ]
@@ -1165,6 +1169,7 @@ def test_subagent_events_carry_attempt_step_and_call_ids(
         "model_response",
         "subagent_queued",
         "subagent_started",
+        "model_response",
         "subagent_ended",
         "model_response",
     ]

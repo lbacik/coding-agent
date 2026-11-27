@@ -108,6 +108,7 @@ from coding_agent.runtime.graph.subagent import (
     SubagentRecord,
     SubagentResult,
     build_read_change_tool as build_subagent_read_change_tool,
+    run_subagent,
     validate_spawn_args,
 )
 from coding_agent.runtime.graph.tool_call_turn import execute_tool_call
