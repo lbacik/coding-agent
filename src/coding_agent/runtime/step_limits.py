@@ -27,6 +27,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import TracebackType
 from typing import Any
 
 from coding_agent.provider.price_table import TokenPrices
@@ -232,14 +233,14 @@ def effective_command_timeout(
     return min(code_owned_seconds, remaining_wall_seconds)
 
 
-@dataclass
-class _HeldRequest:
-    hold_id: str
-    step_id: str
-    bound_tokens: int
-    bound_cost_usd: float
-    bound_tools: int = 0
-    origin: UsageOrigin = "main"
+HoldRecordSink = Callable[[str, int, str, int, float], None]
+"""Mirror one admission to the Run Ledger: ``(step_id, seq, hold_id, bound_tokens, bound_cost)``."""
+
+HoldSettleSink = Callable[[str, bool], None]
+"""Mirror one settlement to the Run Ledger: ``(hold_id, charged)``."""
+
+UsageFlushSink = Callable[[], None]
+"""Flush the Attempt usage snapshot to the Run Ledger."""
 
 
 def _normalize_origin(origin: object) -> UsageOrigin:
@@ -249,22 +250,293 @@ def _normalize_origin(origin: object) -> UsageOrigin:
     return "main"
 
 
+class AdmissionHold:
+    """One scoped admission hold: spend, mirror and flush as one operation.
+
+    Returned by :meth:`AttemptBudgets.admit_hold` (and, without a ledger
+    mirror, by :meth:`AttemptBudgets.admit_request`). Each of :meth:`settle`,
+    :meth:`charge` and :meth:`close` updates authoritative spend first, then
+    mirrors to the Run Ledger, then flushes Attempt usage — all internally,
+    so callers make one call instead of three. Mirror and flush are
+    best-effort: a ledger failure never fails admission, settlement,
+    charging, or the Step Execution.
+
+    A hold that is closed, exits its context, or is dropped without an
+    explicit settle/charge settles empty: zero spend, ledger status settled
+    (not charged), usage flush still fires. Explicit charge remains the only
+    path booking the admitted worst case. Settling or charging an already
+    closed hold is a safe no-op returning current totals.
+    """
+
+    def __init__(
+        self,
+        budgets: AttemptBudgets,
+        *,
+        hold_id: str,
+        step_id: str,
+        seq: int | None,
+        bound_tokens: int,
+        bound_cost_usd: float,
+        origin: UsageOrigin,
+        closed: bool = False,
+    ) -> None:
+        self._budgets = budgets
+        self._hold_id = hold_id
+        self._step_id = step_id
+        self.seq = seq
+        self._bound_tokens = bound_tokens
+        self._bound_cost_usd = bound_cost
+        self._origin = origin
+        self._closed = closed
+
+    @property
+    def hold_id(self) -> str:
+        """This hold's id, the Run Ledger admission-hold row key."""
+        return self._hold_id
+
+    @property
+    def step_id(self) -> str:
+        """The step this hold was admitted under."""
+        return self._step_id
+
+    @property
+    def bound_tokens(self) -> int:
+        """The admitted worst-case token bound."""
+        return self._bound_tokens
+
+    @property
+    def bound_cost_usd(self) -> float:
+        """The admitted worst-case dollar bound."""
+        return self._bound_cost_usd
+
+    @property
+    def origin(self) -> UsageOrigin:
+        """The origin this hold settles under where none is passed."""
+        return self._origin
+
+    @property
+    def closed(self) -> bool:
+        """Whether the hold already settled, charged, or closed empty."""
+        return self._closed
+
+    def settle(
+        self,
+        actual: UsageTotals,
+        step_id: str | None = None,
+        *,
+        origin: UsageOrigin | None = None,
+        responses: int = 0,
+        responses_without_usage: int = 0,
+    ) -> UsageTotals:
+        """Settle the hold with the actual usage on response (§11.4).
+
+        A safe no-op returning current totals where already closed.
+        """
+        budgets = self._budgets
+        with budgets._lock:
+            if self._closed:
+                return budgets._attempt
+            self._closed = True
+            resolved = step_id or self._step_id
+            resolved_origin: UsageOrigin = _normalize_origin(
+                origin if origin is not None else self._origin
+            )
+            budgets._attempt = budgets._attempt + actual
+            if resolved:
+                budgets._per_step[resolved] = (
+                    budgets._per_step.get(resolved, UsageTotals()) + actual
+                )
+            if responses or responses_without_usage or (
+                actual.input_tokens
+                or actual.output_tokens
+                or actual.cache_read_tokens
+                or actual.cache_write_tokens
+                or actual.effective_tokens
+                or actual.cost_usd
+                or actual.tool_calls
+            ):
+                budgets._add_origin_cell(
+                    resolved,
+                    resolved_origin,
+                    budgets._cell_from_totals(
+                        actual,
+                        responses=responses,
+                        responses_without_usage=responses_without_usage,
+                    ),
+                )
+            totals = budgets._attempt
+        budgets._mirror_settle(self._hold_id, charged=False)
+        budgets._mirror_flush()
+        return totals
+
+    def charge(
+        self,
+        *,
+        origin: UsageOrigin | None = None,
+        response_arrived: bool = False,
+    ) -> UsageTotals:
+        """Charge the hold's admitted worst case (LIM-8).
+
+        A safe no-op returning current totals where already closed. See
+        :meth:`AttemptBudgets.charge_hold` for the accounting.
+        """
+        budgets = self._budgets
+        with budgets._lock:
+            if self._closed:
+                return budgets._attempt
+            self._closed = True
+            resolved_origin: UsageOrigin = _normalize_origin(
+                origin if origin is not None else self._origin
+            )
+            worst = UsageTotals(
+                tokens=self._bound_tokens,
+                effective_tokens=self._bound_tokens,
+                cost_usd=self._bound_cost_usd,
+                input_tokens=self._bound_tokens,
+                output_tokens=0,
+                cost_input_usd=self._bound_cost_usd,
+            )
+            budgets._attempt = budgets._attempt + worst
+            budgets._per_step[self._step_id] = (
+                budgets._per_step.get(self._step_id, UsageTotals()) + worst
+            )
+            budgets._add_origin_cell(
+                self._step_id,
+                resolved_origin,
+                OriginCell(
+                    input_tokens=self._bound_tokens,
+                    cost_input_usd=self._bound_cost_usd,
+                    effective_tokens=self._bound_tokens,
+                    responses=1,
+                    responses_without_usage=1,
+                    requests_without_response=0 if response_arrived else 1,
+                ),
+            )
+            totals = budgets._attempt
+        budgets._mirror_settle(self._hold_id, charged=True)
+        budgets._mirror_flush()
+        return totals
+
+    def close(self) -> UsageTotals:
+        """Settle an unused hold empty: zero spend, settled, flush fires.
+
+        A safe no-op returning current totals where already closed.
+        """
+        return self.settle(UsageTotals())
+
+    def __enter__(self) -> AdmissionHold:
+        """Enter the hold's scope: exit settles it empty unless settled."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        """Exit the hold's scope, settling empty where still open."""
+        self.close()
+        return False
+
+    def __del__(self) -> None:
+        """A dropped hold settles empty, best-effort and never failing."""
+        try:
+            if getattr(self, "_closed", True):
+                return
+            self.close()
+        except Exception:
+            pass
+
+
 @dataclass
 class AttemptBudgets:
     """The Attempt's live meter state: spend, holds and admission (§11).
 
     One instance per Attempt run, shared across the Workflow graph's nodes
     and across concurrent Sub-agent admissions under one lock. Spend is
-    authoritative here; the Run Ledger mirrors holds and per-execution usage
-    durably (§13.2) so a crash charges every still-open hold its worst case
-    (LIM-8).
+    authoritative here; the Meter owns the hold lifecycle — admission,
+    the Run Ledger mirror and the Attempt usage flush — as one scoped
+    operation (:class:`AdmissionHold`), so the meter and its ledger mirror
+    cannot diverge. The sinks stay optional constructor-injected callbacks
+    defaulting to no-op, so the meter is unit-testable with no ledger;
+    production wiring injects the real Run Ledger operations. The Run Ledger
+    mirrors holds and per-execution usage durably (§13.2) so a crash charges
+    every still-open hold its worst case (LIM-8).
     """
+
+    def bind_meter_sinks(
+        self,
+        *,
+        record_hold: HoldRecordSink | None = None,
+        settle_hold: HoldSettleSink | None = None,
+        flush_usage: UsageFlushSink | None = None,
+    ) -> None:
+        """Inject the Meter's ledger-mirror and usage-flush sinks.
+
+        Production and test wiring binds the real Run Ledger operations
+        after construction (the flush closure reads this same meter); the
+        defaults mirror and flush nothing, so the meter stays unit-testable
+        with no ledger.
+        """
+        with self._lock:
+            self.record_hold_sink = record_hold
+            self.settle_hold_sink = settle_hold
+            self.flush_usage_sink = flush_usage
+
+    def _mirror_record(
+        self,
+        step_id: str,
+        seq: int,
+        hold_id: str,
+        bound_tokens: int,
+        bound_cost: float,
+    ) -> None:
+        """Mirror one admission to the Run Ledger, never failing."""
+        sink = self.record_hold_sink
+        if sink is None:
+            return
+        try:
+            sink(step_id, seq, hold_id, bound_tokens, bound_cost)
+        except Exception:
+            pass
+
+    def _mirror_settle(self, hold_id: str, *, charged: bool) -> None:
+        """Mirror one settlement to the Run Ledger, never failing."""
+        sink = self.settle_hold_sink
+        if sink is None:
+            return
+        try:
+            sink(hold_id, charged)
+        except Exception:
+            pass
+
+    def _mirror_flush(self) -> None:
+        """Flush the Attempt usage snapshot, never failing."""
+        sink = self.flush_usage_sink
+        if sink is None:
+            return
+        try:
+            sink()
+        except Exception:
+            pass
 
     ceiling: AttemptCeiling
     workflow: Workflow
     prices: TokenPrices | None = None
     output_cap: int = 0
     attempt_id: str = ""
+    record_hold_sink: HoldRecordSink | None = field(
+        default=None, repr=False, compare=False
+    )
+    """Mirror one admission to the Run Ledger; ``None`` mirrors nothing."""
+    settle_hold_sink: HoldSettleSink | None = field(
+        default=None, repr=False, compare=False
+    )
+    """Mirror one settlement to the Run Ledger; ``None`` mirrors nothing."""
+    flush_usage_sink: UsageFlushSink | None = field(
+        default=None, repr=False, compare=False
+    )
+    """Flush the Attempt usage snapshot; ``None`` flushes nothing."""
     is_gateway: bool = False
     """Whether the Attempt's pin reaches its model through a Model Gateway.
 
@@ -279,7 +551,7 @@ class AttemptBudgets:
     _per_step: dict[str, UsageTotals] = field(default_factory=dict)
     _origin_cells: dict[tuple[str, str], OriginCell] = field(default_factory=dict)
     _origins_enabled: bool = field(default=True)
-    _held: dict[str, _HeldRequest] = field(default_factory=dict)
+    _held: dict[str, AdmissionHold] = field(default_factory=dict, repr=False)
     _step_seconds: dict[str, float] = field(default_factory=dict)
     _context_used: int | None = None
     _context_peak: int | None = None
@@ -458,9 +730,23 @@ class AttemptBudgets:
             return total
 
     def open_hold_ids(self) -> tuple[str, ...]:
-        """Every still-held admission hold, for crash charging (LIM-8)."""
+        """Every still-open admission hold, for crash charging (LIM-8).
+
+        The inspection surface stays: only its use as a pre-settle guard
+        is gone — a scoped hold settles itself idempotently.
+        """
         with self._lock:
-            return tuple(self._held.keys())
+            return tuple(
+                hold_id for hold_id, hold in self._held.items() if not hold.closed
+            )
+
+    def open_hold(self, hold_id: str) -> AdmissionHold | None:
+        """The still-open scoped hold for ``hold_id``, if one is held."""
+        with self._lock:
+            hold = self._held.get(hold_id)
+            if hold is None or hold.closed:
+                return None
+            return hold
 
     def attempt_totals(self) -> UsageTotals:
         """Cumulative Attempt spend, excluding in-flight holds."""
@@ -571,8 +857,14 @@ class AttemptBudgets:
     def held_totals(self) -> tuple[int, float]:
         """The in-flight worst case currently held (tokens, dollars)."""
         with self._lock:
-            tokens = sum(held.bound_tokens for held in self._held.values())
-            cost = sum(held.bound_cost_usd for held in self._held.values())
+            tokens = sum(
+                hold.bound_tokens for hold in self._held.values() if not hold.closed
+            )
+            cost = sum(
+                hold.bound_cost_usd
+                for hold in self._held.values()
+                if not hold.closed
+            )
             return tokens, cost
 
     def _pool_spent(self, step_id: str) -> tuple[UsageTotals, float]:
@@ -752,20 +1044,68 @@ class AttemptBudgets:
             return fact, None
         hold_id = f"hold-{uuid.uuid4().hex[:12]}"
         with self._lock:
-            self._held[hold_id] = _HeldRequest(
+            self._held[hold_id] = AdmissionHold(
+                self,
                 hold_id=hold_id,
                 step_id=step_id,
+                seq=None,
                 bound_tokens=bound_tokens,
                 bound_cost_usd=bound_cost,
                 origin=_normalize_origin(origin),
             )
         return None, hold_id
 
+    def admit_hold(
+        self,
+        step_id: str,
+        estimate_tokens: int,
+        *,
+        seq: int | None = None,
+        output_cap: int | None = None,
+        prices: TokenPrices | None = None,
+        is_gateway: bool | None = None,
+        origin: UsageOrigin = "main",
+    ) -> tuple[LimitFact | None, AdmissionHold | None]:
+        """Admit one model request, returning a scoped hold (§11.4, LIM-6).
+
+        The same worst-case admission as :meth:`admit_request` — the bound,
+        the allowance checks and the origin tagging are identical — but the
+        hold owns its whole lifecycle: settling, charging, or closing it
+        updates authoritative spend first, then mirrors to the Run Ledger,
+        then flushes Attempt usage, all internally. Where ``seq`` is known
+        the admission itself mirrors to the Run Ledger; without it (the
+        :meth:`admit_request` shim) only settlement mirrors. Mirror and
+        flush are best-effort and never fail admission.
+
+        Returns ``(None, hold)`` where the bound fits, else the
+        ``before-request`` fact and no hold.
+        """
+        fact, hold_id = self.admit_request(
+            step_id,
+            estimate_tokens,
+            output_cap=output_cap,
+            prices=prices,
+            is_gateway=is_gateway,
+            origin=origin,
+        )
+        if fact is not None or hold_id is None:
+            return fact, None
+        with self._lock:
+            hold = self._held.get(hold_id)
+        if hold is None:
+            return fact, None
+        hold.seq = seq
+        if seq is not None:
+            self._mirror_record(
+                step_id, seq, hold_id, hold.bound_tokens, hold.bound_cost_usd
+            )
+        return None, hold
+
     def hold_bound(self, hold_id: str) -> tuple[int, float] | None:
         """The worst-case bound one open hold carries, if still held."""
         with self._lock:
             held = self._held.get(hold_id)
-            if held is None:
+            if held is None or held.closed:
                 return None
             return held.bound_tokens, held.bound_cost_usd
 
@@ -779,17 +1119,29 @@ class AttemptBudgets:
         responses: int = 0,
         responses_without_usage: int = 0,
     ) -> UsageTotals:
-        """Settle a hold with the actual usage on response (§11.4)."""
+        """Settle a hold with the actual usage on response (§11.4).
+
+        A thin shim over the scoped hold: settling an already-closed hold
+        is a safe no-op returning current totals — the historic double-settle
+        re-booking does not survive.
+        """
         with self._lock:
-            held = self._held.pop(hold_id, None)
-            resolved = step_id or (held.step_id if held is not None else "")
-            resolved_origin: UsageOrigin = _normalize_origin(
-                origin if origin is not None else (held.origin if held is not None else "main")
+            hold = self._held.get(hold_id)
+        if hold is not None:
+            return hold.settle(
+                actual,
+                step_id,
+                origin=origin,
+                responses=responses,
+                responses_without_usage=responses_without_usage,
             )
+        # Never admitted here: book once the historic way, then mirror and
+        # flush, leaving a closed tombstone so a repeat settles empty.
+        with self._lock:
             self._attempt = self._attempt + actual
-            if resolved:
-                self._per_step[resolved] = (
-                    self._per_step.get(resolved, UsageTotals()) + actual
+            if step_id:
+                self._per_step[step_id] = (
+                    self._per_step.get(step_id, UsageTotals()) + actual
                 )
             if responses or responses_without_usage or (
                 actual.input_tokens
@@ -801,15 +1153,28 @@ class AttemptBudgets:
                 or actual.tool_calls
             ):
                 self._add_origin_cell(
-                    resolved,
-                    resolved_origin,
+                    step_id,
+                    _normalize_origin(origin),
                     self._cell_from_totals(
                         actual,
                         responses=responses,
                         responses_without_usage=responses_without_usage,
                     ),
                 )
-            return self._attempt
+            totals = self._attempt
+            self._held[hold_id] = AdmissionHold(
+                self,
+                hold_id=hold_id,
+                step_id=step_id,
+                seq=None,
+                bound_tokens=0,
+                bound_cost_usd=0.0,
+                origin=_normalize_origin(origin),
+                closed=True,
+            )
+        self._mirror_settle(hold_id, charged=False)
+        self._mirror_flush()
+        return totals
 
     def charge_hold(
         self,
@@ -833,39 +1198,31 @@ class AttemptBudgets:
         provider retry repeats, a per-request timeout, or a hold charged
         after a crash — leaves the default ``False`` and never counts as a
         turn, while still counting toward spend as today.
+
+        A thin shim over the scoped hold: charging an already-closed hold
+        is a safe no-op returning current totals.
         """
         with self._lock:
-            held = self._held.pop(hold_id, None)
-            if held is None:
-                return self._attempt
-            resolved_origin: UsageOrigin = _normalize_origin(
-                origin if origin is not None else held.origin
+            hold = self._held.get(hold_id)
+        if hold is not None:
+            return hold.charge(origin=origin, response_arrived=response_arrived)
+        # Never admitted here: the historic path booked nothing, so book
+        # nothing — but still mirror and flush — leaving a closed tombstone.
+        with self._lock:
+            totals = self._attempt
+            self._held[hold_id] = AdmissionHold(
+                self,
+                hold_id=hold_id,
+                step_id="",
+                seq=None,
+                bound_tokens=0,
+                bound_cost_usd=0.0,
+                origin=_normalize_origin(origin),
+                closed=True,
             )
-            worst = UsageTotals(
-                tokens=held.bound_tokens,
-                effective_tokens=held.bound_tokens,
-                cost_usd=held.bound_cost_usd,
-                input_tokens=held.bound_tokens,
-                output_tokens=0,
-                cost_input_usd=held.bound_cost_usd,
-            )
-            self._attempt = self._attempt + worst
-            self._per_step[held.step_id] = (
-                self._per_step.get(held.step_id, UsageTotals()) + worst
-            )
-            self._add_origin_cell(
-                held.step_id,
-                resolved_origin,
-                OriginCell(
-                    input_tokens=held.bound_tokens,
-                    cost_input_usd=held.bound_cost_usd,
-                    effective_tokens=held.bound_tokens,
-                    responses=1,
-                    responses_without_usage=1,
-                    requests_without_response=0 if response_arrived else 1,
-                ),
-            )
-            return self._attempt
+        self._mirror_settle(hold_id, charged=True)
+        self._mirror_flush()
+        return totals
 
     def note_tool_calls(
         self, step_id: str, count: int = 1, *, origin: UsageOrigin = "main"
@@ -992,6 +1349,9 @@ def build_budgets(
     opened_at: float | None = None,
     clock: Clock | None = None,
     is_gateway: bool = False,
+    record_hold_sink: HoldRecordSink | None = None,
+    settle_hold_sink: HoldSettleSink | None = None,
+    flush_usage_sink: UsageFlushSink | None = None,
 ) -> AttemptBudgets:
     """One Attempt's live budgets for ``workflow`` (§11.2–§11.3)."""
     resolved_clock: Clock = clock if clock is not None else time.monotonic
@@ -1001,6 +1361,9 @@ def build_budgets(
         prices=prices,
         output_cap=output_cap,
         attempt_id=attempt_id,
+        record_hold_sink=record_hold_sink,
+        settle_hold_sink=settle_hold_sink,
+        flush_usage_sink=flush_usage_sink,
         opened_at=resolved_clock() if opened_at is None else opened_at,
         clock=resolved_clock,
         is_gateway=is_gateway,

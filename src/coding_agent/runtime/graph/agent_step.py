@@ -73,8 +73,6 @@ from coding_agent.runtime.graph.agent_model_request import (
     _flush_attempt_usage,
     _hard_usable_for,
     _is_gateway_for,
-    _ledger_hold,
-    _ledger_settle,
     _prices_for,
     _soft_usable_for,
     request_model_response,
@@ -82,6 +80,7 @@ from coding_agent.runtime.graph.agent_model_request import (
 )
 from coding_agent.runtime.step_limits import (
     DEADLINE_MOMENT,
+    AdmissionHold,
     AttemptBudgets,
     LimitFact,
 )
