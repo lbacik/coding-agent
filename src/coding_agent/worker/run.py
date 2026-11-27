@@ -86,6 +86,12 @@ from coding_agent.skillbundle.recovery import (
     ArchiveRecoveryRefused,
     ensure_archive_for_recovery,
 )
+from coding_agent.worker.halt_policy import (
+    HALT_INFRASTRUCTURE_FAILURE,
+    HALT_RECOVERY_WRITE_FAILURE,
+    MAX_CONSECUTIVE_FAILURES,
+    HaltPolicy,
+)
 from coding_agent.worker.volume import MIN_FREE_BYTES, volume_free_bytes
 from coding_agent.workflow.schema import Workflow
 
@@ -98,8 +104,12 @@ HALT_PIN_VIOLATION = "pin-violation"
 INFRASTRUCTURE_PREFIX = "infrastructure-failure"
 """The Terminal Outcome reason prefix counted toward the halt-after-three (§4.4)."""
 
-MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES = 3
-"""Halting bound: three consecutive infrastructure-class failures (§4.4)."""
+MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES = MAX_CONSECUTIVE_FAILURES
+"""Halting bound: three consecutive infrastructure-class failures (§4.4).
+
+Alias of the halt policy's bound: the loop delegates counting to
+:class:`HaltPolicy` and keeps only classification, halt recording and I/O.
+"""
 
 HALT_STARTUP_CHECK_REFUSED = "startup-check-refused"
 """Halt reason: a refused startup check after the volume lock."""
@@ -110,11 +120,10 @@ HALT_RECOVERY_REFUSED = "recovery-refused"
 HALT_CREDENTIAL_FAILURE = "credential-failure"
 """Halt reason: a Credential Failure in selection, an Attempt or recovery."""
 
-HALT_INFRASTRUCTURE_FAILURE = "infrastructure-failure"
-"""Halt reason: three consecutive infrastructure-class failures."""
-
-HALT_RECOVERY_WRITE_FAILURE = "recovery-write-failure"
-"""Halt reason: three consecutive recovery write failures."""
+# Halt reasons for the counted halt (re-exported from the halt policy):
+# HALT_INFRASTRUCTURE_FAILURE is recorded where the shared counter reaches
+# three on an Attempt outcome; HALT_RECOVERY_WRITE_FAILURE where it reaches
+# three on a recovery write — the reason is whichever event fired last.
 
 HALT_CLAIM_INTERRUPTED = "claim-interrupted"
 """Halt reason: a Claim interrupted after the Attempt opened."""
@@ -190,17 +199,6 @@ def attempt_had_provider_failure(ledger: RunLedger, attempt_id: str) -> bool:
         if marker.get("error"):
             return True
     return False
-
-
-def _halt_after_three(consecutive_infrastructure_failures: int) -> bool:
-    """Whether the halt-after-three bound is reached (§4.4).
-
-    One predicate for both counting sites — the escaped-exception path and
-    the recorded-reason path — so the bound cannot drift between them.
-    """
-    return (
-        consecutive_infrastructure_failures >= MAX_CONSECUTIVE_INFRASTRUCTURE_FAILURES
-    )
 
 
 def _failure_class(exc: BaseException) -> str:
@@ -586,7 +584,7 @@ def _poll_loop(
     from coding_agent.operator.runlog import print_line
     from coding_agent.runtime.shutdown import is_shutdown_requested
 
-    consecutive_infrastructure_failures = 0
+    halt_policy = HaltPolicy()
     attempts_finished = 0
     sweeps = 0
     poll_interval = loop_config.poll_interval_seconds
@@ -726,19 +724,19 @@ def _poll_loop(
                 OSError,
             ) as exc:
                 # A failed recovery write is retried on the next poll
-                # cycle; three consecutive recovery write failures halt
-                # the Worker with a non-zero exit, counting the same way
-                # infrastructure-class failures do (§4.4).
-                consecutive_infrastructure_failures += 1
-                if _halt_after_three(consecutive_infrastructure_failures):
+                # cycle; three consecutive counted failures halt the
+                # Worker with a non-zero exit, recovery writes sharing
+                # the counter with infrastructure-class failures (§4.4).
+                halt = halt_policy.record_recovery_write_failure()
+                if halt is not None:
                     print(
                         "run: three consecutive recovery write failures; halting",
                         file=sys.stderr,
                     )
                     _record_loop_halt(
                         ledger,
-                        reason=HALT_RECOVERY_WRITE_FAILURE,
-                        detail="three consecutive recovery write failures; halting",
+                        reason=halt.reason,
+                        detail=halt.detail,
                     )
                     return 1
                 print(
@@ -752,7 +750,7 @@ def _poll_loop(
                 if _sleep_or_shutdown(sleep, poll_interval):
                     return 0
                 continue
-            consecutive_infrastructure_failures = 0
+            halt_policy.record_recovery_settled()
             for attempt_id in summary.settled:
                 print(f"run: recovery settled {attempt_id}", file=sys.stderr)
             for attempt_id in summary.pending:
@@ -1136,8 +1134,8 @@ def _poll_loop(
         ) and attempt_had_provider_failure(ledger, claimed.attempt_id):
             halt_reason = f"{INFRASTRUCTURE_PREFIX}: provider"
         if is_infrastructure_reason(halt_reason):
-            consecutive_infrastructure_failures += 1
-            if _halt_after_three(consecutive_infrastructure_failures):
+            halt = halt_policy.record_infrastructure_failure(halt_reason)
+            if halt is not None:
                 # Only after the third Attempt is finalised — the Attempt
                 # above either finished through the finalisation entry
                 # point or was left recorded and unfinished for recovery.
@@ -1147,16 +1145,13 @@ def _poll_loop(
                 )
                 _record_loop_halt(
                     ledger,
-                    reason=HALT_INFRASTRUCTURE_FAILURE,
-                    detail=(
-                        "three consecutive infrastructure-class failures "
-                        f"({halt_reason}); halting"
-                    ),
+                    reason=halt.reason,
+                    detail=halt.detail,
                 )
                 return 1
         else:
             # Any other recorded reason resets the halt-after-three counter.
-            consecutive_infrastructure_failures = 0
+            halt_policy.record_non_infrastructure_outcome()
         # The test bound is checked only after the halt decision, so a
         # bounded test can never mask a halt.
         if max_attempts is not None and attempts_finished >= max_attempts:
