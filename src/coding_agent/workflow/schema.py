@@ -859,6 +859,25 @@ class Workflow:
                     extra.append(pin)
         return (self.model, *sorted(extra))
 
+    @property
+    def needs_validation_contract(self) -> bool:
+        """Whether an Attempt of this Workflow needs a Validation Contract.
+
+        True iff any agent step declares the ``tests`` tool group, or any
+        operation step is ``check-readiness`` or ``run-validation``. Nothing
+        else makes it true: ``shell``, ``subagents``, ``advisor``,
+        ``commit-and-push``, ``update-from-base`` and the publishing
+        operations never bind against the contract. Startup, the Attempt's
+        start and ``config validate`` all read this one property, so a
+        Workflow that never validates runs without a Project Profile.
+        """
+        for step in self.steps.values():
+            if step.operation in ("check-readiness", "run-validation"):
+                return True
+            if step.agent is not None and "tests" in step.agent.tools:
+                return True
+        return False
+
 
 
 # --- `skills` declaration (`version: 4`) -------------------------------------

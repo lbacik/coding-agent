@@ -1186,7 +1186,7 @@ def _e2e_offer(tracker: Any, number: int) -> Any:
 
 
 def test_pushed_and_clean_rounds_continue_on_a_second_worker(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requests_mock: Any
 ) -> None:
     """Both publication shapes continue on a second Worker, same evidence.
 
@@ -1359,6 +1359,25 @@ def test_pushed_and_clean_rounds_continue_on_a_second_worker(
             _e2e_ai([_e2e_report_call("done", {})]),
             _e2e_ai([_e2e_report_call("done", {})]),
         ]
+    )
+    # ADR 0037: the validating continue workflow reads the Target
+    # Repository's profile at the base tip through GitHub during startup.
+    # The fake tracker reports the recorded base, so serve the seeded
+    # profile there; Attempt time reads the same file from the local
+    # mirror at the start commit.
+    import base64 as _base64
+
+    from conftest import MINIMAL_VALIDATION_PROFILE as _seeded_profile
+
+    requests_mock.get(
+        "https://api.github.com/repos/OWNER/REPO/contents/"
+        f"docs/agents/project-profile.yml?ref={base}",
+        json={
+            "content": _base64.b64encode(_seeded_profile.encode("utf-8")).decode(
+                "ascii"
+            ),
+            "encoding": "base64",
+        },
     )
     exit_2 = _e2e_run_worker(
         config_text=_e2e_config_continue(),
