@@ -213,6 +213,8 @@ def _failure_class(exc: BaseException) -> str:
     if isinstance(
         exc, (HostFailure, RateLimitExhausted, PermissionRefusal, StepTrackerError)
     ):
+        if isinstance(exc, HostFailure) and exc.failure_class == "jira":
+            return "jira"
         return "github"
     return "setup"
 

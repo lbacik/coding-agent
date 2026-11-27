@@ -46,9 +46,10 @@ class HostFailure(Exception):
 
     ``reason`` is the outcome reason the Attempt records (``failed`` is the
     Terminal Outcome for every pre-recording failure, contract §14);
-    ``failure_class`` is ``github`` for infrastructure-class failures. Only
-    exception text derived from the status, the path and the header values
-    is stored: the response body is never copied here.
+    ``failure_class`` is the vendor's infrastructure class (``github`` on
+    the GitHub tracker, ``jira`` on the Jira tracker). Only exception text
+    derived from the status, the path and the header values is stored: the
+    response body is never copied here.
     """
 
     def __init__(
@@ -147,7 +148,10 @@ class PermissionRefusal(HostFailure):
 
 class RateLimitExhausted(HostFailure):
     """A transient limit whose in-place retry hit the 3-attempt / 5-minute
-    bound (contract §13): infrastructure-class (``github``)."""
+    bound (contract §13): infrastructure-class.
+
+    ``failure_class`` names the vendor whose quota was exhausted
+    (``"github"`` today, ``"jira"`` on the Jira tracker)."""
 
     def __init__(
         self,
@@ -157,13 +161,14 @@ class RateLimitExhausted(HostFailure):
         *,
         attempts: int,
         waited_seconds: float,
+        failure_class: str = "github",
     ) -> None:
         super().__init__(
             method,
             path,
             status_code,
             reason="infrastructure-failure",
-            failure_class="github",
+            failure_class=failure_class,
         )
         self.attempts = attempts
         self.waited_seconds = waited_seconds
@@ -209,13 +214,14 @@ class StepTrackerError(HostFailure):
         method: str | None = None,
         path: str | None = None,
         status_code: int | None = None,
+        failure_class: str = "github",
     ) -> None:
         super().__init__(
             method or "",
             path or "",
             status_code if status_code is not None else 0,
             reason="tracker-error",
-            failure_class="github",
+            failure_class=failure_class,
             transient=transient,
         )
         self.args = (message,)

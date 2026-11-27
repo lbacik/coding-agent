@@ -116,7 +116,10 @@ def _is_transient_perform_error(exc: BaseException) -> bool:
     if isinstance(exc, HostFailure):
         if exc.transient:
             return True
-        return exc.failure_class == "github" and 500 <= exc.status_code <= 599
+        return (
+            exc.failure_class in ("github", "jira")
+            and 500 <= exc.status_code <= 599
+        )
     return False
 
 
@@ -137,7 +140,11 @@ def _transient_exhaustion_error(
             last.path,
             last.status_code,
             reason="infrastructure-failure",
-            failure_class="github",
+            failure_class=(
+                last.failure_class
+                if last.failure_class in ("github", "jira")
+                else "github"
+            ),
         )
     method = getattr(last, "method", None)
     path = getattr(last, "path", None)
@@ -189,9 +196,10 @@ def drive_effect(
     ``initial_backoff_seconds`` — as lookup before each repeat: a write
     that landed records its receipt and is reported landed, otherwise the
     write is performed again, so one landed write never becomes two.
-    Exhaustion returns ``Failed`` with an infrastructure-class ``github``
-    failure, exactly like an exhausted rate limit. ``now`` and ``sleep``
-    are injectable so tests script the clock instead of sleeping.
+    Exhaustion returns ``Failed`` with an infrastructure-class failure of
+    the tracker's own class, exactly like an exhausted rate limit.
+    ``now`` and ``sleep`` are injectable so tests script the clock instead
+    of sleeping.
     """
     if record_intent:
         ledger.record_step_effect_intent(
