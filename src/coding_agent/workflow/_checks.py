@@ -56,6 +56,7 @@ from coding_agent.workflow.schema import (
     ALWAYS_PRESENT_TOOLS,
     CONDITIONAL_RESULTS,
     DEFAULT_MAX_PARALLEL_SUBAGENTS,
+    DEFAULT_MAX_ROUNDS,
     DEFAULT_POLL_INTERVAL_SECONDS,
     DEFAULT_ROUND_HANDOFF_PICKUP_LABEL,
     DEFAULT_SHUTDOWN_GRACE_SECONDS,
@@ -321,6 +322,36 @@ def int_ge_1_at(value: Any, where: str, problems: Problems, what: str) -> int | 
     return value
 
 
+def int_1_32_at(value: Any, where: str, problems: Problems, what: str) -> int | None:
+    """A pin round bound: a plain integer between 1 and the code-owned cap.
+
+    Bools, floats and strings are refused as type errors; ``0`` and
+    negatives name the ``>= 1`` floor; values above the cap name the full
+    ``1–32`` range, so ``40`` reads as a range violation rather than a type
+    error.
+    """
+    from coding_agent.provider.pinned_model import MAX_ROUNDS_CAP
+
+    if not _is_plain_int(value):
+        problems.add(
+            where,
+            f"{what} must be an integer between 1 and {MAX_ROUNDS_CAP}, "
+            f"got {value!r}",
+        )
+        return None
+    if value < 1:
+        problems.add(where, f"{what} must be an integer >= 1, got {value!r}")
+        return None
+    if value > MAX_ROUNDS_CAP:
+        problems.add(
+            where,
+            f"{what} must be an integer between 1 and {MAX_ROUNDS_CAP}, "
+            f"got {value!r}",
+        )
+        return None
+    return value
+
+
 def str_list_at(
     value: Any, where: str, problems: Problems, what: str
 ) -> list[str] | None:
@@ -350,6 +381,8 @@ def check_value(
         return positive_int_at(value, where, problems, desc.label)
     if desc.kind == "int_ge_1":
         return int_ge_1_at(value, where, problems, desc.label)
+    if desc.kind == "int_1_32":
+        return int_1_32_at(value, where, problems, desc.label)
     if desc.kind == "str_list":
         return str_list_at(value, where, problems, desc.label)
     raise AssertionError(
@@ -931,6 +964,15 @@ def validate_models(
                 f"'context-window-tokens' ({window})",
             )
             threshold = None
+        # The pin's round bound: optional, defaulting to the code-owned
+        # default. A present-but-invalid value records its fault above and
+        # falls back, exactly like an invalid `max-parallel-subagents`.
+        max_rounds_raw = check_leaf(problems, entry, model_path, descs["max-rounds"])
+        max_rounds = (
+            max_rounds_raw
+            if type(max_rounds_raw) is int
+            else DEFAULT_MAX_ROUNDS
+        )
         if (
             model is None
             or endpoint is None

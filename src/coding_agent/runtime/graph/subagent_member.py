@@ -202,6 +202,7 @@ class SubagentMember:
                     step_id=step.id,
                     seq=seq,
                     call_id=call_id,
+                    max_rounds=deps.pin.max_rounds,
                 ),
             )
             return cls(
@@ -368,6 +369,7 @@ class SubagentMember:
                 context_state=self.member_state,
                 tool_set=self.tools,
                 shared_record=self.record,
+                max_rounds=deps.pin.max_rounds,
             )
         except PinViolation as exc:
             # A pin-violating member ends with no report: its own spend
@@ -406,6 +408,7 @@ class SubagentMember:
                     member_cell=member_cell,
                     duration_seconds=time.monotonic() - member_started,
                     peak=self.member_state.peak,
+                    max_rounds=deps.pin.max_rounds,
                 ),
             )
             raise
@@ -474,6 +477,7 @@ def subagent_ended_payload(
         "ending": result.reason,
         "duration_seconds": result.duration_seconds,
         "usage": member_cell.as_readable(),
+        "max_rounds": result.max_rounds,
     }
     if result.peak_context is not None:
         payload["conversation_context_peak"] = result.peak_context.to_record()
@@ -497,11 +501,15 @@ def refused_subagent_ended_payload(
     step_id: str,
     seq: int,
     call_id: str,
+    max_rounds: int,
 ) -> dict[str, object]:
     """Derive the ``subagent_ended`` payload for a refused member.
 
     Pure: a refused member never runs — zero duration, an all-zero usage
     cell, no peak — and the spawn group records it without a member run.
+    The payload still carries the bound that would have applied (the
+    step's Pinned Model's ``max_rounds``), so every ``subagent_ended``
+    names the limit in force.
     """
     return {
         "attempt_id": attempt_id,
@@ -514,6 +522,7 @@ def refused_subagent_ended_payload(
         "ending": "refused",
         "duration_seconds": 0.0,
         "usage": OriginCell().as_readable(),
+        "max_rounds": max_rounds,
     }
 
 
@@ -527,12 +536,13 @@ def pin_violation_subagent_ended_payload(
     member_cell: OriginCell,
     duration_seconds: float,
     peak: Any,
+    max_rounds: int,
 ) -> dict[str, object]:
     """Derive the ``subagent_ended`` payload for a pin-violating member.
 
     Pure: the violation propagates instead of returning a result, so the
     payload carries the observed identity directly, with the member's
-    settled cell and peak.
+    settled cell and peak — plus the bound that was in force.
     """
     payload: dict[str, object] = {
         "attempt_id": attempt_id,
@@ -545,6 +555,7 @@ def pin_violation_subagent_ended_payload(
         "ending": "pin-violation",
         "duration_seconds": duration_seconds,
         "usage": member_cell.as_readable(),
+        "max_rounds": max_rounds,
     }
     if peak is not None:
         payload["conversation_context_peak"] = peak.to_record()

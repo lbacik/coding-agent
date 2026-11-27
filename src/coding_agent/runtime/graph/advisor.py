@@ -29,7 +29,6 @@ from coding_agent.runtime.conversation_context import (
     measure_conversation_context,
 )
 from coding_agent.runtime.graph.subagent import (
-    MAX_SUBAGENT_ROUNDS,
     SUBAGENT_READ_TOOL_NAMES,
     SubagentRecord,
     SubagentResult,
@@ -375,7 +374,7 @@ def advisor_tool_result_text(result: SubagentResult, preview: str) -> str:
         )
     return (
         f"Advisor {preview!r}: no-report (round-limit). "
-        f"The Advisor reached the {MAX_SUBAGENT_ROUNDS}-round bound "
+        f"The Advisor reached the {result.max_rounds}-round bound "
         "without calling report_advice."
     )
 

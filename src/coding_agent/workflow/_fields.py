@@ -58,6 +58,7 @@ LEAF_KINDS = frozenset(
         "positive_number",
         "positive_int",
         "int_ge_1",
+        "int_1_32",
         "str_list",
     }
 )
@@ -218,6 +219,10 @@ def fragment_for(desc: FieldDescriptor) -> dict[str, Any]:
         return {"type": "number", "exclusiveMinimum": 0}
     if desc.kind == "positive_int" or desc.kind == "int_ge_1":
         return {"type": "integer", "minimum": 1}
+    if desc.kind == "int_1_32":
+        from coding_agent.provider.pinned_model import MAX_ROUNDS_CAP
+
+        return {"type": "integer", "minimum": 1, "maximum": MAX_ROUNDS_CAP}
     if desc.kind == "str_list":
         return {
             "type": "array",

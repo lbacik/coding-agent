@@ -2534,6 +2534,7 @@ def _run_advisor_call(
                 "ending": "ceiling",
                 "duration_seconds": 0.0,
                 "usage": member_cell.as_readable(),
+                "max_rounds": request_pin.pin.max_rounds,
             },
         )
         consultation = AdvisorConsultation(
@@ -2614,6 +2615,7 @@ def _run_advisor_call(
             opening_text=opening_text,
             tool_set=tools,
             shared_record=record,
+            max_rounds=request_pin.pin.max_rounds,
         )
     except PinViolation as exc:
         # A pin-violating Advisor ends with no report (§9.1, §12): its own
@@ -2648,6 +2650,7 @@ def _run_advisor_call(
             "ending": "pin-violation",
             "duration_seconds": 0.0,
             "usage": pin_cell.as_readable(),
+            "max_rounds": request_pin.pin.max_rounds,
         }
         if member_state.peak is not None:
             pin_payload["conversation_context_peak"] = member_state.peak.to_record()
@@ -2676,6 +2679,7 @@ def _run_advisor_call(
         "ending": ending,
         "duration_seconds": result.duration_seconds,
         "usage": member_cell.as_readable(),
+        "max_rounds": result.max_rounds,
     }
     if result.peak_context is not None:
         ended_payload["conversation_context_peak"] = result.peak_context.to_record()

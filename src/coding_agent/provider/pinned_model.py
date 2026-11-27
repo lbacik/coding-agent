@@ -63,6 +63,23 @@ SAFETY_MARGIN_TOKENS = 1_000
 REQUEST_OVERHEAD_TOKENS = 1_000
 """The code-owned request overhead every pin's threshold must exceed (§2.1)."""
 
+DEFAULT_MAX_ROUNDS = 8
+"""The default round bound for one Advisor or Sub-agent run (§8, §9).
+
+A pin that omits ``max-rounds`` answers every Advisor call and Sub-agent
+run with this bound: the run ends ``no-report`` / ``round-limit`` where it
+reaches the bound without a report.
+"""
+
+MAX_ROUNDS_CAP = 32
+"""The code-owned maximum round bound (defect guard, §8, §9).
+
+Four times the default: it covers the observed failure class (an Advisor
+that needs roughly twice the default to read before it can report) while
+catching typos such as 10000. The static validator refuses ``max-rounds``
+above this cap; the Step Execution loop itself has no round bound.
+"""
+
 
 def _canonical_gateway_url(raw: str, subject: str, *, include_detail: bool) -> str:
     """Canonicalise a gateway URL, naming ``subject`` in every refusal.
@@ -236,9 +253,28 @@ class PinnedModel:
     context_window_tokens: int | None = None
     """The Model Context Window, carried by every pin."""
 
+    max_rounds: int = DEFAULT_MAX_ROUNDS
+    """The round bound for Advisor calls and Sub-agent runs this pin answers.
+
+    A plain integer between 1 and ``MAX_ROUNDS_CAP`` (the code-owned
+    maximum); the constructor refuses anything else, like the static
+    validator refuses a bad ``max-rounds`` key. The bound is an additional
+    stop, never an allowance: ceilings, allowances and the context
+    threshold still end a run first.
+    """
+
     def __post_init__(self) -> None:
         if not isinstance(self.model, str) or not self.model:
             raise ValueError("the pinned model name must be a non-empty string")
+        if (
+            type(self.max_rounds) is not int
+            or self.max_rounds < 1
+            or self.max_rounds > MAX_ROUNDS_CAP
+        ):
+            raise ValueError(
+                f"the round bound must be an integer between 1 and "
+                f"{MAX_ROUNDS_CAP}, got {self.max_rounds!r}"
+            )
         if self.gateway_url is not None:
             if self.provider not in GATEWAY_KINDS:
                 raise ValueError(
