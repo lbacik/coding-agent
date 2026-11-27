@@ -750,7 +750,6 @@ def test_subagents_run_read_only_and_count_against_the_step(
         instructions=(Instruction(skill="code-review"),),
     )
     attempt = _facts()
-    seen: dict[str, Any] = {}
     from support.scripted_model import ScriptedModel as _SM
 
     assert SUBAGENT_TOOL_NAMES == frozenset(
@@ -766,10 +765,6 @@ def test_subagents_run_read_only_and_count_against_the_step(
         }
     )
 
-    def runner(call_id: str, description: str, instructions: str) -> str:
-        seen["call"] = (call_id, description, instructions)
-        return "Sub-agent report body."
-
     model = _SM(
         [
             _ai(
@@ -780,6 +775,15 @@ def test_subagents_run_read_only_and_count_against_the_step(
                         {"description": "check diff", "instructions": "read the diff"},
                         "s1",
                     ),
+                ]
+            ),
+            _ai(
+                [
+                    _call(
+                        "report_subagent",
+                        {"report": "Sub-agent report body."},
+                        "sub-1",
+                    )
                 ]
             ),
             _ai([_report_call("reviewed", {"body": "review notes"})]),
@@ -793,12 +797,25 @@ def test_subagents_run_read_only_and_count_against_the_step(
         activation_registry=ActivationRegistry(
             bodies={"code-review": "# code-review\n\nBody."}
         ),
-        subagent_runner=runner,
         ledger=ledger,
     )
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
-    assert seen["call"][1:] == ("check diff", "read the diff")
+    queued_payloads: list[dict[str, object]] = []
+    ended_payloads: list[dict[str, object]] = []
+    for event in outcome.events:
+        if event["kind"] not in ("subagent_queued", "subagent_ended"):
+            continue
+        payload = event.get("payload")
+        assert isinstance(payload, dict)
+        if event["kind"] == "subagent_queued":
+            queued_payloads.append(dict(payload))
+        else:
+            ended_payloads.append(dict(payload))
+    assert [payload["call_id"] for payload in queued_payloads] == ["s1"]
+    assert queued_payloads[0]["description"] == "check diff"
+    assert len(ended_payloads) == 1
+    assert ended_payloads[0]["reported"] is True
     tool_calls = outcome.usage["tool_calls"]
     assert isinstance(tool_calls, int) and tool_calls >= 1
     kinds = [event["kind"] for event in outcome.events]
@@ -806,6 +823,7 @@ def test_subagents_run_read_only_and_count_against_the_step(
         "model_response",
         "subagent_queued",
         "subagent_started",
+        "model_response",
         "subagent_ended",
         "model_response",
     ]
@@ -997,29 +1015,28 @@ def test_every_request_uses_the_one_pinned_model(
                     )
                 ]
             ),
+            _ai(
+                [
+                    _call(
+                        "report_subagent",
+                        {"report": "looked"},
+                        "sub-1",
+                    )
+                ]
+            ),
             _ai([_report_call("done", {})]),
         ]
     )
-    seen_models: list[int] = []
-    inner = model.bind_tools
-
-    def runner(call_id: str, description: str, instructions: str) -> str:
-        seen_models.append(id(model))
-        return "report"
-
     deps = _deps(
         attempt,
         model,
         workspace,
         tmp_path,
         context_window=None,
-        subagent_runner=runner,
     )
-    assert inner is not None
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
-    assert seen_models == [id(model)]
-    assert model.invocations, "the one model answered every request"
+    assert len(model.invocations) == 3, "the one model answered every request"
 
 
 # --- Graph integration: error routing and Execution Summary facts -----------------------
@@ -1126,19 +1143,23 @@ def test_subagent_events_carry_attempt_step_and_call_ids(
                     )
                 ]
             ),
+            _ai(
+                [
+                    _call(
+                        "report_subagent",
+                        {"report": "looked"},
+                        "sub-1",
+                    )
+                ]
+            ),
             _ai([_report_call("done", {})]),
         ]
     )
-
-    def runner(call_id: str, description: str, instructions: str) -> str:
-        return "report"
-
     deps = _deps(
         attempt,
         model,
         workspace,
         tmp_path,
-        subagent_runner=runner,
         ledger=ledger,
     )
     outcome = run_agent_step(step, 1, deps, {})
@@ -1148,6 +1169,7 @@ def test_subagent_events_carry_attempt_step_and_call_ids(
         "model_response",
         "subagent_queued",
         "subagent_started",
+        "model_response",
         "subagent_ended",
         "model_response",
     ]
@@ -1224,7 +1246,6 @@ def test_live_transcript_written_while_step_runs(
         "s", {"done": {}}, tools=("workspace-read", "subagents")
     )
     attempt = _facts()
-    seen: dict[str, bool] = {}
     model = ScriptedModel(
         [
             _ai(
@@ -1237,37 +1258,48 @@ def test_live_transcript_written_while_step_runs(
                 ],
                 content="spawning",
             ),
+            _ai(
+                [
+                    _call(
+                        "report_subagent",
+                        {"report": "Sub-agent report body."},
+                        "sub-1",
+                    )
+                ]
+            ),
             _ai([_report_call("done", {})]),
         ]
     )
-
-    def runner(call_id: str, description: str, instructions: str) -> str:
-        assert deps.archive_dir is not None
-        live = _records(deps.archive_dir / "transcript.jsonl")
-        seen["response_seen"] = any(
-            record.get("kind") == "response"
-            and record.get("conversation") == "step/s/1"
-            and any(
-                call.get("name") == "spawn_subagent"
-                and call.get("id") == "s1"
-                and isinstance(call.get("args"), dict)
-                for call in _record_tool_calls(record)
-            )
-            for record in live
-        )
-        return "Sub-agent report body."
-
-    deps = _deps(
-        attempt, model, workspace, tmp_path, subagent_runner=runner
-    )
+    deps = _deps(attempt, model, workspace, tmp_path)
     outcome = run_agent_step(step, 1, deps, {})
     assert outcome.status == "reported"
-    # The runner executes between model calls: the spawning response was
-    # already in the archive Transcript while the step still ran.
-    assert seen.get("response_seen") is True
+    # The member executes between model calls: the spawning response was
+    # already in the archive Transcript before the member ran, so the
+    # member's conversation follows it in file order.
     assert deps.archive_dir is not None
     records = _records(deps.archive_dir / "transcript.jsonl")
-    assert {record["conversation"] for record in records} == {"step/s/1"}
+    assert {record["conversation"] for record in records} == {
+        "step/s/1",
+        "subagent:s1",
+    }
+    spawning = [
+        record
+        for record in records
+        if record.get("kind") == "response"
+        and record.get("conversation") == "step/s/1"
+        and any(
+            call.get("name") == "spawn_subagent"
+            and call.get("id") == "s1"
+            and isinstance(call.get("args"), dict)
+            for call in _record_tool_calls(record)
+        )
+    ]
+    assert len(spawning) == 1
+    assert records.index(spawning[0]) < next(
+        index
+        for index, record in enumerate(records)
+        if record.get("conversation") == "subagent:s1"
+    )
     seqs = _record_seqs(records)
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert all(record["at"] for record in records)

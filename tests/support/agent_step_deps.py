@@ -23,7 +23,6 @@ from coding_agent.runtime.graph.agent_step import (
     AgentStepDeps,
     EvidenceStore,
     StepAttemptFacts,
-    SubagentRunner,
 )
 from coding_agent.runtime.redaction import Redactable
 from coding_agent.runtime.result_capping import ArtifactStore, InMemoryArtifactStore
@@ -189,7 +188,6 @@ def make_agent_step_deps(
     prompt_texts: dict[str, str] | None = None,
     artifact_store: ArtifactStore | None = None,
     context_window: ContextWindowConfig | None = None,
-    subagent_runner: SubagentRunner | None = None,
     max_parallel_subagents: int = 2,
     redactions: Redactable = None,
     changed_files: tuple[str, ...] = (),
@@ -258,7 +256,6 @@ def make_agent_step_deps(
         archive_dir=resolved_archive_dir,
         artifact_store=artifact_store if artifact_store is not None else InMemoryArtifactStore(),
         context_window=context_window,
-        subagent_runner=subagent_runner,
         max_parallel_subagents=max_parallel_subagents,
         redactions=redactions,
         changed_files=changed_files,

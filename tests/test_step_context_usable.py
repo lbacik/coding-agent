@@ -244,9 +244,9 @@ def test_subagent_ends_context_window_before_over_threshold_request(
 ) -> None:
     """§9.8: the spawned Sub-agent stops before its over-threshold request.
 
-    The spawn goes through the agent step's default Sub-agent path (no
-    ``subagent_runner``), so the step's ``ContextWindowConfig`` reaches
-    ``run_subagent``. The Sub-agent's first request fits; its second would
+    The spawn goes through the spawn group's member path, so the step's
+    ``ContextWindowConfig`` reaches ``run_subagent``. The Sub-agent's first
+    request fits; its second would
     exceed the usable threshold, so it ends ``no-report`` / ``context-window``
     with no provider request sent for that turn — while the step reports.
     """
