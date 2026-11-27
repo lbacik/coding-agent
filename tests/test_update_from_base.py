@@ -19,19 +19,18 @@ from coding_agent import cli
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.services import SocketServiceProber
 from coding_agent.profile.toolchain import load_toolchain_matrix
-from coding_agent.runtime.git import GitFailure, merge_base_of
+from coding_agent.runtime.git import merge_base_of
 from coding_agent.runtime.graph.agent_step import (
     StepAttemptFacts,
     compose_attempt_header,
 )
 from coding_agent.runtime.graph.subagent import build_read_change_tool
 from coding_agent.runtime.step_operations import (
-    CommitPushGitOps,
-    LiveCommitPushGitOps,
     LocalOperationRunner,
     run_commit_and_push,
     run_update_from_base,
 )
+from coding_agent.runtime.workspace_git import AttemptWorkspaceGit, BareRepoRemote
 from coding_agent.validate.runner import CommandRunner, ExecutedCommand
 from coding_agent.workflow.schema import WorkflowStep
 
@@ -103,156 +102,71 @@ def ledger(tmp_path: Path) -> Iterator[RunLedger]:
     handle.close()
 
 
-class _FakeGitOps(CommitPushGitOps):
-    """A ``CommitPushGitOps`` fake over a real repo with a dict remote."""
+def _init_bare(bare: Path) -> Path:
+    """Create an empty bare repository at ``bare``."""
+    completed = subprocess.run(
+        ["git", "init", "-q", "--bare", str(bare)],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return bare
 
-    def __init__(self, remote: dict[str, str] | None = None) -> None:
-        self.remote: dict[str, str] = dict(remote or {})
-        self.race_to: str | None = None
 
-    def is_clean(self, workspace: Path) -> bool:
-        return not _git(
-            "status", "--porcelain", "--untracked-files=all", cwd=workspace
-        )
+def _workspace_git(repo: Path, bare: Path) -> AttemptWorkspaceGit:
+    """An ``AttemptWorkspaceGit`` bound to ``repo`` pushing to ``bare``."""
+    return AttemptWorkspaceGit(
+        repo, AUTHOR_NAME, AUTHOR_EMAIL, BareRepoRemote(repo, bare)
+    )
 
-    def touches_workflows(self, workspace: Path) -> bool:
-        from coding_agent.runtime.git import tree_touches_workflows_path
 
-        return tree_touches_workflows_path(workspace)
+def _push_to_bare(repo: Path, bare: Path, sha: str, branch: str) -> None:
+    """Push ``sha`` to ``branch`` in the bare repository."""
+    completed = subprocess.run(
+        ["git", "push", "-q", str(bare), f"{sha}:refs/heads/{branch}"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
 
-    def head_sha(self, workspace: Path) -> str:
-        return _git("rev-parse", "HEAD", cwd=workspace)
 
-    def stage_all(self, workspace: Path) -> None:
-        _git("add", "-A", cwd=workspace)
+def _set_bare_ref(bare: Path, branch: str, sha: str) -> None:
+    """Point ``branch`` in the bare repository at ``sha``.
 
-    def clear_merge_state(self, workspace: Path) -> None:
-        from coding_agent.runtime.git import clear_merge_state
+    Writes the loose ref directly so disruption values that name no
+    object (such as ``"e" * 40``) still read back through ``ls-remote``;
+    this git version's ``update-ref`` refuses refs to nonexistent objects.
+    """
+    ref = bare / "refs" / "heads" / branch
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text(sha + "\n", encoding="utf-8")
 
-        clear_merge_state(workspace)
 
-    def write_tree(self, workspace: Path) -> str:
-        return _git("write-tree", cwd=workspace)
-
-    def create_commit(
-        self,
-        workspace: Path,
-        tree: str,
-        parents: list[str],
-        message: str,
-        author_name: str,
-        author_email: str,
-    ) -> str:
-        from coding_agent.runtime.git import create_commit_with_parents
-
-        return create_commit_with_parents(
-            workspace,
-            tree,
-            parents,
-            message,
-            author_name=author_name,
-            author_email=author_email,
-        )
-
-    def move_branch(self, workspace: Path, branch: str, sha: str) -> None:
-        from coding_agent.runtime.git import update_branch_ref
-
-        update_branch_ref(workspace, branch, sha)
-
-    def advance_head(self, workspace: Path, sha: str) -> None:
-        _git("update-ref", "HEAD", sha, cwd=workspace)
-
-    def commit_tree(self, workspace: Path, revision: str) -> str:
-        return _git("rev-parse", f"{revision}^{{tree}}", cwd=workspace)
-
-    def diff_names(self, workspace: Path, old: str, new: str) -> list[str]:
-        from coding_agent.runtime.git import diff_names_between
-
-        return diff_names_between(workspace, old, new)
-
-    def read_blob(
-        self, workspace: Path, revision: str, path: str
-    ) -> bytes | None:
-        from coding_agent.runtime.git import read_blob_at_revision
-
-        return read_blob_at_revision(workspace, revision, path)
-
-    def read_staged_blob(self, workspace: Path, path: str) -> bytes | None:
-        completed = subprocess.run(
-            ["git", "show", f":{path}"],
-            cwd=workspace,
-            capture_output=True,
-        )
-        if completed.returncode != 0:
-            return None
-        return completed.stdout
-
-    def object_exists(self, workspace: Path, revision: str) -> bool:
-        from coding_agent.runtime.git import object_exists
-
-        return object_exists(workspace, revision)
-
-    def fetch_revision(self, workspace: Path, revision: str) -> None:
+def _bare_sha(bare: Path, branch: str) -> str | None:
+    """The sha of ``branch`` in the bare repository, or ``None`` where absent."""
+    completed = subprocess.run(
+        ["git", "--git-dir", str(bare), "rev-parse", "--verify", f"refs/heads/{branch}"],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
         return None
-
-    def is_ancestor(
-        self, workspace: Path, ancestor: str, descendant: str
-    ) -> bool:
-        from coding_agent.runtime.git import is_ancestor
-
-        return is_ancestor(workspace, ancestor, descendant)
-
-    def merge_tip(
-        self,
-        workspace: Path,
-        tip: str,
-        *,
-        author_name: str,
-        author_email: str,
-    ) -> int:
-        from coding_agent.runtime.git import merge_tip_no_commit
-
-        return merge_tip_no_commit(
-            workspace, tip, author_name=author_name, author_email=author_email
-        )
-
-    def unmerged_paths(self, workspace: Path) -> list[str]:
-        from coding_agent.runtime.git import unmerged_paths
-
-        return unmerged_paths(workspace)
-
-    def remote_sha(self, branch: str) -> str | None:
-        return self.remote.get(branch)
-
-    def push_issue_branch(self, workspace: Path, branch: str) -> None:
-        try:
-            local_sha = _git("rev-parse", "--verify", branch, cwd=workspace)
-        except AssertionError:
-            local_sha = self.head_sha(workspace)
-        self.remote[branch] = local_sha
-
-    def push_ref(self, workspace: Path, local_sha: str, branch: str) -> None:
-        if self.race_to is not None:
-            self.remote[branch] = self.race_to
-            raise GitFailure("'git push' failed: non-fast-forward")
-        self.remote[branch] = local_sha
+    return completed.stdout.strip()
 
 
 def _pr_kwargs(
     seed: dict[str, Path | str],
-    git: CommitPushGitOps,
+    git: AttemptWorkspaceGit,
     ledger: RunLedger,
 ) -> dict[str, object]:
     return {
-        "workspace": seed["repo"],
+        "git": git,
         "attempt_id": ATTEMPT_ID,
         "input_type": "pull-request",
         "branch": HEAD_BRANCH,
         "expected_head": seed["head"],
-        "author_name": AUTHOR_NAME,
-        "author_email": AUTHOR_EMAIL,
         "start_commit": seed["head"],
-        "git": git,
         "ledger": ledger,
     }
 
@@ -295,8 +209,10 @@ def test_conflicted_resolve_push_against_a_bare_remote(
 
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
+    git = AttemptWorkspaceGit(
+        repo, AUTHOR_NAME, AUTHOR_EMAIL, BareRepoRemote(repo, str(origin))
+    )
     runner = LocalOperationRunner(
-        workspace=repo,
         start_commit=head,
         matrix=load_toolchain_matrix(
             {
@@ -313,15 +229,13 @@ def test_conflicted_resolve_push_against_a_bare_remote(
         prober=SocketServiceProber(),
         runner=_NeverRunner(),
         evidence_dir=evidence_dir,
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         attempt_branch=HEAD_BRANCH,
         input_type="pull-request",
         head_branch=HEAD_BRANCH,
         expected_head=head,
         base_tip=tip,
         input_number=7,
-        git=LiveCommitPushGitOps(str(origin)),
+        git=git,
     )
     update = runner.run(
         WorkflowStep(id="sync", operation="update-from-base", routes={}),
@@ -361,14 +275,14 @@ def test_merged_clean_base_records_pending(
     seed = _seed_clean(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps(remote={HEAD_BRANCH: str(seed["head"])})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, str(seed["head"]), HEAD_BRANCH)
     outcome = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["tip"]),
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -390,14 +304,14 @@ def test_commit_after_merged_is_a_two_parent_merge_commit(
     assert isinstance(repo, Path)
     head = str(seed["head"])
     tip = str(seed["tip"])
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     merged = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=tip,
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -406,7 +320,7 @@ def test_commit_after_merged_is_a_two_parent_merge_commit(
     assert outcome.result == "pushed"
     assert outcome.revision is not None
     assert _parents(repo, outcome.revision) == [head, tip]
-    assert git.remote[HEAD_BRANCH] == outcome.revision
+    assert git.remote_sha(HEAD_BRANCH) == outcome.revision
     assert ledger.get_merge_pending(ATTEMPT_ID) is None
 
 
@@ -417,14 +331,14 @@ def test_up_to_date_changes_nothing(
     seed = _seed_clean(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps(remote={HEAD_BRANCH: str(seed["head"])})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, str(seed["head"]), HEAD_BRANCH)
     outcome = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["base"]),
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -441,25 +355,22 @@ def test_second_update_while_pending_ends_error(
     seed = _seed_conflict(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps(remote={HEAD_BRANCH: str(seed["head"])})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, str(seed["head"]), HEAD_BRANCH)
     first = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["tip"]),
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
     assert first.result == "conflicted"
     second = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=str(seed["tip"]),
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -474,14 +385,13 @@ def test_issue_workflow_update_from_base_ends_error(
     seed = _seed_clean(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps()
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
     outcome = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="issue",
         base_tip=str(seed["tip"]),
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -496,14 +406,13 @@ def test_missing_base_tip_ends_error(
     seed = _seed_clean(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps()
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
     outcome = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip="f" * 40,
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -525,14 +434,14 @@ def test_post_claim_base_commit_is_never_merged(
     _commit(repo, "base moves after claim")
     _git("checkout", "-q", HEAD_BRANCH, cwd=repo)
 
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     outcome = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=tip,
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -540,7 +449,6 @@ def test_post_claim_base_commit_is_never_merged(
     assert not (repo / "later.txt").exists()
     (repo / "file.txt").write_text("line1\nresolved\nline3\n", encoding="utf-8")
     push_kwargs = _pr_kwargs(seed, git, ledger)
-    assert isinstance(push_kwargs["workspace"], Path)
     pushed = run_commit_and_push(**push_kwargs)  # type: ignore[arg-type]
     assert pushed.result == "pushed"
     assert pushed.revision is not None
@@ -558,15 +466,15 @@ def test_strict_rule_names_paths_outside_the_conflict(
     seed = _seed_clean(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps(remote={HEAD_BRANCH: str(seed["head"])})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, str(seed["head"]), HEAD_BRANCH)
     assert (
         run_update_from_base(
-            workspace=repo,
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=str(seed["tip"]),
-            author_name=AUTHOR_NAME,
-            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -577,7 +485,7 @@ def test_strict_rule_names_paths_outside_the_conflict(
     assert outcome.facts["paths"] == ["extra.txt"]
     assert "outside the conflicted paths" in outcome.detail
     assert outcome.revision is not None
-    assert git.remote[HEAD_BRANCH] == seed["head"]
+    assert git.remote_sha(HEAD_BRANCH) == seed["head"]
 
 
 def test_unresolved_markers_end_error_and_keep_the_parent(
@@ -587,15 +495,15 @@ def test_unresolved_markers_end_error_and_keep_the_parent(
     seed = _seed_conflict(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps(remote={HEAD_BRANCH: str(seed["head"])})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, str(seed["head"]), HEAD_BRANCH)
     assert (
         run_update_from_base(
-            workspace=repo,
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=str(seed["tip"]),
-            author_name=AUTHOR_NAME,
-            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -604,7 +512,7 @@ def test_unresolved_markers_end_error_and_keep_the_parent(
     assert outcome.result == "error"
     assert outcome.revision is None
     assert outcome.facts["conflicted_paths"] == ["file.txt"]
-    assert git.remote[HEAD_BRANCH] == seed["head"]
+    assert git.remote_sha(HEAD_BRANCH) == seed["head"]
     pending = ledger.get_merge_pending(ATTEMPT_ID)
     assert pending is not None
     assert pending.base_tip == seed["tip"]
@@ -619,22 +527,22 @@ def test_pending_survives_stale_head(
     assert isinstance(repo, Path)
     head = str(seed["head"])
     tip = str(seed["tip"])
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     assert (
         run_update_from_base(
-            workspace=repo,
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=tip,
-            author_name=AUTHOR_NAME,
-            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
     ).result == "merged"
     # The remote moved before any commit exists: the early compare-and-swap
     # check ends `stale-head` with no commit, so the parent survives.
-    git.remote[HEAD_BRANCH] = "e" * 40
+    _set_bare_ref(bare, HEAD_BRANCH, "e" * 40)
     stale = run_commit_and_push(**_pr_kwargs(seed, git, ledger))  # type: ignore[arg-type]
     assert stale.result == "stale-head"
     assert stale.revision == head
@@ -642,7 +550,7 @@ def test_pending_survives_stale_head(
     pending = ledger.get_merge_pending(ATTEMPT_ID)
     assert pending is not None
     assert pending.base_tip == tip
-    git.remote[HEAD_BRANCH] = head
+    _set_bare_ref(bare, HEAD_BRANCH, head)
     pushed = run_commit_and_push(**_pr_kwargs(seed, git, ledger))  # type: ignore[arg-type]
     assert pushed.result == "pushed"
     assert pushed.revision is not None
@@ -666,7 +574,10 @@ def test_shell_merge_head_never_becomes_a_parent(
     )
     assert merge.returncode == 0
     assert (repo / ".git" / "MERGE_HEAD").is_file()
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     outcome = run_commit_and_push(**_pr_kwargs(seed, git, ledger))  # type: ignore[arg-type]
     assert outcome.result == "pushed"
     assert outcome.revision is not None
@@ -684,7 +595,10 @@ def test_single_parent_pr_commit_behaves_as_before(
     assert isinstance(repo, Path)
     head = str(seed["head"])
     (repo / "fix.txt").write_text("fix\n", encoding="utf-8")
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     outcome = run_commit_and_push(**_pr_kwargs(seed, git, ledger))  # type: ignore[arg-type]
     assert outcome.result == "pushed"
     assert outcome.revision is not None
@@ -720,15 +634,15 @@ def test_base_workflows_change_merges_without_refusal(
     assert isinstance(repo, Path)
     head = str(seed["head"])
     tip = str(seed["tip"])
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     assert (
         run_update_from_base(
-            workspace=repo,
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=tip,
-            author_name=AUTHOR_NAME,
-            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -746,15 +660,15 @@ def test_hand_edited_workflows_file_is_still_refused(
     seed = _seed_workflows_base(tmp_path)
     repo = seed["repo"]
     assert isinstance(repo, Path)
-    git = _FakeGitOps(remote={HEAD_BRANCH: str(seed["head"])})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, str(seed["head"]), HEAD_BRANCH)
     assert (
         run_update_from_base(
-            workspace=repo,
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=str(seed["tip"]),
-            author_name=AUTHOR_NAME,
-            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -768,7 +682,7 @@ def test_hand_edited_workflows_file_is_still_refused(
     assert outcome.result == "error"
     assert outcome.facts["paths"] == [".github/workflows/ci.yml"]
     assert outcome.revision is not None
-    assert git.remote[HEAD_BRANCH] == seed["head"]
+    assert git.remote_sha(HEAD_BRANCH) == seed["head"]
 
 
 def test_hand_resolved_workflows_conflict_is_still_refused(
@@ -789,14 +703,14 @@ def test_hand_resolved_workflows_conflict_is_still_refused(
     tip = _commit(repo, "base moves on")
     _git("checkout", "-q", HEAD_BRANCH, cwd=repo)
 
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     outcome = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=tip,
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -807,7 +721,7 @@ def test_hand_resolved_workflows_conflict_is_still_refused(
     refused = run_commit_and_push(**_pr_kwargs(seed, git, ledger))  # type: ignore[arg-type]
     assert refused.result == "error"
     assert refused.facts["paths"] == [".github/workflows/ci.yml"]
-    assert git.remote[HEAD_BRANCH] == head
+    assert git.remote_sha(HEAD_BRANCH) == head
 
 
 # --- Reader, facts and configuration ----------------------------------------
@@ -824,15 +738,15 @@ def test_reader_comparison_point_follows_the_merge(
     head = str(seed["head"])
     tip = str(seed["tip"])
     assert merge_base_of(repo, head, tip) == base
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     assert (
         run_update_from_base(
-            workspace=repo,
             attempt_id=ATTEMPT_ID,
             input_type="pull-request",
             base_tip=tip,
-            author_name=AUTHOR_NAME,
-            author_email=AUTHOR_EMAIL,
             git=git,
             ledger=ledger,
         )
@@ -965,14 +879,14 @@ def test_merged_without_any_git_identity(
     tip = str(seed["tip"])
     _strip_repo_identity(repo)
     _no_git_identity(monkeypatch, tmp_path)
-    git = _FakeGitOps(remote={HEAD_BRANCH: head})
+    bare = tmp_path / "remote.git"
+    _init_bare(bare)
+    git = _workspace_git(repo, bare)
+    _push_to_bare(repo, bare, head, HEAD_BRANCH)
     outcome = run_update_from_base(
-        workspace=repo,
         attempt_id=ATTEMPT_ID,
         input_type="pull-request",
         base_tip=tip,
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         git=git,
         ledger=ledger,
     )
@@ -1002,7 +916,8 @@ def test_conflicted_without_any_git_identity(
 
     Drives the ``LocalOperationRunner`` ``update-from-base`` branch (the
     ``pr-review`` sync step from the incident) with a production
-    ``LiveCommitPushGitOps`` under the sterile environment.
+    ``AttemptWorkspaceGit`` over a ``BareRepoRemote`` under the sterile
+    environment.
     """
     seed = _seed_conflict(tmp_path)
     repo = seed["repo"]
@@ -1028,8 +943,10 @@ def test_conflicted_without_any_git_identity(
 
     evidence_dir = tmp_path / "evidence"
     evidence_dir.mkdir()
+    git = AttemptWorkspaceGit(
+        repo, AUTHOR_NAME, AUTHOR_EMAIL, BareRepoRemote(repo, str(origin))
+    )
     runner = LocalOperationRunner(
-        workspace=repo,
         start_commit=head,
         matrix=load_toolchain_matrix(
             {
@@ -1046,15 +963,13 @@ def test_conflicted_without_any_git_identity(
         prober=SocketServiceProber(),
         runner=_NeverRunner(),
         evidence_dir=evidence_dir,
-        author_name=AUTHOR_NAME,
-        author_email=AUTHOR_EMAIL,
         attempt_branch=HEAD_BRANCH,
         input_type="pull-request",
         head_branch=HEAD_BRANCH,
         expected_head=head,
         base_tip=tip,
         input_number=7,
-        git=LiveCommitPushGitOps(str(origin)),
+        git=git,
     )
     update = runner.run(
         WorkflowStep(id="sync", operation="update-from-base", routes={}),
