@@ -1281,3 +1281,128 @@ def test_stop_plan_survives_restart_and_reconciliation(tmp_path: Path) -> None:
     finally:
         reopened_store.close()
         reopened.close()
+
+
+def test_stop_after_recovery_settlement_does_not_count(tmp_path: Path) -> None:
+    """Settling a leftover Attempt never counts toward ``stop --after``.
+
+    The ledger holds an unfinished Attempt from an earlier process and
+    ``stop --after 1`` is committed while the instance is still
+    ``starting`` (before startup recovery). Recovery settling the
+    leftover as ``interrupted`` / ``process-loss`` leaves the plan
+    ``accepted`` with ``remaining`` unchanged and Intake open; the next
+    Attempt the Worker claims and finishes completes the plan.
+    """
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        # An earlier process died mid-Attempt, leaving it unfinished.
+        ledger.open_attempt(
+            "#50/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        ledger.set_attempt_state("#50/1", "claim-confirmed")
+
+        # The plan is committed before startup recovery, while no
+        # Attempt runs in this process.
+        starting = LiveView(process_started_at=_started_at())
+        assert starting.is_ready() is False
+        reply = operator_listener._handle_one(
+            _stop_after_request(
+                "req-after-recovery", "example-owner/example-repo", 1
+            ),
+            ledger_path=ledger.path,
+            live=starting,
+        )
+        assert reply is not None
+        assert reply["replayed"] is False
+        assert reply["command"]["acknowledgement"] == "accepted"
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["remaining"] == 1
+        assert plan["counted"] == 0
+
+        # Startup recovery settles the leftover Attempt. The plan stays
+        # pending and the snapshot keeps its operator-visible shape.
+        ledger.record_terminal_outcome(
+            "#50/1", outcome="interrupted", reason="process-loss"
+        )
+        ledger.set_attempt_state("#50/1", "finished")
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["request_id"] == "req-after-recovery"
+        assert plan["remaining"] == 1
+        assert plan["counted"] == 0
+        stored = _stored_command(ledger.path, "req-after-recovery")
+        assert stored is not None
+        assert stored.acknowledgement == "accepted"
+        assert ledger.intake_is_open() is True
+        status = operator_listener.build_status_result(ledger.path, _live())
+        assert status["intake"]["stop_plan"] == {
+            "request_id": "req-after-recovery",
+            "remaining": 1,
+            "counted": 0,
+        }
+
+        # The next Attempt the Worker claims and finishes completes it.
+        opened = ledger.open_attempt_if_intake_open(
+            "#50/2", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        assert opened is not None
+        ledger.record_terminal_outcome(
+            "#50/2", outcome="delivered", reason="done"
+        )
+        ledger.set_attempt_state("#50/2", "finished")
+        assert _stop_plan(ledger.path) is None
+        stored = _stored_command(ledger.path, "req-after-recovery")
+        assert stored is not None
+        assert stored.acknowledgement == "completed"
+        assert ledger.intake_is_open() is False
+    finally:
+        store.close()
+        ledger.close()
+
+
+def test_stop_after_live_attempt_counts_across_restart(tmp_path: Path) -> None:
+    """A plan committed while an Attempt runs counts it after process loss.
+
+    The plan records the live Attempt at commit; when the process dies
+    and startup recovery settles that Attempt with a Terminal Outcome,
+    it still counts toward the plan.
+    """
+    ledger, store = _ledger_with_instance(tmp_path)
+    try:
+        ledger.open_attempt(
+            "#51/1", effective_configuration={"repo": "example-owner/example-repo"}
+        )
+        reply = _answer(
+            ledger.path,
+            _stop_after_request(
+                "req-after-live", "example-owner/example-repo", 1
+            ),
+        )
+        assert reply is not None
+        assert reply["command"]["acknowledgement"] == "accepted"
+        plan = _stop_plan(ledger.path)
+        assert plan is not None
+        assert plan["remaining"] == 1
+        assert plan["counted"] == 0
+    finally:
+        store.close()
+        ledger.close()
+
+    # The process dies before the Attempt finalizes; the next start's
+    # recovery settles it with a Terminal Outcome.
+    reopened = RunLedger(ledger.path)
+    reopened_store = OperatorStore(ledger.path)
+    try:
+        reopened.record_terminal_outcome(
+            "#51/1", outcome="interrupted", reason="process-loss"
+        )
+        reopened.set_attempt_state("#51/1", "finished")
+        assert _stop_plan(ledger.path) is None
+        stored = _stored_command(ledger.path, "req-after-live")
+        assert stored is not None
+        assert stored.acknowledgement == "completed"
+        assert reopened.intake_is_open() is False
+    finally:
+        reopened_store.close()
+        reopened.close()
