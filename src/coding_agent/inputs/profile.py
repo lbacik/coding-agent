@@ -19,6 +19,10 @@ value, verified by the same contract suite.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from coding_agent.identity.startup import Identity
 
 WORKFLOWS_PATH_PREFIX = ".github/workflows/"
 """The workflows path prefix both git scanners read: the single definition.
@@ -43,7 +47,10 @@ class CodeHostProfile:
     workflows directory the authorship refusal scans;
     ``closing_keyword`` / ``non_closing_keyword`` render the
     pull-request-to-issue link line; ``marker_fence_open`` /
-    ``marker_fence_close`` fence the Attempt Marker comments.
+    ``marker_fence_close`` fence the Attempt Marker comments;
+    ``host`` is the bare hostname the credential-free remote URL and the
+    id-based noreply address are derived from; ``redaction_hosts`` are the
+    hosts whose credential-store entries reach git through the helper.
     """
 
     host_label: str
@@ -55,6 +62,21 @@ class CodeHostProfile:
     non_closing_keyword: str = "Part of"
     marker_fence_open: str = "<!--"
     marker_fence_close: str = "-->"
+    host: str = "github.com"
+    """The code host's bare hostname (``github.com``).
+
+    The canonical credential-free remote URL is ``https://<host>/...`` and
+    the id-based noreply address lives under ``users.noreply.<host>``.
+    """
+
+    redaction_hosts: tuple[str, ...] = ("github.com",)
+    """Hosts whose credential-store entries reach git through the helper.
+
+    The first entry is the git credential helper's store host (§18,
+    L3-ERR-11): the token is written as
+    ``https://x-access-token:<token>@<redaction_hosts[0]>`` while the remote
+    URL stays the canonical credential-free form.
+    """
 
     def delivery_reference(self, ref: str, *, draft: bool = False) -> str:
         """The pull-request-to-issue link line for issue ``ref`` (§10.5).
@@ -78,6 +100,10 @@ class CodeHostProfile:
         """The canonical credential-free clone URL for ``owner/repo`` (§18)."""
         return f"{self.base_url}/{owner}/{repo}.git"
 
+    def commit_email(self, identity: Identity) -> str:
+        """The id-based noreply address for the Agent Identity (§18)."""
+        return f"{identity.account_id}+{identity.login}@users.noreply.{self.host}"
+
 
 GITHUB_PROFILE = CodeHostProfile(
     host_label="GitHub",
@@ -85,6 +111,8 @@ GITHUB_PROFILE = CodeHostProfile(
     max_body_chars=65_536,
     workflows_path_prefix=WORKFLOWS_PATH_PREFIX,
     workflows_path_root=WORKFLOWS_PATH_ROOT,
+    host="github.com",
+    redaction_hosts=("github.com",),
 )
 """Today's host facts: every GitHub literal runtime code used to carry."""
 

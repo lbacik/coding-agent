@@ -7,12 +7,12 @@ from typing import Any, Protocol
 
 import requests
 
-from coding_agent.github.profile import GITHUB, CodeHostProfile
+from coding_agent.inputs.profile import GITHUB_PROFILE, CodeHostProfile
 
 PROBE_FILENAME = "coding-agent-preflight-probe.yml"
 """The preflight probe's own filename, joined onto the profile's CI directory."""
 
-WORKFLOWS_PROBE_PATH = f"{GITHUB.protected_ci_paths[0]}{PROBE_FILENAME}"
+WORKFLOWS_PROBE_PATH = f"{GITHUB_PROFILE.workflows_path_prefix}{PROBE_FILENAME}"
 """The probe file path, derived from the code-host profile (no literal here)."""
 
 PROBE_LABEL = "coding-agent-preflight"
@@ -349,9 +349,9 @@ def probe_workflows_write_rejected(
     *,
     branch: str,
     run_id: str,
-    profile: CodeHostProfile = GITHUB,
+    profile: CodeHostProfile = GITHUB_PROFILE,
 ) -> ProbeResult:
-    probe_path = f"{profile.protected_ci_paths[0]}{PROBE_FILENAME}"
+    probe_path = f"{profile.workflows_path_prefix}{PROBE_FILENAME}"
     response = _put_contents(
         client,
         owner,
