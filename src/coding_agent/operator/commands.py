@@ -570,8 +570,8 @@ def _single_unfinished_attempt(connection: sqlite3.Connection) -> str | None:
     the volume there is at most one unfinished Attempt and it is the
     live one, so this identifies the Attempt a committed stop plan must
     still count. While starting or recovering the unfinished Attempts
-    belong to an earlier process, so the caller passes ``running=False``
-    and never calls this.
+    belong to an earlier process, so the caller passes
+    ``recovery_complete=False`` and never calls this.
     """
     try:
         rows = connection.execute(
@@ -584,6 +584,19 @@ def _single_unfinished_attempt(connection: sqlite3.Connection) -> str | None:
         return None
     candidate = rows[0][0]
     return str(candidate) if candidate is not None else None
+
+
+def _plan_active_attempt(plan: dict[str, Any]) -> str | None:
+    """The Attempt recorded live at the plan's commit, if any.
+
+    Normalises the durable ``active_attempt`` field: anything but a
+    string (including absent data on pre-migration rows) reads as no
+    recorded Attempt.
+    """
+    active_attempt = plan.get("active_attempt")
+    if not isinstance(active_attempt, str):
+        return None
+    return active_attempt
 
 
 def _parse_stored_moment(value: Any) -> datetime | None:
@@ -638,6 +651,9 @@ def _claimed_after_plan_commit(
     plan_moment = _parse_stored_moment(plan_row[0])
     if attempt_moment is None or plan_moment is None:
         return True
+    # ``>=`` rather than ``>``: the claim boundary commits after the
+    # plan commit in causal order, but a coarse clock may stamp both
+    # with the same moment. A tie still means "claimed for this plan".
     return attempt_moment >= plan_moment
 
 
@@ -648,7 +664,7 @@ def commit_stop(
     expect_repo: str,
     target_repository: str,
     after: Any = None,
-    running: bool = True,
+    recovery_complete: bool = True,
     registry: Redactable = None,
 ) -> tuple[CommandRecord | None, bool, dict[str, Any] | None]:
     """Commit a ``stop`` in this connection's write transaction.
@@ -666,11 +682,11 @@ def commit_stop(
     Worker takes N more Attempts with a recorded Terminal Outcome and
     then drains. The plan supersedes any earlier plan or pending stop.
 
-    ``running`` tells whether the committing process has finished
-    startup recovery: while running, the single unfinished Attempt (if
-    any) is the live one and is recorded on the plan as the active
-    Attempt, so it still counts however it finalizes (even through
-    startup recovery after a process loss). While starting or
+    ``recovery_complete`` tells whether the committing process has
+    finished startup recovery: where true, the single unfinished
+    Attempt (if any) is the live one and is recorded on the plan as
+    the active Attempt, so it still counts however it finalizes (even
+    through startup recovery after a process loss). While starting or
     recovering, unfinished Attempts belong to an earlier process and
     no active Attempt is recorded, so settling them never counts.
     """
@@ -699,7 +715,7 @@ def commit_stop(
     intake = read_intake(connection)
     if arguments.get("after") is not None:
         remaining = int(arguments["after"])
-        if running:
+        if recovery_complete:
             active_attempt = _single_unfinished_attempt(connection)
         else:
             active_attempt = None
@@ -1290,7 +1306,6 @@ def complete_pending_stop(
         pass
     plan = intake.get("stop_plan")
     if isinstance(plan, dict) and plan.get("request_id"):
-        active_attempt = plan.get("active_attempt")
         _set_intake(
             connection,
             state=INTAKE_CLOSED,
@@ -1300,11 +1315,7 @@ def complete_pending_stop(
             stop_plan_sequence=int(plan.get("sequence") or 0),
             stop_plan_remaining=int(plan.get("remaining") or 0),
             stop_plan_counted=int(plan.get("counted") or 0),
-            stop_plan_active_attempt=(
-                str(active_attempt)
-                if isinstance(active_attempt, str)
-                else None
-            ),
+            stop_plan_active_attempt=_plan_active_attempt(plan),
             now=moment,
         )
     else:
@@ -1357,9 +1368,7 @@ def count_stop_plan(
     if not _has_recorded_outcome(connection, attempt_id):
         return
     plan_id = str(plan["request_id"])
-    active_attempt = plan.get("active_attempt")
-    if not isinstance(active_attempt, str):
-        active_attempt = None
+    active_attempt = _plan_active_attempt(plan)
     if attempt_id != active_attempt and not _claimed_after_plan_commit(
         connection, attempt_id, plan_id
     ):
@@ -1486,7 +1495,6 @@ def reconcile_accepted(
     plan = intake.get("stop_plan")
     if isinstance(pending, dict) and pending.get("request_id"):
         if isinstance(plan, dict) and plan.get("request_id"):
-            reconcile_active = plan.get("active_attempt")
             _set_intake(
                 connection,
                 state=INTAKE_CLOSED,
@@ -1496,11 +1504,7 @@ def reconcile_accepted(
                 stop_plan_sequence=int(plan.get("sequence") or 0),
                 stop_plan_remaining=int(plan.get("remaining") or 0),
                 stop_plan_counted=int(plan.get("counted") or 0),
-                stop_plan_active_attempt=(
-                    str(reconcile_active)
-                    if isinstance(reconcile_active, str)
-                    else None
-                ),
+                stop_plan_active_attempt=_plan_active_attempt(plan),
                 now=now,
             )
         else:

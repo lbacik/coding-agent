@@ -188,14 +188,14 @@ def _serve_mutation(
                 pass
             return {"error_code": "internal", "stored": False}
         if kind == "stop":
-            running = True if live is None else live.is_ready()
+            recovery_complete = True if live is None else live.is_ready()
             record, replayed, error = operator_commands.commit_stop(
                 connection,
                 request_id=request_id,
                 expect_repo=expect_repo,
                 target_repository=target_repository,
                 after=after,
-                running=running,
+                recovery_complete=recovery_complete,
                 registry=registry,
             )
         else:
