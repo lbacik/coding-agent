@@ -808,10 +808,11 @@ def target_repository_url(
 ) -> str:
     """The canonical credential-free URL for the Target Repository (§18).
 
-    The only remote URL the Worker ever builds (L3-ERR-11): git
-    authenticates through a :class:`GitCredentialHelper`, never through a
-    token embedded in the URL, so no log, no ``.git/config`` and no failure
-    message ever carries the token.
+    The only remote URL the Worker ever builds (L3-ERR-11): today's host
+    profile renders it. Git authenticates through a
+    :class:`GitCredentialHelper`, never through a token embedded in the
+    URL, so no log, no ``.git/config`` and no failure message ever carries
+    the token.
     """
     return profile.remote_url(owner, repo)
 

@@ -39,6 +39,10 @@ from typing import Literal, Protocol
 
 from coding_agent.github.profile import GITHUB, CodeHostProfile
 from coding_agent.inputs.gates import GateResult
+from coding_agent.inputs.profile import (
+    WORKFLOWS_PATH_PREFIX,
+    WORKFLOWS_PATH_ROOT,
+)
 from coding_agent.ledger.store import RunLedger
 from coding_agent.profile.parser import (
     InvalidProfile,
@@ -859,7 +863,10 @@ def run_commit_and_push(
                     result="error",
                     revision=None,
                     facts={"tree_id": tree, "branch": branch},
-                    detail="error: the workspace touches .github/workflows/; the push is refused",
+                    detail=(
+                        "error: the workspace touches "
+                        f"{WORKFLOWS_PATH_ROOT}/; the push is refused"
+                    ),
                 )
         except Exception as exc:
             return CommitPushOutcome(
@@ -998,7 +1005,7 @@ def run_commit_and_push(
             revision=revision,
             facts={"tree_id": tree, "branch": branch, "revision": revision, "paths": violating},
             detail=(
-                "error: the commit touches .github/workflows/ with content "
+                f"error: the commit touches {WORKFLOWS_PATH_ROOT}/ with content "
                 f"not taken from a parent: {', '.join(violating)}; the push is refused"
             ),
         )
