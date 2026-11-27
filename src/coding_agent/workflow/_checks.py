@@ -1918,7 +1918,11 @@ def validate_step(
                 f"{step_where}.routes",
                 f"result {SOFT_CONTEXT_RESULT!r} needs a step-local route",
             )
-    merged: dict[str, RouteTarget] = dict(effective_defaults)
+    # The typed step keeps its step-local Routes only: `defaults.routes`
+    # apply at use time via `Workflow.effective_routes` (and the Effective
+    # Configuration records the local table, as `build_config` once did).
+    # `effective_defaults` above only proves every result is routed.
+    merged: dict[str, RouteTarget] = {}
     for key, target in routes_mapping.items():
         if key not in result_names:
             continue
@@ -2597,7 +2601,7 @@ def check_reachability(
     Runs over the typed ``Workflow``: the shared ``effective_routes``
     implementation supplies the step's Routes after ``defaults.routes``.
     """
-    if workflow.start not in workflow.steps:
+    if not workflow.start:
         return
     routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
     seen: set[str] = set()
@@ -2997,6 +3001,13 @@ def required_inputs_for(
             parsed = _resolve_required_ref(workflow, step.with_body)
             if parsed is not None:
                 required.append((step.with_body, parsed))
+        for target in step.routes.values():
+            annotation = target.round_handoff
+            if annotation is not None and annotation.kind == "ai-assisted":
+                assert annotation.note is not None
+                parsed = _resolve_required_ref(workflow, annotation.note)
+                if parsed is not None:
+                    required.append((annotation.note, parsed))
         if required:
             resolved[step_id] = required
     return resolved
@@ -3012,7 +3023,7 @@ def check_required_inputs(
     Runs over the typed ``Workflow``: the required inputs resolve from the
     single read, and the entry facts flow over the effective Routes.
     """
-    if workflow.start not in workflow.steps:
+    if not workflow.start:
         return
     routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
     entry = must_analysis(workflow.start, workflow.steps, routes)
@@ -3101,7 +3112,7 @@ def check_round_handoff_notes(
     otherwise name innocent declarations. Runs over the typed ``Workflow``.
     """
     note_inputs = note_inputs_for(workflow)
-    if workflow.start not in workflow.steps or not note_inputs:
+    if not workflow.start or not note_inputs:
         return
     if any(
         fault.path == workflow_where or fault.path.startswith(workflow_where + ".")
@@ -3154,7 +3165,7 @@ def check_round_handoff_enablement(
         )
         return
     routes = {sid: workflow.effective_routes(sid) for sid in workflow.steps}
-    if workflow.start not in workflow.steps:
+    if not workflow.start:
         return
     first = first_agent_steps(workflow, routes)
     if not first:
