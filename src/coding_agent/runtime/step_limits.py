@@ -261,8 +261,8 @@ class AdmissionHold:
     best-effort: a ledger failure never fails admission, settlement,
     charging, or the Step Execution.
 
-    A hold that is closed, exits its context, or is dropped without an
-    explicit settle/charge settles empty: zero spend, ledger status settled
+    A hold that is closed or exits its context without an explicit
+    settle/charge settles empty: zero spend, ledger status settled
     (not charged), usage flush still fires. Explicit charge remains the only
     path booking the admitted worst case. Settling or charging an already
     closed hold is a safe no-op returning current totals.
@@ -285,7 +285,7 @@ class AdmissionHold:
         self._step_id = step_id
         self.seq = seq
         self._bound_tokens = bound_tokens
-        self._bound_cost_usd = bound_cost
+        self._bound_cost_usd = bound_cost_usd
         self._origin = origin
         self._closed = closed
 
@@ -433,19 +433,16 @@ class AdmissionHold:
         exc_type: type[BaseException] | None,
         exc: BaseException | None,
         tb: TracebackType | None,
-    ) -> bool:
+    ) -> None:
         """Exit the hold's scope, settling empty where still open."""
         self.close()
-        return False
 
-    def __del__(self) -> None:
-        """A dropped hold settles empty, best-effort and never failing."""
-        try:
-            if getattr(self, "_closed", True):
-                return
-            self.close()
-        except Exception:
-            pass
+    # No __del__ backstop by design: settling takes the meter lock and
+    # performs ledger I/O, neither of which is safe during garbage
+    # collection (a hang there is not an exception and cannot be swallowed,
+    # unlike ledger failures). Every lifecycle ends its hold explicitly —
+    # settle, charge, or close — and the meter retains each hold so a
+    # repeated settle/charge stays a no-op (criterion 4).
 
 
 @dataclass
