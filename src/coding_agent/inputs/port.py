@@ -24,6 +24,14 @@ agent has a separate account in each system. ``StepTrackerPort`` is the
 combined production port both adapters serve today: the single ``target:``
 Workflow Configuration block wires both ports to the GitHub adapter.
 
+The port is tracker-agnostic: `LabeledEvent` is the cross-tracker
+authorisation surface of §5.1, whatever record the adapter sources it from
+(a GitHub `labeled` timeline event; a Jira `labels` changelog entry).
+`fetch_repository_owner_id` and the shared/dedicated identity-mode
+detection built on it are GitHub-specific — a non-GitHub tracker has no
+repository-owner identity, so only the dedicated rule applies
+([ADR 0038](../../../docs/adr/0038-the-issue-tracker-and-the-code-host-are-reached-only-through-their-ports.md)).
+
 There is deliberately no operation that applies the Selection Label and
 none that edits an input's title or body — those two structural abstentions
 (§18) hold because no port can express them, not because any caller
@@ -188,7 +196,9 @@ class InputPort(Protocol):
         """Resolve the Target Repository owner's numeric id (§18).
 
         Compared with the Agent Identity's id, this decides the identity
-        mode — no YAML key selects it.
+        mode — no YAML key selects it. GitHub-specific: only the GitHub
+        adapter implements it; other trackers apply the dedicated-only
+        rule without detection.
         """
         ...
 
@@ -220,6 +230,10 @@ class InputPort(Protocol):
     ) -> LabeledEvent | None:
         """Read the latest ``labeled`` event for ``label`` on one input (§5.1).
 
+        The GitHub adapter reads the ``labeled`` timeline event; another
+        tracker's adapter sources the same shape from its own record (a
+        Jira ``labels`` changelog entry, falling back to the relevant
+        status-transition actor where labels are automation-set).
         ``None`` where no such event exists: the Claim is refused, because
         there is no authorisation to test.
         """

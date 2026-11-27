@@ -19,8 +19,16 @@ The Worker declining to start: it exits nonzero, naming the startup phase it sto
 _Avoid_: startup failure, boot error, Halt
 
 **Target Repository**:
-The one GitHub repository, named by the Workflow Configuration, whose issues or pull requests the Worker may select and work on.
+The Code Host repository, named by the Workflow Configuration, that the Worker pushes to and opens pull requests against. Where the Issue Tracker is the Code Host itself — the GitHub arrangement, and the default wherever `target.tracker` is omitted — it is also the repository whose issues or pull requests the Worker may select and work on.
 _Avoid_: source repo, project repo, upstream
+
+**Issue Tracker**:
+The system that holds Workflow Inputs, selection labels and comments. The Worker reaches it only through its tracker port: reading inputs, checking Selection Label authorisation and writing tracker-side effects all cross that port, never a second channel. Today the only tracker is GitHub; a Jira tracker pins exactly one project per Workflow Configuration.
+_Avoid_: forge, ticket system, helpdesk
+
+**Code Host**:
+The system that holds the repository, branches, diffs and pull-request refs. The Worker reaches it only through its code-host port: pushes, branch creation, merges and the commit identity all cross that port, never a second channel. Today the only code host is GitHub.
+_Avoid_: forge, git server, remote
 
 **Target Project**:
 The codebase inside the Target Repository that a Workflow examines or changes, characterised by its language and toolchain (Python, PHP or TypeScript).
@@ -43,7 +51,7 @@ An open input of the Workflow's type that passes its filters, has no assignee, o
 _Avoid_: candidate, queued issue, Eligible Issue
 
 **Target Issue**:
-The Workflow Input, when it is an issue, that the Worker has claimed and is currently working.
+The Workflow Input, when it is an issue, that the Worker has claimed and is currently working. It is held by the Issue Tracker, never by the Code Host as such: where the tracker is omitted from the Workflow Configuration the two coincide on the Target Repository.
 _Avoid_: task, job, work item
 
 **Target Pull Request**:

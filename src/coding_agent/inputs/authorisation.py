@@ -12,7 +12,10 @@ Row ids: INP-1, INP-6, INP-19, INP-20.
 
 This module is pure: it takes the reported ids and the reported event and
 answers which mode holds and whether the label application is authorised.
-No YAML key selects the mode.
+No YAML key selects the mode. Non-GitHub trackers always use the
+dedicated rule — they pass ``"dedicated"`` as the mode, since a
+non-GitHub tracker has no repository-owner identity to detect against
+([ADR 0038](../../../docs/adr/0038-the-issue-tracker-and-the-code-host-are-reached-only-through-their-ports.md)).
 """
 
 from __future__ import annotations

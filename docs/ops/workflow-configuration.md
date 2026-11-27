@@ -325,6 +325,35 @@ There is no lifecycle-label setting at file level: the labels applied at the
 end of an Attempt are declared per Workflow in
 [`outcomes`](#terminal-outcomes-and-end-labels).
 
+### The tracker and the Code Host (decided, not yet in force)
+
+The runtime distinguishes the **Issue Tracker** (holds inputs, selection
+labels, comments) from the **Code Host** (holds the repository, branches,
+diffs, pull-request refs), each reached only through its port (contract
+[§2.11](../contract/step-workflow-runtime-contract.md#211-the-tracker-and-the-code-host-decided-pending-the-version-5-migration),
+[ADR 0038](../adr/0038-the-issue-tracker-and-the-code-host-are-reached-only-through-their-ports.md)).
+Today both are GitHub and the file above is the whole shape. The decided
+`version: 5` shape splits `target` accordingly:
+
+```yaml
+version: 5
+target:
+  code_host: {kind: github, repository: OWNER/REPO, token-env: GITHUB_TOKEN}
+  tracker: {kind: jira, project: PROJ, token-env: JIRA_TOKEN}  # omitted = Code Host
+  base-branch: main
+```
+
+An omitted `tracker` keeps today's meaning: issues come from the Code Host.
+A `jira` tracker pins exactly one project per configuration (the adapter
+maps `PROJ-N` to integer `N`, so Attempt ids stay `<workflow>#<N>/<n>`);
+work in another project is another Worker. Tracker and host credentials are
+separate secrets with separate startup checks, both registered in the single
+redaction registry. Until the `version: 5` migration lands as a build
+slice, this shape is decided but not accepted: `version: 4` files keep
+validating exactly as above. The word "Forge" is not used for this split:
+Agent Forge names the external image builder
+([below](#external-builders-the-agent-forge-sequence)).
+
 ## A Workflow
 
 | Key | Required | Meaning |
@@ -366,6 +395,9 @@ input:
   agent account, a label applied by that account is refused (contract
   [§5.1](../contract/step-workflow-runtime-contract.md#51-input-type-and-selection-label),
   [§18](../contract/step-workflow-runtime-contract.md#18-identity-and-authorization)).
+  On a future non-GitHub tracker the same event shape is sourced from the
+  tracker's own record (a Jira `labels` changelog entry) and only the
+  dedicated rule applies, since there is no repository-owner identity.
   The label
   stays on the input for the whole Attempt; a human removing it withdraws
   the request. The Worker always removes it when the Attempt ends, so
@@ -1041,7 +1073,10 @@ Secrets appear only as environment-variable **names** (`token-env`,
 [§18](../contract/step-workflow-runtime-contract.md#18-identity-and-authorization)).
 Validation prints names, never values. The model key is redacted from the
 transcript and stripped from every Validation Contract command, and the
-`shell` group is credential-free.
+`shell` group is credential-free. Where the configuration names separate
+tracker and code-host credentials (the decided `version: 5` shape), both
+are required at startup and both are registered in the single redaction
+registry — one choke point, however many secrets.
 
 `agent config validate --config <file> --workflow <id>` checks the whole file
 statically, without opening an Attempt or writing to GitHub: `--workflow`
