@@ -251,6 +251,7 @@ def _pr_kwargs(
         "expected_head": seed["head"],
         "author_name": AUTHOR_NAME,
         "author_email": AUTHOR_EMAIL,
+        "start_commit": seed["head"],
         "git": git,
         "ledger": ledger,
     }

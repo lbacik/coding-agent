@@ -818,6 +818,7 @@ def run_commit_and_push(
     expected_head: str | None,
     author_name: str,
     author_email: str,
+    start_commit: str,
     with_requires: tuple[tuple[str, str], ...] = (),
     validation_registry: ValidationRegistry | None = None,
     tree_id: str | None = None,
@@ -836,7 +837,10 @@ def run_commit_and_push(
     as a compare-and-swap against the current Input Head. A landed push to a
     pull-request head advances the Input Head; a moved remote head yields
     ``stale-head`` and nothing is ever force-pushed. A clean workspace with
-    nothing to push yields ``no-changes``.
+    nothing to push yields ``no-changes``: on an issue input, that is both a
+    branch already up to date and a first push with no Attempt commit yet
+    (``HEAD`` still the start commit and no remote branch), which pushes
+    nothing so the branch carries at least one commit beyond the base.
 
     Every commit is built with explicit parents (§10.4, ADR 0034): without a
     pending second parent (recorded by ``update-from-base``) the only parent
@@ -973,6 +977,13 @@ def run_commit_and_push(
                     revision=current,
                     facts={"tree_id": tree, "branch": branch, "revision": current},
                     detail="error: the remote branch moved; the push is not performed",
+                )
+            if current == start_commit:
+                return CommitPushOutcome(
+                    result="no-changes",
+                    revision=current,
+                    facts={"tree_id": tree, "branch": branch, "revision": current},
+                    detail="no-changes: the workspace is clean and the Attempt made no commit",
                 )
             _intent(
                 f"commit-and-push {attempt_id}: push {current} to {branch}",
@@ -1704,6 +1715,7 @@ class LocalOperationRunner:
             expected_head=self.expected_head,
             author_name=self.author_name,
             author_email=self.author_email,
+            start_commit=self.start_commit,
             with_requires=step.with_requires,
             validation_registry=self.validation_registry,
             gate=self.gate,
