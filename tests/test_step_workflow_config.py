@@ -1662,3 +1662,118 @@ def test_gateway_cost_floor_at_minimum_validates(
 
     assert not faults
     assert cfg is not None
+
+
+# --- Free-form direct models: any model of a known provider pins --------
+
+
+def _direct_models_block(*entries: tuple[str, str, str, str, str]) -> str:
+    """A `models:` block with one direct pin per
+    ``(id, provider, model, endpoint, api-key-env)`` entry."""
+    lines = ["models:\n"]
+    for model_id, provider, model, endpoint, api_key_env in entries:
+        lines.append(
+            f"  {model_id}:\n"
+            f"    provider: {provider}\n"
+            f"    model: {model}\n"
+            f"    endpoint: {endpoint}\n"
+            "    effort: medium\n"
+            f"    api-key-env: {api_key_env}\n"
+            "    prices-usd-per-mtok: {input: 2.00, output: 10.00,"
+            " cache-read: 0.20, cache-write: 2.50}\n"
+            "    context-window-tokens: 1000000\n"
+            "    context-threshold-tokens: 80000\n"
+            "    output-cap-tokens: 32000\n"
+        )
+    return "".join(lines)
+
+
+def test_direct_pin_accepts_a_new_anthropic_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct pin may name any model of a known provider (§2.1)."""
+    _without_env(monkeypatch)
+    models = _direct_models_block(
+        ("sonnet", "anthropic", "claude-sonnet-5-5", "messages", "ANTHROPIC_API_KEY")
+    )
+    config = _write_config(tmp_path, _minimal_config(models=models))
+
+    cfg, faults = load_config(config)
+
+    assert not faults, [str(fault) for fault in faults]
+    assert cfg is not None
+    assert cfg.models["sonnet"].model == "claude-sonnet-5-5"
+
+
+def test_direct_pin_accepts_a_new_openai_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second OpenAI model on `responses` validates like the first (§2.1)."""
+    _without_env(monkeypatch)
+    models = _direct_models_block(
+        ("sonnet", "openai", "gpt-5.6-nova", "responses", "OPENAI_API_KEY")
+    )
+    config = _write_config(tmp_path, _minimal_config(models=models))
+
+    cfg, faults = load_config(config)
+
+    assert not faults, [str(fault) for fault in faults]
+    assert cfg is not None
+    assert cfg.models["sonnet"].model == "gpt-5.6-nova"
+
+
+def test_direct_pin_with_unknown_provider_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown provider is still refused (§2.1)."""
+    _without_env(monkeypatch)
+    models = _direct_models_block(
+        ("sonnet", "acme", "acme-model", "messages", "ACME_API_KEY")
+    )
+    config = _write_config(tmp_path, _minimal_config(models=models))
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert any(
+        fault.path == "models.sonnet.provider" and "unknown provider" in str(fault)
+        for fault in faults
+    ), [str(fault) for fault in faults]
+
+
+def test_direct_pin_with_wrong_endpoint_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A known provider with the wrong endpoint is still refused (§2.1)."""
+    _without_env(monkeypatch)
+    models = _direct_models_block(
+        ("sonnet", "anthropic", "claude-sonnet-5-5", "responses", "ANTHROPIC_API_KEY")
+    )
+    config = _write_config(tmp_path, _minimal_config(models=models))
+
+    _, faults = load_config(config)
+
+    assert faults
+    assert any(
+        fault.path == "models.sonnet.endpoint" and "unknown endpoint" in str(fault)
+        for fault in faults
+    ), [str(fault) for fault in faults]
+
+
+def test_two_pins_of_the_same_provider_with_different_models_validate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step pin and an Advisor pin may share a provider (§2.1, §9)."""
+    _without_env(monkeypatch)
+    models = _direct_models_block(
+        ("sonnet", "anthropic", "claude-sonnet-5", "messages", "ANTHROPIC_API_KEY"),
+        ("sage", "anthropic", "claude-opus-5-5", "messages", "ANTHROPIC_API_KEY"),
+    )
+    config = _write_config(tmp_path, _minimal_config(models=models))
+
+    cfg, faults = load_config(config)
+
+    assert not faults, [str(fault) for fault in faults]
+    assert cfg is not None
+    assert cfg.models["sonnet"].model == "claude-sonnet-5"
+    assert cfg.models["sage"].model == "claude-opus-5-5"

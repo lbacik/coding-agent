@@ -20,7 +20,6 @@ from coding_agent.provider.capability import (
     redact_report,
 )
 from coding_agent.provider.config import (
-    PINNED_MODELS,
     PinPolicy,
     policy_for_pin,
 )
@@ -61,7 +60,6 @@ __all__ = [
     "OUTCOME_REFUSED",
     "OUTCOME_TEXT_ANSWER",
     "PROVIDER_ENDPOINTS",
-    "PINNED_MODELS",
     "UNHONOURED_EFFORT",
     "VIA_INVALID_EFFORT_REFUSED",
     "VIA_REPORTED",

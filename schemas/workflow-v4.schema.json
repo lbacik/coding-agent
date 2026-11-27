@@ -16,12 +16,16 @@
                     "const": "messages"
                   },
                   "model": {
-                    "const": "claude-sonnet-5"
+                    "minLength": 1,
+                    "type": "string"
                   },
                   "provider": {
                     "const": "anthropic"
                   }
-                }
+                },
+                "required": [
+                  "provider"
+                ]
               },
               {
                 "properties": {
@@ -29,12 +33,16 @@
                     "const": "responses"
                   },
                   "model": {
-                    "const": "gpt-5.6-luna"
+                    "minLength": 1,
+                    "type": "string"
                   },
                   "provider": {
                     "const": "openai"
                   }
-                }
+                },
+                "required": [
+                  "provider"
+                ]
               },
               {
                 "properties": {
@@ -51,7 +59,10 @@
                       "kind"
                     ]
                   }
-                }
+                },
+                "required": [
+                  "gateway"
+                ]
               }
             ]
           },
@@ -82,7 +93,7 @@
             ]
           }
         ],
-        "description": "One `models.<id>` entry: a Pinned Model (\u00a72.1) \u2014 either a direct `provider` pin, whose (provider, model, endpoint) triple must be code-owned, or a `gateway` pin. Every pin carries its own Model Context Window, output cap and context-window threshold. See docs/ops/workflow-configuration.md.",
+        "description": "One `models.<id>` entry: a Pinned Model (\u00a72.1) \u2014 either a direct `provider` pin, whose provider and endpoint must be code-owned while `model` is free-form, or a `gateway` pin. Every pin carries its own Model Context Window, output cap and context-window threshold. See docs/ops/workflow-configuration.md.",
         "properties": {
           "api-key-env": {
             "description": "The environment-variable name holding the key.",

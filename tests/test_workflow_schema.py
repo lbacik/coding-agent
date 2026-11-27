@@ -349,3 +349,43 @@ def test_schema_version_const_is_4() -> None:
     assert schema["title"] == "Workflow Configuration (version: 4)"
     assert "skills" in schema["properties"]
 
+
+
+def test_direct_pin_with_a_new_model_passes_the_schema() -> None:
+    """The editor schema admits any model of a known provider (§2.1)."""
+    data = copy.deepcopy(_load_yaml(EXAMPLES))
+    assert isinstance(data, dict)
+    models = data["models"]
+    assert isinstance(models, dict)
+    name = next(iter(models))
+    assert isinstance(models[name], dict)
+    models[name]["model"] = "claude-sonnet-5-5"
+
+    assert _validator().is_valid(data)
+
+
+def test_direct_pin_with_an_unknown_provider_fails_the_schema() -> None:
+    """The editor schema still refuses an unknown provider (§2.1)."""
+    data = copy.deepcopy(_load_yaml(EXAMPLES))
+    assert isinstance(data, dict)
+    models = data["models"]
+    assert isinstance(models, dict)
+    name = next(iter(models))
+    assert isinstance(models[name], dict)
+    models[name]["provider"] = "acme"
+
+    assert not _validator().is_valid(data)
+
+
+def test_direct_pin_with_the_wrong_endpoint_fails_the_schema() -> None:
+    """The editor schema still refuses a known provider's wrong endpoint."""
+    data = copy.deepcopy(_load_yaml(EXAMPLES))
+    assert isinstance(data, dict)
+    models = data["models"]
+    assert isinstance(models, dict)
+    name = next(iter(models))
+    assert isinstance(models[name], dict)
+    assert models[name]["provider"] == "anthropic"
+    models[name]["endpoint"] = "responses"
+
+    assert not _validator().is_valid(data)

@@ -243,3 +243,44 @@ def test_advisor_allowance_floor_covers_advisor_pin(
     _, faults = _load(tmp_path, cfg_text)
     assert faults
     assert any("steps.triage.limits.effective-tokens" in str(fault) for fault in faults)
+
+
+def test_advisor_with_same_provider_second_model_is_valid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A step pin and an Advisor pin may share a provider (§2.1, §9)."""
+    _without_env(monkeypatch)
+    _write_prompt(tmp_path)
+    agent = (
+        "          tools: [workspace-read, advisor]\n"
+        "          advisor: {prompt: advisor-prompt.md, model: sage}\n"
+    )
+    text = _config(agent).replace(
+        "    model: claude-sonnet-5\n",
+        "    model: claude-sonnet-5-5\n",
+        1,
+    )
+    text = text.replace(
+        "models:\n",
+        "models:\n"
+        "  sage:\n"
+        "    provider: anthropic\n"
+        "    model: claude-opus-5-5\n"
+        "    endpoint: messages\n"
+        "    effort: high\n"
+        "    api-key-env: ANTHROPIC_API_KEY\n"
+        "    prices-usd-per-mtok: {input: 15.00, output: 75.00,"
+        " cache-read: 1.50, cache-write: 18.75}\n"
+        "    context-window-tokens: 1000000\n"
+        "    context-threshold-tokens: 80000\n"
+        "    output-cap-tokens: 32000\n",
+        1,
+    )
+    cfg, faults = _load(tmp_path, text)
+    assert not faults, [str(fault) for fault in faults]
+    assert cfg is not None
+    step = cfg.workflows["triage"].steps["triage"]
+    assert step.agent is not None
+    assert step.agent.advisor is not None
+    assert step.agent.advisor.model == "sage"
+    assert cfg.workflows["triage"].referenced_pins == ("sonnet", "sage")

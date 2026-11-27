@@ -85,25 +85,31 @@ worker: {...}      # optional: poll interval and shutdown grace
   threshold still end a run first — and the Step Execution loop itself has
   no round bound.
   `input` prices only the uncached remainder of the prompt. `effort` is
-  `low`, `medium` or `high`. The (`provider`, `model`) pair and its
-  `endpoint` must come from the code-owned table in
-  [`provider/config.py`](../../src/coding_agent/provider/config.py)
+  `low`, `medium` or `high`. `provider` must be a known provider and
+  `endpoint` must be the one the code-owned provider-to-endpoint table in
+  [`provider/pinned_model.py`](../../src/coding_agent/provider/pinned_model.py)
+  (`PROVIDER_ENDPOINTS`) lists for it
   (contract
   [§2.1](../contract/step-workflow-runtime-contract.md#21-the-file)),
-  which admits the pair and endpoint only and carries no token budget.
-  This release knows two:
+  which admits one endpoint per provider and carries no token budget;
+  `model` is free-form and never checked against a table. This release
+  knows two providers:
 
-  | `provider` | `model` | `endpoint` |
-  | --- | --- | --- |
-  | `anthropic` | `claude-sonnet-5` | `messages` |
-  | `openai` | `gpt-5.6-luna` | `responses` |
+  | `provider` | `endpoint` |
+  | --- | --- |
+  | `anthropic` | `messages` |
+  | `openai` | `responses` |
 
-  Any other pair, or another endpoint for the provider, refuses startup.
+  An unknown `provider`, or another endpoint for the provider, refuses
+  startup. A model that does not exist, or that answers as another model,
+  is refused at startup by the Provider Capability Assertion and the
+  per-response identity check, with no Attempt opened.
   `context-window-tokens` is the Model Context Window the request and its
   response share; `context-threshold-tokens + output-cap-tokens` must not
   exceed it, and the threshold must exceed the safety margin plus request
   overhead (1,000 + 1,000). The window, threshold and output cap are
-  pinned and covered by the digest. Recommended values:
+  pinned and covered by the digest. Worked examples (not an exhaustive
+  list — any model of a supported provider pins the same three keys):
 
   | `model` | `context-window-tokens` | `context-threshold-tokens` | `output-cap-tokens` |
   | --- | --- | --- | --- |

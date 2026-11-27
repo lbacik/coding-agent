@@ -9,22 +9,6 @@ from coding_agent.provider.pinned_model import (
 )
 from coding_agent.runtime.conversation_context import ContextWindowConfig
 
-PINNED_MODELS: dict[str, PinnedModel] = {
-    "anthropic": PinnedModel(
-        provider="anthropic", model="claude-sonnet-5", endpoint="messages", effort="medium"
-    ),
-    "openai": PinnedModel(
-        provider="openai", model="gpt-5.6-luna", endpoint="responses", effort="medium"
-    ),
-}
-"""The code-owned (provider, model) pair table (§2.1).
-
-These entries admit the pair and endpoint only and carry no token budget:
-every pin the Worker runs declares its own ``context-window-tokens``,
-``context-threshold-tokens`` and ``output-cap-tokens`` in the Workflow
-Configuration. There is no code-owned window, output-cap or price table.
-"""
-
 
 @dataclass(frozen=True)
 class PinPolicy:

@@ -51,7 +51,6 @@ from coding_agent.provider.capability import (
     ProviderCapabilityReport,
     assert_provider_capability,
 )
-from coding_agent.provider.config import PINNED_MODELS
 from coding_agent.provider.pinned_model import InvokableToolModel, PinnedModel
 from coding_agent.provider.price_table import PriceTable
 from coding_agent.runtime.redaction import SecretRegistry
@@ -516,7 +515,12 @@ def test_successful_startup_persists_the_report(
     pinned effort, and the forced probe answers with text, so the stored
     report is the one the assertion actually built.
     """
-    pin = PINNED_MODELS["anthropic"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+    )
     auto = AIMessage(
         content="",
         tool_calls=[
@@ -552,7 +556,7 @@ def test_successful_startup_persists_the_report(
     assert stored is not None
     assert set(stored) == {"sonnet"}
     report = stored["sonnet"]
-    assert report["pin_key"] == PINNED_MODELS["anthropic"].key
+    assert report["pin_key"] == pin.key
     assert [entry["check"] for entry in report["checks"]] == [
         CHECK_PRICE,
         CHECK_TOOL_CALL_AUTO,
@@ -643,7 +647,12 @@ def test_provider_check_prints_the_report(
     """``provider-check`` prints the report instead of its ad-hoc lines."""
     from coding_agent import cli
 
-    pin = PINNED_MODELS["anthropic"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+    )
     monkeypatch.setattr(cli, "build_chat_model", lambda _pin, **_kwargs: object())
     monkeypatch.setattr(
         cli,
@@ -672,7 +681,12 @@ def test_provider_check_prints_the_report_on_refusal(
     """A refused ``provider-check`` still prints the report built up to it."""
     from coding_agent import cli
 
-    pin = PINNED_MODELS["anthropic"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+    )
     monkeypatch.setattr(cli, "build_chat_model", lambda _pin, **_kwargs: object())
 
     def _refuse(_pin: Any, _model: Any, _table: Any, **_kwargs: Any) -> Any:
@@ -698,7 +712,12 @@ def test_provider_check_redacts_secrets_in_evidence(
     from coding_agent import cli
 
     secret = "sk-ant-secret-value"
-    pin = PINNED_MODELS["anthropic"]
+    pin = PinnedModel(
+        provider="anthropic",
+        model="claude-sonnet-5",
+        endpoint="messages",
+        effort="medium",
+    )
     report = ProviderCapabilityReport(
         pin_key=pin.key,
         ran_at="2026-11-18T12:00:00Z",

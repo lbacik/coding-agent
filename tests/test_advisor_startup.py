@@ -101,8 +101,29 @@ _PLAIN_AGENT_BLOCK = """\
 _ADVISOR_PROMPT_TEXT = "Review the question under the operator role.\n"
 
 
+_SAME_PROVIDER_CONFIG = _ADVISOR_CONFIG.replace(
+    "  opus:\n"
+    "    provider: openai\n"
+    "    model: gpt-5.6-luna\n"
+    "    endpoint: responses\n"
+    "    effort: high\n"
+    "    api-key-env: OPENAI_API_KEY\n",
+    "  sage:\n"
+    "    provider: anthropic\n"
+    "    model: claude-opus-5-5\n"
+    "    endpoint: messages\n"
+    "    effort: high\n"
+    "    api-key-env: ANTHROPIC_API_KEY\n",
+)
+"""The same two-pin shape with both pins on one provider (§2.1)."""
+
+
 def _write_advisor_config(
-    tmp_path: Path, *, with_advisor: bool, advisor_model: str | None = "opus"
+    tmp_path: Path,
+    *,
+    with_advisor: bool,
+    advisor_model: str | None = "opus",
+    template: str = _ADVISOR_CONFIG,
 ) -> Path:
     """A two-``models`` configuration, with or without an advisor step."""
     if with_advisor:
@@ -111,7 +132,7 @@ def _write_advisor_config(
         agent_block = _PLAIN_AGENT_BLOCK
     path = tmp_path / "workflow.yml"
     path.write_text(
-        _ADVISOR_CONFIG.replace("__AGENT_BLOCK__", agent_block), encoding="utf-8"
+        template.replace("__AGENT_BLOCK__", agent_block), encoding="utf-8"
     )
     (tmp_path / "advisor-prompt.md").write_text(
         _ADVISOR_PROMPT_TEXT, encoding="utf-8"
@@ -138,10 +159,14 @@ def _advisor_run(
     *,
     with_advisor: bool,
     advisor_model: str | None = "opus",
+    template: str = _ADVISOR_CONFIG,
 ) -> tuple[int, Path]:
     """Run the Worker over the advisor config; return exit and state dir."""
     config = _write_advisor_config(
-        tmp_path, with_advisor=with_advisor, advisor_model=advisor_model
+        tmp_path,
+        with_advisor=with_advisor,
+        advisor_model=advisor_model,
+        template=template,
     )
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
     # The fake skill-bundle port returns no prompt bytes, so collect them
@@ -246,3 +271,33 @@ def test_startup_advisor_without_model_probes_and_reports_one_pin(
     capability = result["provider_capability"]
     assert isinstance(capability, dict)
     assert set(capability) == {"sonnet"}
+
+
+def test_startup_asserts_two_pins_of_the_same_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two pins of one provider are both probed and both reported (§2.1)."""
+    fakes = _fakes(monkeypatch, _tracker(), ScriptedModel([]))
+    exit_code, state_dir = _advisor_run(
+        tmp_path,
+        monkeypatch,
+        fakes,
+        capsys,
+        with_advisor=True,
+        advisor_model="sage",
+        template=_SAME_PROVIDER_CONFIG,
+    )
+
+    assert exit_code == 0
+    assert [pin.model for pin in fakes.model.build_calls] == [
+        "claude-sonnet-5",
+        "claude-opus-5-5",
+    ]
+    result = offline_reader.load_offline_status(
+        state_dir / "run-ledger.sqlite3", state_dir
+    )
+    capability = result["provider_capability"]
+    assert isinstance(capability, dict)
+    assert set(capability) == {"sonnet", "sage"}
+    assert capability["sonnet"]["pin_key"] == "anthropic:claude-sonnet-5@messages"
+    assert capability["sage"]["pin_key"] == "anthropic:claude-opus-5-5@messages"

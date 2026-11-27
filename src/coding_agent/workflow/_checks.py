@@ -209,26 +209,22 @@ class Problems:
         return bool(self.items)
 
 
-def code_owned_tables() -> tuple[frozenset[tuple[str, str]], dict[str, frozenset[str]]]:
-    """The code-owned (provider, model) table, imported lazily so this offline
-    module pays no provider-adapter import at load time.
+def code_owned_tables() -> dict[str, frozenset[str]]:
+    """The code-owned provider → endpoint table, imported lazily so this
+    offline module pays no provider-adapter import at load time.
 
-    Pairs come from the pinned models; the admissible endpoint per provider
-    comes from the shared protocol vocabulary through the per-provider table
-    (``PROVIDER_ENDPOINTS``), so a wrong endpoint is refused even for a known
-    pair.
+    A direct pin's ``model`` is free-form and never checked against a table:
+    only the provider must be known and the endpoint must be the one the
+    per-provider table (``PROVIDER_ENDPOINTS``) admits for it. A model that
+    does not exist, or that answers as another model, is refused at startup
+    by the Provider Capability Assertion and the per-response identity check.
     """
-    from coding_agent.provider.config import PINNED_MODELS
     from coding_agent.provider.pinned_model import PROVIDER_ENDPOINTS
 
-    pairs: set[tuple[str, str]] = set()
-    for pin in PINNED_MODELS.values():
-        pairs.add((pin.provider, pin.model))
-    endpoints: dict[str, frozenset[str]] = {
+    return {
         str(provider): frozenset({str(endpoint)})
         for provider, endpoint in PROVIDER_ENDPOINTS.items()
     }
-    return frozenset(pairs), endpoints
 
 
 def gateway_code_owned() -> tuple[
@@ -1126,14 +1122,14 @@ def validate_worker(problems: Problems, data: Mapping[str, Any]) -> WorkerSettin
 def check_model_table(
     problems: Problems,
     models: Mapping[str, ModelDecl],
-    pairs: frozenset[tuple[str, str]],
     endpoints: Mapping[str, frozenset[str]],
 ) -> None:
-    """Refuse a (provider, model) pair outside the code-owned table (§2.1).
+    """Refuse an unknown provider or a wrong endpoint on a direct pin (§2.1).
 
-    Gateway pins skip the pair table — their model name is free-form — and
-    only prove their endpoint admissible for their gateway kind. The
-    code-owned per-pin tables never hold gateway keys.
+    A direct pin's ``model`` is free-form — like a gateway pin's — and is
+    never checked against a table. Gateway pins only prove their endpoint
+    admissible for their gateway kind. The code-owned tables never hold
+    gateway keys.
     """
     _, gateway_endpoints, _, _, _ = gateway_code_owned()
     for model_id in sorted(models):
@@ -1150,13 +1146,12 @@ def check_model_table(
                 )
             continue
         provider = str(entry.provider)
-        model = str(entry.model)
         endpoint = str(entry.endpoint)
-        if (provider, model) not in pairs:
+        if provider not in endpoints:
             problems.add(
-                f"models.{model_id}.model",
-                f"unknown (provider, model) pair ({provider!r}, {model!r}): "
-                "outside the code-owned table",
+                f"models.{model_id}.provider",
+                f"unknown provider {provider!r} "
+                f"(one of {', '.join(sorted(endpoints))})",
             )
         elif endpoint not in endpoints.get(provider, frozenset()):
             problems.add(
@@ -3385,8 +3380,7 @@ def validate_configuration_text(
         )
 
     if target is not None and models is not None:
-        pairs, endpoints = code_owned_tables()
-        check_model_table(problems, models, pairs, endpoints)
+        check_model_table(problems, models, code_owned_tables())
 
     # Phase 2 proves the graph-wide rules over the typed Workflows. A
     # Workflow the single read refused carries its phase-1 faults already and
