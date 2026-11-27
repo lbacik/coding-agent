@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 
+from coding_agent.github.profile import GITHUB, CodeHostProfile
 from coding_agent.identity.startup import Identity
 
 ATTEMPT_BRANCH_PREFIX = "agent"
@@ -21,12 +22,14 @@ _SLUG_MAX_LENGTH = 40
 _NON_SLUG_CHARS = re.compile(r"[^a-z0-9]+")
 
 
-def noreply_author(identity: Identity) -> tuple[str, str]:
+def noreply_author(
+    identity: Identity, *, profile: CodeHostProfile = GITHUB
+) -> tuple[str, str]:
     """The id-based noreply `(name, email)` pair every Delivery Snapshot is
     authored and committed as: `<id>+<login>@users.noreply.github.com`,
     recognised by numeric account id rather than login (CONTEXT.md's
     Agent Identity)."""
-    email = f"{identity.account_id}+{identity.login}@users.noreply.github.com"
+    email = profile.commit_email(identity)
     return identity.login, email
 
 

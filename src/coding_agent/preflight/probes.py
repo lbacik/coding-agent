@@ -7,8 +7,14 @@ from dataclasses import dataclass, field
 import requests
 
 from coding_agent.github.client import GitHubClient
+from coding_agent.github.profile import GITHUB, CodeHostProfile
 
-WORKFLOWS_PROBE_PATH = ".github/workflows/coding-agent-preflight-probe.yml"
+PROBE_FILENAME = "coding-agent-preflight-probe.yml"
+"""The preflight probe's own filename, joined onto the profile's CI directory."""
+
+WORKFLOWS_PROBE_PATH = f"{GITHUB.protected_ci_paths[0]}{PROBE_FILENAME}"
+"""The probe file path, derived from the code-host profile (no literal here)."""
+
 PROBE_LABEL = "coding-agent-preflight"
 
 
@@ -309,13 +315,20 @@ def probe_pull_request(
 
 
 def probe_workflows_write_rejected(
-    client: GitHubClient, owner: str, repo: str, *, branch: str, run_id: str
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    *,
+    branch: str,
+    run_id: str,
+    profile: CodeHostProfile = GITHUB,
 ) -> ProbeResult:
+    probe_path = f"{profile.protected_ci_paths[0]}{PROBE_FILENAME}"
     response = _put_contents(
         client,
         owner,
         repo,
-        WORKFLOWS_PROBE_PATH,
+        probe_path,
         branch=branch,
         message="coding-agent preflight probe: workflows write (must be rejected)",
         content=f"# preflight probe {run_id}, never expected to land\n".encode(),

@@ -30,6 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from coding_agent.github.profile import GITHUB, CodeHostProfile
 from coding_agent.runtime.redaction import (
     GitCredentialHelper,
     Redactable,
@@ -389,10 +390,6 @@ def commit_delivery_snapshot(
     return _run(["git", "rev-parse", "HEAD"], cwd=workspace.path)
 
 
-WORKFLOWS_PATH_PREFIX = ".github/workflows/"
-WORKFLOWS_PATH_ROOT = ".github/workflows"
-
-
 def _status_paths(status_output: str) -> list[str]:
     """Parse ``git status --porcelain`` output into repository-relative paths."""
     paths: list[str] = []
@@ -408,13 +405,17 @@ def _status_paths(status_output: str) -> list[str]:
     return paths
 
 
-def _is_workflows_path(path: str) -> bool:
+def _is_workflows_path(path: str, *, profile: CodeHostProfile = GITHUB) -> bool:
     """Whether ``path`` is the workflows directory or a file under it (§13)."""
     normalized = path.strip().strip('"')
-    return normalized == WORKFLOWS_PATH_ROOT or normalized.startswith(WORKFLOWS_PATH_PREFIX)
+    prefix = profile.protected_ci_paths[0]
+    root = profile.protected_ci_paths[1]
+    return normalized == root or normalized.startswith(prefix)
 
 
-def tree_touches_workflows_path(workspace_path: Path) -> bool:
+def tree_touches_workflows_path(
+    workspace_path: Path, *, profile: CodeHostProfile = GITHUB
+) -> bool:
     """Whether the working tree touches ``.github/workflows/`` (§13, L3-ERR-9).
 
     Classified by write kind and target path, never by error string: the
@@ -430,17 +431,19 @@ def tree_touches_workflows_path(workspace_path: Path) -> bool:
         ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=workspace_path,
     )
-    return any(_is_workflows_path(path) for path in _status_paths(output))
+    return any(_is_workflows_path(path, profile=profile) for path in _status_paths(output))
 
 
-def commit_touches_workflows_path(workspace_path: Path, revision: str = "HEAD") -> bool:
+def commit_touches_workflows_path(
+    workspace_path: Path, revision: str = "HEAD", *, profile: CodeHostProfile = GITHUB
+) -> bool:
     """Whether ``revision`` touches ``.github/workflows/`` (§13, L3-ERR-9)."""
     output = _run(
         ["git", "show", "--name-only", "--pretty=format:", revision],
         cwd=workspace_path,
     )
     return any(
-        _is_workflows_path(line.strip())
+        _is_workflows_path(line.strip(), profile=profile)
         for line in output.splitlines()
         if line.strip()
     )
@@ -800,7 +803,9 @@ def restore_detached_head(workspace_path: Path, *, sha: str) -> None:
     _run(["git", "update-ref", "HEAD", sha], cwd=workspace_path)
 
 
-def target_repository_url(owner: str, repo: str) -> str:
+def target_repository_url(
+    owner: str, repo: str, *, profile: CodeHostProfile = GITHUB
+) -> str:
     """The canonical credential-free URL for the Target Repository (§18).
 
     The only remote URL the Worker ever builds (L3-ERR-11): git
@@ -808,7 +813,7 @@ def target_repository_url(owner: str, repo: str) -> str:
     token embedded in the URL, so no log, no ``.git/config`` and no failure
     message ever carries the token.
     """
-    return f"https://github.com/{owner}/{repo}.git"
+    return profile.remote_url(owner, repo)
 
 
 def read_file_at_revision(workspace_path: Path, revision: str, relpath: str) -> str | None:
