@@ -457,7 +457,7 @@ def test_skip_open_agent_pr_ignores_another_workflows_pull_request(
 
 def _readback_pr_race(
     tracker: FakeStepTracker, ledger: RunLedger, workflow: str
-) -> object:
+) -> ConfirmedClaim | ReleasedClaim | None:
     """Claim one candidate whose agent pull request opens before the read-back."""
     real_list = tracker.list_open_pull_requests
 

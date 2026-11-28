@@ -63,6 +63,12 @@ def parse_attempt_branch(branch: str) -> tuple[str, int, int] | None:
     return (match.group("workflow"), int(match.group("number")), int(match.group("n")))
 
 
+def _attempt_id_of(match: re.Match[str]) -> AttemptId | None:
+    """The Attempt Id a marker match spells, or ``None`` if its parts are not one."""
+    raw = f"{match.group('workflow')}#{match.group('number')}/{match.group('n')}"
+    return AttemptId.try_parse(raw)
+
+
 def parse_attempt_marker(text: str) -> AttemptId | None:
     """Split the ``attempt=<workflow>#<N>/<n>`` of an Attempt Marker, or ``None``.
 
@@ -74,8 +80,7 @@ def parse_attempt_marker(text: str) -> AttemptId | None:
     match = _MARKER_RE.search(text)
     if match is None:
         return None
-    raw = f"{match.group('workflow')}#{match.group('number')}/{match.group('n')}"
-    return AttemptId.try_parse(raw)
+    return _attempt_id_of(match)
 
 
 def attempt_markers(text: str) -> list[AttemptId]:
@@ -85,13 +90,8 @@ def attempt_markers(text: str) -> list[AttemptId]:
     reads them all: a body may carry markers of more than one Attempt. A marker
     whose parts are not an Attempt Id is skipped, so it is not ours.
     """
-    markers: list[AttemptId] = []
-    for match in _MARKER_RE.finditer(text):
-        raw = f"{match.group('workflow')}#{match.group('number')}/{match.group('n')}"
-        parsed = AttemptId.try_parse(raw)
-        if parsed is not None:
-            markers.append(parsed)
-    return markers
+    parsed = (_attempt_id_of(match) for match in _MARKER_RE.finditer(text))
+    return [attempt for attempt in parsed if attempt is not None]
 
 
 def highest_n(
