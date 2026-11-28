@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from coding_agent.inputs.comments import PinnedComment
     from coding_agent.inputs.pickup import PickupConfig
+    from coding_agent.inputs.relay import RelayConfig, RelayDiagnostic
 
 from coding_agent.inputs.authorisation import (
     IdentityMode,
@@ -1102,6 +1103,8 @@ def sweep_and_claim(
     known_markers: Iterable[str] = (),
     merge_base_resolver: Callable[[str, str], str] | None = None,
     pickup: PickupConfig | None = None,
+    relay: RelayConfig | None = None,
+    relay_diagnose: RelayDiagnostic | None = None,
 ) -> ConfirmedClaim | ReleasedClaim | None:
     """Run one Selection-and-Claim sweep: the first confirmed Claim wins (§5–§6).
 
@@ -1120,6 +1123,12 @@ def sweep_and_claim(
     Label (§8): the first pickup-eligible offer is claimed and confirmed
     before any selection candidate is considered. The pickup import stays
     lazy so this module never cycles with the pickup lane.
+
+    Where ``relay`` carries the Workflow's Relay Label, the Relay lane runs
+    next (§22): lane order is Pickup Label, Relay Label, Selection Label. A
+    valid Relay wins over a Selection Label on the same issue; an invalid
+    signal is reported through ``relay_diagnose`` with no Claim and no write,
+    and intake falls through to the Selection lane.
     """
     try:
         owner_id = inputs.fetch_repository_owner_id()
@@ -1143,6 +1152,23 @@ def sweep_and_claim(
         )
         if claimed is not None:
             return claimed
+    if relay is not None:
+        from coding_agent.inputs.relay import sweep_relay
+
+        relayed = sweep_relay(
+            inputs,
+            code_host,
+            ledger,
+            config,
+            relay,
+            identity_mode=identity_mode,
+            priority=priority,
+            known_branches=known_branches,
+            known_markers=known_markers,
+            diagnose=relay_diagnose,
+        )
+        if relayed is not None:
+            return relayed
     if config.input_type == "issue":
         listed = inputs.list_issue_candidates(config.selection_label)
     else:

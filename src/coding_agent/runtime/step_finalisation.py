@@ -48,6 +48,13 @@ from coding_agent.provider.observed_identity import (
     PIN_VIOLATION_DETAIL,
     PIN_VIOLATION_REASON,
 )
+from coding_agent.runtime.relay import (
+    RELAY_MISSING_AUTHORISATION,
+    RelayRecord,
+    parse_relay_block,
+    render_relay_diagnostic,
+    render_relay_section,
+)
 from coding_agent.runtime.round_handoff import (
     HandoffDiagnostic,
     RoundHandoffOffer,
@@ -351,6 +358,103 @@ def _missing_handoff_diagnostic(
     )
 
 
+def _prepare_relay(
+    ledger: RunLedger, attempt_id: str, outcome: str
+) -> tuple[str, str | None]:
+    """The Relay section and the receiver's Relay Label for ``outcome`` (§22).
+
+    Reads the Attempt's pinned Effective Configuration, never the loaded
+    file: the outcome's declared Relay target with its Relay Label. The
+    record carries the originating human authorisation pinned at the
+    chain's first Claim; an Attempt that pinned none records no Relay, only
+    the ``missing-authorisation`` diagnostic, because a Relay never creates
+    an authorisation. ``("", None)`` where the outcome declares no Relay.
+    """
+    try:
+        attempt = ledger.get_attempt(attempt_id)
+        record = attempt.effective_configuration
+        from coding_agent.workflow.effective import (
+            effective_relay_target,
+            effective_workflow_id,
+            is_full_effective_configuration,
+        )
+
+        if not isinstance(record, Mapping) or not is_full_effective_configuration(
+            record
+        ):
+            return "", None
+        declared = effective_relay_target(record, outcome)
+        if declared is None:
+            return "", None
+        target_workflow, relay_label = declared
+        source_workflow = effective_workflow_id(record)
+        pin = ledger.get_attempt_pin(attempt_id)
+    except Exception:
+        return "", None
+    if (
+        pin is None
+        or not pin.selection_actor
+        or not pin.selection_actor_id
+    ):
+        return (
+            render_relay_diagnostic(
+                RELAY_MISSING_AUTHORISATION,
+                f"{attempt_id} pinned no human authorisation to carry to "
+                f"workflow {target_workflow}; no Relay Label is applied",
+            ),
+            None,
+        )
+    relay = RelayRecord(
+        source_attempt=attempt_id,
+        source_workflow=source_workflow,
+        target_workflow=target_workflow,
+        issue=pin.input_number,
+        outcome=outcome,
+        relay_label=relay_label,
+        origin_actor=pin.selection_actor,
+        origin_actor_id=pin.selection_actor_id,
+        origin_actor_type=pin.selection_actor_type or "",
+        origin_actor_at=pin.selection_actor_at or "",
+        identity_mode=pin.identity_mode or "",
+    )
+    return render_relay_section(relay), relay_label
+
+
+def _replay_relay_label(stored_comment: str) -> str | None:
+    """The Relay Label a stored terminal comment still carries, if any (§22).
+
+    Recovery re-applies the label of the record the comment already holds,
+    so a Relay finishes unchanged after a crash between the comment and the
+    label write. A forged or truncated block reads as absent.
+    """
+    record = parse_relay_block(stored_comment)
+    return record.relay_label if record is not None else None
+
+
+def _pinned_relay_label(ledger: RunLedger, attempt_id: str) -> str | None:
+    """The Workflow's own pinned Relay Label, removed when its Attempt ends (§22)."""
+    try:
+        record = ledger.get_attempt(attempt_id).effective_configuration
+        from coding_agent.workflow.effective import (
+            effective_relay_label,
+            is_full_effective_configuration,
+        )
+
+        if not isinstance(record, Mapping) or not is_full_effective_configuration(
+            record
+        ):
+            return None
+        return effective_relay_label(record)
+    except Exception:
+        return None
+
+
+def _relay_consumed(ledger: RunLedger, attempt_id: str) -> tuple[str, ...]:
+    """The Relay Label this Attempt's own Workflow consumes, as a tuple (§22)."""
+    label = _pinned_relay_label(ledger, attempt_id)
+    return (label,) if label is not None else ()
+
+
 def count_uncommitted_files(workspace: Path) -> int:
     """Count uncommitted files without committing or pushing (REC-21) (§16.1).
 
@@ -611,6 +715,7 @@ def perform_terminal_writes(
     end_labels: Sequence[str] = (),
     comment_body: str = "",
     writes: Sequence[str] | None = None,
+    also_remove_labels: Sequence[str] = (),
 ) -> None:
     """Perform the recorded terminal writes, each once (§15.2, §15.3).
 
@@ -622,6 +727,10 @@ def perform_terminal_writes(
     conversion, no branch deletion, no removal of reviews or comments.
     Each write records its Effect Intent before the write and its Receipt
     after it, so a retried recovery never writes twice.
+
+    ``also_remove_labels`` are further consumed intake labels (the
+    Workflow's own Relay Label, §22) removed in the same write as the
+    Selection Label, so the write list keeps its four stable entries.
     """
     ordered = tuple(writes) if writes is not None else terminal_writes_for_outcome()
     safe_end_labels = filter_end_labels(end_labels, selection_label)
@@ -658,21 +767,33 @@ def perform_terminal_writes(
             retrying = _has_terminal_intent(
                 ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL
             )
+            consumed = (selection_label, *(
+                label
+                for label in also_remove_labels
+                if label and label != selection_label
+            ))
             _record_terminal_intent(
                 ledger,
                 attempt_id,
                 REMOVE_SELECTION_LABEL_ORDINAL,
-                f"remove label {selection_label}",
-                {"terminal-write": "remove-selection-label", "label": selection_label},
+                f"remove label {selection_label}"
+                + (
+                    f" and {', '.join(consumed[1:])}" if len(consumed) > 1 else ""
+                ),
+                {"terminal-write": "remove-selection-label", "label": selection_label}
+                | ({"also": list(consumed[1:])} if len(consumed) > 1 else {}),
             )
             if retrying:
                 labels, _ = _remote_labels_and_assignees(inputs, number, input_type)
-                if labels is not None and selection_label not in labels:
+                if labels is not None and not any(
+                    label in labels for label in consumed
+                ):
                     _record_terminal_receipt(
                         ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL, selection_label
                     )
                     continue
-            inputs.remove_label(number, input_type, selection_label)
+            for label in consumed:
+                inputs.remove_label(number, input_type, label)
             _record_terminal_receipt(
                 ledger, attempt_id, REMOVE_SELECTION_LABEL_ORDINAL, selection_label
             )
@@ -1105,6 +1226,9 @@ def finish_attempt(
             replay_pickup = _replay_pickup_label(stored.terminal_comment_body)
             if replay_pickup is not None:
                 replay_end_labels = (replay_pickup,)
+        replay_relay = _replay_relay_label(stored.terminal_comment_body)
+        if replay_relay is not None:
+            replay_end_labels = (*replay_end_labels, replay_relay)
         perform_terminal_writes(
             inputs=inputs,
             code_host=code_host,
@@ -1116,6 +1240,7 @@ def finish_attempt(
             end_labels=replay_end_labels,
             comment_body=stored.terminal_comment_body,
             writes=stored.writes,
+            also_remove_labels=_relay_consumed(ledger, attempt_id),
         )
         ledger.set_attempt_state(attempt_id, "finished")
         return FinalisedAttempt(
@@ -1146,6 +1271,11 @@ def finish_attempt(
                         eligibility[0],
                     )
                 )
+    relay_section, live_relay_label = _prepare_relay(
+        ledger, attempt_id, resolved.outcome
+    )
+    section_parts = [part for part in (handoff_section, relay_section) if part]
+    handoff_section = "\n\n".join(section_parts)
     comments_section = ""
     try:
         late = late_trusted_comments(
@@ -1194,6 +1324,8 @@ def finish_attempt(
     )
     if live_pickup is not None:
         live_end_labels = live_pickup
+    if live_relay_label is not None:
+        live_end_labels = (*live_end_labels, live_relay_label)
     perform_terminal_writes(
         inputs=inputs,
         code_host=code_host,
@@ -1205,6 +1337,7 @@ def finish_attempt(
         end_labels=live_end_labels,
         comment_body=comment,
         writes=writes,
+        also_remove_labels=_relay_consumed(ledger, attempt_id),
     )
     ledger.set_attempt_state(attempt_id, "finished")
     return FinalisedAttempt(

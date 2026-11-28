@@ -44,6 +44,7 @@ from coding_agent.identity.token import TokenRejected
 from coding_agent.inputs.authorisation import IdentityMode
 from coding_agent.inputs.claim import ClaimConfig
 from coding_agent.inputs.pickup import PickupConfig
+from coding_agent.inputs.relay import RelayConfig
 from coding_agent.inputs.port import CodeHostPort, InputType
 from coding_agent.ledger.store import RunLedger
 from coding_agent.operator.listener import OperatorListener
@@ -388,6 +389,11 @@ class Ready:
     """The Attempt command runner stripped of every credential variable."""
     pinned_configuration: dict[str, object]
     """The pinned Effective Configuration record the Claim pins (§2.10)."""
+    relay_config: RelayConfig | None = None
+    """The Relay intake parameters, tried after pickup (§22).
+
+    ``None`` where the selected Workflow declares no ``input.relay-label``.
+    """
     pickup_config: PickupConfig | None = None
     """The Round Handoff pickup parameters, tried ahead of selection (§8).
 
@@ -1226,6 +1232,23 @@ def start(
                 activation_components=run_inputs.contents,
                 profile_text=loaded.profile_text,
             )
+        # The Relay lane runs after pickup and ahead of selection only for
+        # issue Workflows that declare a Relay Label (§22). The pinned
+        # record vouches for the Relays the Workflow receives.
+        relay_config: RelayConfig | None = None
+        if selected.input.relay_label is not None and selected.input.type == "issue":
+            relay_config = RelayConfig(
+                workflow_id=selected.id,
+                relay_label=selected.input.relay_label,
+                agent_login=identity.login,
+                agent_id=identity.account_id,
+                base_branch=cfg.target.base_branch,
+                effective_configuration=pinned_configuration,
+                prompt_texts=prompt_texts,
+                activation_deliveries=run_inputs.registry.bodies,
+                activation_components=run_inputs.contents,
+                profile_text=loaded.profile_text,
+            )
         # The ``next issue N`` eligibility read gets its own tracker
         # instance — never the Worker thread's. A fresh client per
         # commit keeps even the transport separate.
@@ -1286,6 +1309,7 @@ def start(
             command_runner=command_runner,
             pinned_configuration=pinned_configuration,
             pickup_config=pickup_config,
+            relay_config=relay_config,
             _stack=stack,
         )
     except StartupRefused as refused:

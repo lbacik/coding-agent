@@ -54,6 +54,7 @@ class PinnedInput:
     selection_actor_type: str | None = None
     selection_actor_at: str | None = None
     identity_mode: IdentityMode | None = None
+    relay_source_attempt: str | None = None
 
 
 def pin_from_readback(
@@ -140,4 +141,5 @@ def attempt_pin_from_pin(pin: PinnedInput, attempt: str) -> AttemptPin:
         selection_actor_type=pin.selection_actor_type,
         selection_actor_at=pin.selection_actor_at,
         identity_mode=pin.identity_mode,
+        relay_source_attempt=pin.relay_source_attempt,
     )
