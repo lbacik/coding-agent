@@ -1,4 +1,4 @@
-"""Relay, sender side: the terminal comment, record and end labels (#716, §19, §15).
+"""Relay, sender side: the terminal comment, record and end labels (#716, §22, §15).
 
 A ``triage`` Attempt that ends ``completed`` with ``relay: implement`` posts
 one terminal comment carrying the Relay record, applies the receiver's Relay

@@ -1,6 +1,6 @@
-"""Relay: the versioned terminal record one Workflow hands the next (§19).
+"""Relay: the versioned terminal record one Workflow hands the next (§22).
 
-Contract: ``docs/contract/step-workflow-runtime-contract.md`` §19 (an issue
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §22 (an issue
 Workflow whose Attempt ends with a Terminal Outcome that declares ``relay``
 passes the Target Issue to another Workflow of the same Workflow
 Configuration through the receiver's Relay Label) and §15 (the terminal
@@ -23,23 +23,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 RELAY_RECORD_VERSION = 1
-"""The version of the Relay record this build writes and reads (§19).
+"""The version of the Relay record this build writes and reads (§22).
 
 A newer writer's record reads as absent, never as a guess.
 """
 
 RELAY_FENCE = "<!-- relay-record v1"
-"""The opening line of the machine-readable record block (§19)."""
+"""The opening line of the machine-readable record block (§22)."""
 
 RELAY_FENCE_CLOSE = "-->"
-"""The closing line of the machine-readable record block (§19)."""
+"""The closing line of the machine-readable record block (§22)."""
 
 RELAY_REASONS: tuple[str, ...] = (
     "relay-label",
     "relay-replaced",
     "relay-undeclared",
 )
-"""Relay-lane ineligibility reasons (§19).
+"""Relay-lane ineligibility reasons (§22).
 
 ``relay-label`` names a missing Relay Label signal; ``relay-replaced`` an
 absent, invalid, forged, mismatched or superseded record; ``relay-undeclared``
@@ -50,12 +50,12 @@ declare. The shared guard reasons (``closed``, ``assigned``, ``blocker``,
 
 RELAY_MISSING_AUTHORISATION = "missing-authorisation"
 """The reason a sender records no Relay: its Attempt pinned no human
-authorisation to carry forward (§19)."""
+authorisation to carry forward (§22)."""
 
 
 @dataclass(frozen=True)
 class RelayRecord:
-    """One parsed Relay record (§19).
+    """One parsed Relay record (§22).
 
     ``origin_actor``/``origin_actor_id``/``origin_actor_type``/
     ``origin_actor_at`` are the originating human authorisation;
@@ -76,7 +76,7 @@ class RelayRecord:
 
 
 def render_relay_block(record: RelayRecord) -> str:
-    """Render the machine-readable record block (§19)."""
+    """Render the machine-readable record block (§22)."""
     fields = [
         f"source_attempt: {record.source_attempt}",
         f"source_workflow: {record.source_workflow}",
@@ -97,7 +97,7 @@ def render_relay_block(record: RelayRecord) -> str:
 
 
 def render_relay_section(record: RelayRecord) -> str:
-    """Render the operator-visible section plus the machine record (§19)."""
+    """Render the operator-visible section plus the machine record (§22)."""
     return "\n".join(
         [
             (
@@ -116,12 +116,12 @@ def render_relay_section(record: RelayRecord) -> str:
 
 
 def render_relay_diagnostic(reason: str, detail: str) -> str:
-    """Render the operator-visible line for a Relay that is not recorded (§19)."""
+    """Render the operator-visible line for a Relay that is not recorded (§22)."""
     return f"Relay: no relay ({reason}): {detail}"
 
 
 def parse_relay_block(body: str) -> RelayRecord | None:
-    """Parse the Relay record block, or ``None`` where absent or invalid (§19).
+    """Parse the Relay record block, or ``None`` where absent or invalid (§22).
 
     Strict: the fence, every required field and the integer fields must be
     exactly right, or the block reads as absent. Unknown fields are ignored

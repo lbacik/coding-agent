@@ -390,7 +390,7 @@ class Ready:
     pinned_configuration: dict[str, object]
     """The pinned Effective Configuration record the Claim pins (§2.10)."""
     relay_config: RelayConfig | None = None
-    """The Relay intake parameters, tried after pickup (§19).
+    """The Relay intake parameters, tried after pickup (§22).
 
     ``None`` where the selected Workflow declares no ``input.relay-label``.
     """
@@ -1233,7 +1233,7 @@ def start(
                 profile_text=loaded.profile_text,
             )
         # The Relay lane runs after pickup and ahead of selection only for
-        # issue Workflows that declare a Relay Label (§19). The pinned
+        # issue Workflows that declare a Relay Label (§22). The pinned
         # record vouches for the Relays the Workflow receives.
         relay_config: RelayConfig | None = None
         if selected.input.relay_label is not None and selected.input.type == "issue":

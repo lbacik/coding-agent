@@ -273,7 +273,7 @@ class WorkerLoopConfig:
     Label path.
     """
     relay_config: RelayConfig | None = None
-    """The Relay intake parameters, tried after pickup and ahead of selection (§19).
+    """The Relay intake parameters, tried after pickup and ahead of selection (§22).
 
     ``None`` where the running Workflow declares no ``input.relay-label``.
     """
@@ -290,7 +290,7 @@ class StepRecoverySummary:
 
 
 def _print_relay_diagnostic(issue: int, reason: str) -> None:
-    """Say why a Relay Label on ``issue`` authorises nothing (§19).
+    """Say why a Relay Label on ``issue`` authorises nothing (§22).
 
     Diagnosed before model work: no Claim and no write; the label stays on
     the issue and a human removes it.

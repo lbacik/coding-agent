@@ -1,4 +1,4 @@
-"""Relay intake: the Relay Label ahead of the Selection Label (#716, §19).
+"""Relay intake: the Relay Label ahead of the Selection Label (#716, §22).
 
 A relayed Target Issue is claimed before model work only where the sender's
 Relay record is trusted: authored by the Agent Identity's numeric id,

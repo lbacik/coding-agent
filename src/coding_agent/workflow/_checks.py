@@ -1319,7 +1319,7 @@ def validate_ceiling(
 def validate_outcomes(
     problems: Problems, workflow_where: str, raw: Any
 ) -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
-    """Parse ``outcomes`` into end labels and per-outcome Relay targets (§3, §19).
+    """Parse ``outcomes`` into end labels and per-outcome Relay targets (§3, §22).
 
     ``relay`` is shape-checked here (a Workflow id, only on a YAML-selectable
     outcome); the cross-Workflow rules run over the typed file in
@@ -3270,7 +3270,7 @@ def check_round_handoff_enablement(
 
 
 def _relay_cycle(relays: Mapping[str, set[str]]) -> list[str] | None:
-    """One Relay cycle as ``[a, b, ..., a]``, or ``None`` where acyclic (§19)."""
+    """One Relay cycle as ``[a, b, ..., a]``, or ``None`` where acyclic (§22)."""
     done: set[str] = set()
 
     def visit(node: str, path: list[str]) -> list[str] | None:
@@ -3293,7 +3293,7 @@ def _relay_cycle(relays: Mapping[str, set[str]]) -> list[str] | None:
 
 
 def check_relays(problems: Problems, workflows: Mapping[str, Workflow]) -> None:
-    """Prove the Relay declarations of one file (§3, §19).
+    """Prove the Relay declarations of one file (§3, §22).
 
     Per declaration: the target exists, is not the sender, declares
     ``input.relay-label``; both ends are ``issue`` Workflows;

@@ -381,6 +381,7 @@ input:
   require-any: [...]
   exclude: [ready-for-human, wontfix]
   skip-open-agent-pr: true     # issue Workflows only
+  # relay-label: triaged       # issue Workflows only; opts in to receive Relays
   # drafts: include | exclude  # pull-request Workflows only; default exclude
 ```
 
@@ -410,6 +411,10 @@ input:
   Attempt Marker of this Workflow for that issue. A pull request from
   another Workflow's Attempt (for example a `triage` draft) does not
   skip the issue.
+- **`relay-label`** (issues only, optional, no default): opts the Workflow
+  in to receive a [Relay](#relay-from-one-workflow-to-another) from another
+  Workflow of the same file. It is distinct from the Selection Label and
+  never authorises anything by itself.
 - **`drafts`** (pull requests only): whether draft pull requests are
   eligible; default `exclude`. A draft change during an Attempt is ignored.
 - **Mandatory guards** apply whatever the filters say: the input is open,
@@ -519,6 +524,78 @@ running one. When a series is exhausted — or when the pickup signal is
 otherwise spent — the human re-authorises it by clearing the Pickup Label,
 then re-applying the Selection Label, which opens a fresh human-authorised
 Attempt and a new series.
+
+## Relay: from one Workflow to another
+
+A **Relay** passes a Target Issue from one `issue` Workflow to another
+Workflow of the *same* file when an Attempt ends, so that no human has to
+relabel it in between: a `triage` Workflow can hand an issue to `implement`.
+(The word *handoff* is already taken by Round Handoff, the Hard/Soft
+Handoff, the AI-assisted Handoff and the Operator Handoff, so a Relay is
+never called one.) A Relay carries the human authorisation that started the
+chain; it never creates one, and the Worker still never applies a Selection
+Label (contract
+[§22](../contract/step-workflow-runtime-contract.md#22-relay)).
+
+Two keys configure it:
+
+```yaml
+workflows:
+  triage:
+    input: {type: issue, label: agent:triage}
+    outcomes:
+      completed: {labels: [triage-done], relay: implement}   # the sender
+    # ...
+  implement:
+    input:
+      type: issue
+      label: ready-for-agent        # a human's Selection Label, as ever
+      relay-label: triaged          # the receiver opts in; no default
+    # ...
+```
+
+- **`input.relay-label`** on the receiver is required to receive Relays and
+  has no default.
+- **`outcomes.<outcome>.relay`** on the sender names one receiving Workflow,
+  next to `labels`, on `completed`, `blocked`, `unfinished` or `failed`.
+  There is one target per outcome, and never one on a runtime-only outcome.
+
+**What happens.** When an Attempt ends with an outcome that declares `relay`,
+its terminal comment carries a versioned Relay record (the source Attempt,
+the source and target Workflow, the issue, the outcome, the Relay Label and
+the originating human authorisation), and the receiver's Relay Label is
+applied together with the configured end labels. The receiving Worker
+claims the issue with no human action, but only when the record is trusted:
+authored by the Agent Identity's numeric id, carrying the canonical terminal
+marker of its exact source Attempt, naming the source Workflow, this
+Workflow and this issue, being the newest terminal comment of any Workflow
+on the issue, and declared by the receiver's own configuration. It works the
+same under a shared and a dedicated identity. The receiver's lane order is
+Pickup Label, then Relay Label, then Selection Label; where an issue carries
+both the Relay Label and the Selection Label, a valid record wins. When the
+relayed Attempt ends, the Worker removes the Relay Label like the Selection
+Label. The relayed Attempt records the source Attempt and the originating
+authorisation.
+
+**When a Relay Label authorises nothing.** A label with no record (a human
+applied it), a forged or foreign-author record, a record a later terminal
+comment superseded, or a Relay the receiver's configuration no longer
+declares is diagnosed before any model work (`relay-replaced` or
+`relay-undeclared`; the Worker prints `run: relay: #<issue> ... not
+authorised`), with no Claim and no write. The label stays on the issue: a
+human removes it, or applies the Selection Label for an ordinary Attempt.
+
+**Validation** refuses, naming the key: a `relay` on a runtime-only outcome;
+a target that does not exist, is the sender itself or declares no
+`input.relay-label`; a `pull-request` Workflow at either end; a cycle of
+Relays (a self-Relay included; the message names the cycle); a Relay Label
+equal to any Selection Label, end label, Pickup Label or other Relay Label
+in the file or to the receiver's own filters; an end label equal to any
+Relay Label; and `relay` on `unfinished` in a Workflow with Round Handoff
+enabled. An end label equal to another Workflow's Selection Label is still
+refused: a Relay does not relax that. Loop protection is that static
+acyclicity only; there is no runtime counter, and Relays work only inside
+one file.
 
 ## Steps
 
@@ -950,7 +1027,10 @@ runtime posts exactly one **terminal comment** from a fixed template (Attempt
 id, outcome, the step and result that ended it, any limit fact, landed and
 not-performed effects, uncommitted-file count); it removes the Selection
 Label, applies the end labels, and removes its assignment when no other
-Claim is in force. A Workflow's own `post-comment` (a handoff note, say) is
+Claim is in force. Where the outcome declares a [Relay](#relay-from-one-workflow-to-another),
+the terminal comment also carries the Relay record and the receiver's Relay
+Label is applied with the end labels; a Workflow that declares a
+`relay-label` removes it together with the Selection Label. A Workflow's own `post-comment` (a handoff note, say) is
 separate, so such an Attempt leaves two comments. Landed effects are never
 reverted.
 
@@ -1059,7 +1139,8 @@ The errors operators meet most, grouped:
 | Route coverage | A Route key the step can never produce; an unrouted business result; a business result in `defaults.routes`; `requirement-unmet` without `with.requires`; `stale-head` on an operation or input type that cannot produce it. |
 | Unsupported constructs | A list of Route targets (fan-out); a per-step `model`; conditions or expressions (`when`, `if`, ...); a wildcard Route; `retry` or limit-handler keys (use Routes). |
 | Graph | A step unreachable from `start`; a cycle of `limit-exceeded` Routes; a required input not proven present on every path (declare it `{optional: ...}`). |
-| Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label or any Workflow's Pickup Label in the file. |
+| Ends | `error` or `limit-exceeded` routed directly to `completed` or `blocked`; an unknown end category; a runtime-only outcome used as `{end: ...}`; end labels for an unknown Terminal Outcome, `canceled` included; an end label equal to any Workflow's Selection Label, Pickup Label or Relay Label in the file. |
+| Relay | `relay` on a runtime-only outcome or on `unfinished` under Round Handoff; a target that is unknown, the sender itself or without `input.relay-label`; a `pull-request` Workflow at either end; a Relay cycle; a Relay Label equal to any other label in the file or to the receiver's own filters. |
 | Limits | `limits` on an operation step; a Reserved Step missing a meter; reserves not below the Attempt Ceiling; a Step Allowance larger than the Work Pool; the Attempt Ceiling, the Work Pool, or a Step Allowance below one maximal Admission hold in a meter it declares. |
 | Input type | `publish-review` in an `issue` Workflow; `open-pull-request` in a `pull-request` Workflow. |
 | Tools and data | A tool group outside the six (GitHub tools especially); declaring an always-present tool; declaring a reserved result name; a publication `body` that is not a `document` field or is a `<step>.facts`; an expression where a reference is expected; a facts-mode comment; a pull-request title in `with`; `input.comments` in a pull-request Workflow or as an operation `with.body` reference; a step id of `input`; the `advisor` group without an `agent.advisor` mapping (or the mapping without the group); an `agent.advisor` with an unknown `model` id, a missing or untrusted prompt file, an unknown key or an instructions list; a per-step `model`. |

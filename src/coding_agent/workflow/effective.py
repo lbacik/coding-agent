@@ -310,7 +310,7 @@ def _workflow_record(
             "max_automatic_pickups": workflow.round_handoff.max_automatic_pickups,
         }
     # Relay keys ride only where declared, so Workflows without a Relay
-    # record byte-identical bytes (§19).
+    # record byte-identical bytes (§22).
     if workflow.input.relay_label is not None:
         assert isinstance(record["input"], dict)
         record["input"]["relay_label"] = workflow.input.relay_label
@@ -1161,7 +1161,7 @@ def effective_end_labels_for_all(
 
 
 def effective_relay_label(record: Mapping[str, Any]) -> str | None:
-    """The pinned Relay Label the Workflow receives Relays under, if any (§19)."""
+    """The pinned Relay Label the Workflow receives Relays under, if any (§22)."""
     workflow_input = _workflow_section(record).get("input")
     if not isinstance(workflow_input, Mapping):
         return None
@@ -1172,7 +1172,7 @@ def effective_relay_label(record: Mapping[str, Any]) -> str | None:
 def effective_relay_target(
     record: Mapping[str, Any], outcome: str
 ) -> tuple[str, str] | None:
-    """The ``(Workflow id, Relay Label)`` a Terminal Outcome relays to (§19).
+    """The ``(Workflow id, Relay Label)`` a Terminal Outcome relays to (§22).
 
     Read from the pinned record, never the loaded file. ``None`` where the
     outcome declares no Relay or the entry is malformed.
@@ -1195,7 +1195,7 @@ def effective_relay_target(
 def effective_relay_declared(
     record: Mapping[str, Any], source_workflow: str, outcome: str
 ) -> bool:
-    """Whether the pinned record declares a Relay ``source`` → this Workflow (§19).
+    """Whether the pinned record declares a Relay ``source`` → this Workflow (§22).
 
     The receiver's own configuration vouches for the Relay: the record names
     every ``(source Workflow, outcome)`` pair that relays into it.

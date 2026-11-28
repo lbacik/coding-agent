@@ -456,7 +456,7 @@ class AttemptPin:
     selection_actor_at: str | None = None
     identity_mode: str | None = None
     relay_source_attempt: str | None = None
-    """The source Attempt of the Relay this Claim consumed, if any (§19).
+    """The source Attempt of the Relay this Claim consumed, if any (§22).
 
     ``None`` for ordinary selection and pickup Claims. For a relayed Attempt
     the ``selection_actor`` fields hold the originating human authorisation

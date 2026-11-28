@@ -1,6 +1,6 @@
-"""Relay intake: claim a relayed Target Issue ahead of the Selection Label (§19).
+"""Relay intake: claim a relayed Target Issue ahead of the Selection Label (§22).
 
-Contract: ``docs/contract/step-workflow-runtime-contract.md`` §19 (one issue
+Contract: ``docs/contract/step-workflow-runtime-contract.md`` §22 (one issue
 Workflow passes a Target Issue to another Workflow of the same Workflow
 Configuration through the receiver's Relay Label), §5.2/§6 (the lane order
 and the Claim sequence: intent, assignment, Claim Comment, read-back, pin).
@@ -67,12 +67,12 @@ __all__ = [
 ]
 
 RelayDiagnostic = Callable[[int, str], None]
-"""Receives ``(issue number, reason)`` for an invalid Relay signal (§19)."""
+"""Receives ``(issue number, reason)`` for an invalid Relay signal (§22)."""
 
 
 @dataclass(frozen=True)
 class RelayConfig:
-    """What one Relay sweep runs under (§19).
+    """What one Relay sweep runs under (§22).
 
     ``workflow_id`` is the receiving Workflow; ``relay_label`` its resolved
     Relay Label. ``agent_login``/``agent_id`` are the Agent Identity;
@@ -115,7 +115,7 @@ def newest_terminal_relay(
     issue_number: int,
     format_marker: Callable[[AttemptMarker], str] | None = None,
 ) -> tuple[RelayRecord, InputComment] | None:
-    """The newest trusted terminal comment's Relay record for this receiver (§19).
+    """The newest trusted terminal comment's Relay record for this receiver (§22).
 
     Scans trusted terminal comments of **any** Workflow on the issue —
     authored by the Agent Identity's numeric id and carrying the canonical
@@ -173,7 +173,7 @@ def relay_exclusion_reason(
     claim_in_force: bool,
     agent_pr_open: bool = False,
 ) -> str | None:
-    """The reason ``candidate`` is ineligible for a Relay, or ``None`` (§19).
+    """The reason ``candidate`` is ineligible for a Relay, or ``None`` (§22).
 
     Pure: the caller reads every guard input fresh. The Relay Label signal
     comes first (a missing label is ``relay-label``), then the record's
@@ -220,7 +220,7 @@ def _relay_guard_reason(
     agent_id: int | None,
     exclude_comment_id: int | None = None,
 ) -> str | None:
-    """The Relay-lane guard reason for ``candidate``, read fresh (§19)."""
+    """The Relay-lane guard reason for ``candidate``, read fresh (§22)."""
     comments = inputs.list_comments(candidate.number, candidate.input_type)
     in_force = [
         comment
@@ -265,7 +265,7 @@ def _relay_readback_failure(
     own_comment_id: int,
     agent_id: int | None,
 ) -> str | None:
-    """The reason the Relay Claim read-back fails, or ``None`` (§19, §6.2).
+    """The reason the Relay Claim read-back fails, or ``None`` (§22, §6.2).
 
     Re-runs the lane's guards and revalidates the same source: the newest
     trusted terminal comment of any Workflow must still be the relayed
@@ -335,7 +335,7 @@ def attempt_relay_claim(
     known_markers: Iterable[str] = (),
     priority_request_id: str | None = None,
 ) -> ConfirmedClaim | ReleasedClaim | None:
-    """Claim one relayed candidate: intent, assign, comment, revalidate, pin (§19, §6.2).
+    """Claim one relayed candidate: intent, assign, comment, revalidate, pin (§22, §6.2).
 
     A thin Relay-lane wrapper around :func:`coding_agent.inputs.claim._execute_claim`:
     the lane supplies the source-comment revalidation and the pin finish
@@ -417,7 +417,7 @@ def sweep_relay(
     known_markers: Iterable[str] = (),
     diagnose: RelayDiagnostic | None = None,
 ) -> ConfirmedClaim | ReleasedClaim | None:
-    """Run one Relay sweep: the first eligible Relay wins (§19).
+    """Run one Relay sweep: the first eligible Relay wins (§22).
 
     Issue candidates carrying the Relay Label are tried in contract §5.4
     order under the Relay-lane guards; the first eligible Relay is claimed

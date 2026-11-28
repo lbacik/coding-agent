@@ -1,4 +1,4 @@
-"""Relay configuration (#716, contract §3 and §19): parsing and readers.
+"""Relay configuration (#716, contract §3 and §22): parsing and readers.
 
 The refusals are the table-driven invalid fixtures ``69``–``81`` under
 ``tests/fixtures/workflows/invalid/`` (exercised by

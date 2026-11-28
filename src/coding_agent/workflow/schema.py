@@ -909,7 +909,7 @@ class Workflow:
         factory=dict,
     )
     relays: dict[str, str] = field(default_factory=dict)
-    """Outcome → receiving Workflow id for each ``outcomes.<o>.relay`` (§19)."""
+    """Outcome → receiving Workflow id for each ``outcomes.<o>.relay`` (§22)."""
     start: str = described(
         "start",
         "custom",

@@ -1125,7 +1125,7 @@ def sweep_and_claim(
     lazy so this module never cycles with the pickup lane.
 
     Where ``relay`` carries the Workflow's Relay Label, the Relay lane runs
-    next (§19): lane order is Pickup Label, Relay Label, Selection Label. A
+    next (§22): lane order is Pickup Label, Relay Label, Selection Label. A
     valid Relay wins over a Selection Label on the same issue; an invalid
     signal is reported through ``relay_diagnose`` with no Claim and no write,
     and intake falls through to the Selection lane.

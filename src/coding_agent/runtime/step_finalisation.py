@@ -361,7 +361,7 @@ def _missing_handoff_diagnostic(
 def _prepare_relay(
     ledger: RunLedger, attempt_id: str, outcome: str
 ) -> tuple[str, str | None]:
-    """The Relay section and the receiver's Relay Label for ``outcome`` (§19).
+    """The Relay section and the receiver's Relay Label for ``outcome`` (§22).
 
     Reads the Attempt's pinned Effective Configuration, never the loaded
     file: the outcome's declared Relay target with its Relay Label. The
@@ -421,7 +421,7 @@ def _prepare_relay(
 
 
 def _replay_relay_label(stored_comment: str) -> str | None:
-    """The Relay Label a stored terminal comment still carries, if any (§19).
+    """The Relay Label a stored terminal comment still carries, if any (§22).
 
     Recovery re-applies the label of the record the comment already holds,
     so a Relay finishes unchanged after a crash between the comment and the
@@ -432,7 +432,7 @@ def _replay_relay_label(stored_comment: str) -> str | None:
 
 
 def _pinned_relay_label(ledger: RunLedger, attempt_id: str) -> str | None:
-    """The Workflow's own pinned Relay Label, removed when its Attempt ends (§19)."""
+    """The Workflow's own pinned Relay Label, removed when its Attempt ends (§22)."""
     try:
         record = ledger.get_attempt(attempt_id).effective_configuration
         from coding_agent.workflow.effective import (
@@ -450,7 +450,7 @@ def _pinned_relay_label(ledger: RunLedger, attempt_id: str) -> str | None:
 
 
 def _relay_consumed(ledger: RunLedger, attempt_id: str) -> tuple[str, ...]:
-    """The Relay Label this Attempt's own Workflow consumes, as a tuple (§19)."""
+    """The Relay Label this Attempt's own Workflow consumes, as a tuple (§22)."""
     label = _pinned_relay_label(ledger, attempt_id)
     return (label,) if label is not None else ()
 
@@ -729,7 +729,7 @@ def perform_terminal_writes(
     after it, so a retried recovery never writes twice.
 
     ``also_remove_labels`` are further consumed intake labels (the
-    Workflow's own Relay Label, §19) removed in the same write as the
+    Workflow's own Relay Label, §22) removed in the same write as the
     Selection Label, so the write list keeps its four stable entries.
     """
     ordered = tuple(writes) if writes is not None else terminal_writes_for_outcome()

@@ -1,4 +1,4 @@
-"""The Relay terminal record: render and strict parse (#716, §19)."""
+"""The Relay terminal record: render and strict parse (#716, §22)."""
 
 from __future__ import annotations
 
