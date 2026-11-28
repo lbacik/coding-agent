@@ -500,6 +500,18 @@ class InputDecl:
         ),
         default=None,
     )
+    relay_label: str | None = described(
+        "relay-label",
+        "nonempty_str",
+        required=False,
+        description=(
+            "The Relay Label: opts the Workflow in to receive Relays from "
+            "other issue Workflows of the file (issue inputs only). It has "
+            "no default."
+        ),
+        label="'input.relay-label'",
+        default=None,
+    )
 
 
 @dataclass(frozen=True)
@@ -896,6 +908,8 @@ class Workflow:
         description="End labels per Terminal Outcome.",
         factory=dict,
     )
+    relays: dict[str, str] = field(default_factory=dict)
+    """Outcome → receiving Workflow id for each ``outcomes.<o>.relay`` (§19)."""
     start: str = described(
         "start",
         "custom",

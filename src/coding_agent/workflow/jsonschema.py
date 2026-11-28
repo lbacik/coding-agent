@@ -762,7 +762,17 @@ def build_workflow_json_schema() -> dict[str, Any]:
                             "type": "array",
                             "description": "Labels applied for this outcome.",
                             "items": {"type": "string", "minLength": 1},
-                        }
+                        },
+                        "relay": {
+                            "type": "string",
+                            "pattern": ID_PATTERN,
+                            "description": (
+                                "The id of the issue Workflow that receives "
+                                "the Target Issue through its Relay Label "
+                                "(only on completed, blocked, unfinished and "
+                                "failed)."
+                            ),
+                        },
                     },
                     "required": ["labels"],
                     "additionalProperties": False,

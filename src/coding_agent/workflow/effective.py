@@ -260,7 +260,9 @@ def _thresholds_record(step: WorkflowStep) -> dict[str, object] | None:
     return {"hard_tokens": policy.hard_tokens}
 
 
-def _workflow_record(workflow: Workflow) -> dict[str, object]:
+def _workflow_record(
+    workflow: Workflow, config: WorkflowConfiguration | None = None
+) -> dict[str, object]:
     """The canonical record of the compiled Workflow (§2.2, §2.10).
 
     ``round_handoff`` rides only on Workflows that enable Round Handoff —
@@ -307,6 +309,25 @@ def _workflow_record(workflow: Workflow) -> dict[str, object]:
             "pickup_label": workflow.round_handoff.pickup_label,
             "max_automatic_pickups": workflow.round_handoff.max_automatic_pickups,
         }
+    # Relay keys ride only where declared, so Workflows without a Relay
+    # record byte-identical bytes (§19).
+    if workflow.input.relay_label is not None:
+        assert isinstance(record["input"], dict)
+        record["input"]["relay_label"] = workflow.input.relay_label
+    if workflow.relays:
+        record["relays"] = dict(sorted(workflow.relays.items()))
+    if config is not None and workflow.input.relay_label is not None:
+        sources: dict[str, list[str]] = {}
+        for source_id, source in sorted(config.workflows.items()):
+            outcomes = sorted(
+                outcome
+                for outcome, target in source.relays.items()
+                if target == workflow.id
+            )
+            if outcomes:
+                sources[source_id] = outcomes
+        if sources:
+            record["relay_sources"] = sources
     return record
 
 
@@ -719,7 +740,7 @@ def _effective_configuration_record(
         raise ValueError(f"activations must cover every available member: {detail}")
     record: dict[str, object] = {
         "version": EFFECTIVE_CONFIGURATION_VERSION,
-        "workflow": _workflow_record(workflow),
+        "workflow": _workflow_record(workflow, config),
         "file": _file_record(config, workflow),
         "prompts": _prompts_record(prompt_texts),
         "skill_bundle": _skill_bundle_record(bundle_members),
@@ -1127,6 +1148,39 @@ def effective_end_labels_for_all(
         assert isinstance(labels, (list, tuple))
         mapping[str(outcome)] = tuple(str(label) for label in labels)
     return mapping
+
+
+def effective_relay_label(record: Mapping[str, Any]) -> str | None:
+    """The pinned Relay Label the Workflow receives Relays under, if any (§19)."""
+    workflow_input = _workflow_section(record).get("input")
+    if not isinstance(workflow_input, Mapping):
+        return None
+    label = workflow_input.get("relay_label")
+    return label if isinstance(label, str) and label else None
+
+
+def effective_relay_target(record: Mapping[str, Any], outcome: str) -> str | None:
+    """The Workflow id a Terminal Outcome relays to, from the pinned record (§19)."""
+    relays = _workflow_section(record).get("relays")
+    if not isinstance(relays, Mapping):
+        return None
+    target = relays.get(outcome)
+    return target if isinstance(target, str) and target else None
+
+
+def effective_relay_declared(
+    record: Mapping[str, Any], source_workflow: str, outcome: str
+) -> bool:
+    """Whether the pinned record declares a Relay ``source`` → this Workflow (§19).
+
+    The receiver's own configuration vouches for the Relay: the record names
+    every ``(source Workflow, outcome)`` pair that relays into it.
+    """
+    sources = _workflow_section(record).get("relay_sources")
+    if not isinstance(sources, Mapping):
+        return False
+    outcomes = sources.get(source_workflow)
+    return isinstance(outcomes, (list, tuple)) and outcome in outcomes
 
 
 def effective_base_branch(record: Mapping[str, Any]) -> str:
@@ -1643,6 +1697,9 @@ def make_test_record(
     steps: Mapping[str, Mapping[str, object]] | None = None,
     max_parallel_subagents_value: int = 2,
     round_handoff: Mapping[str, object] | None = None,
+    relay_label: str | None = None,
+    relays: Mapping[str, str] | None = None,
+    relay_sources: Mapping[str, Sequence[str]] | None = None,
     project_profile: Mapping[str, object] | None = None,
     pin: Mapping[str, object] | None = None,
     base_branch: str = "main",
@@ -1718,6 +1775,14 @@ def make_test_record(
     }
     if round_handoff is not None:
         workflow_section["round_handoff"] = dict(round_handoff)
+    if relay_label is not None:
+        workflow_section["input"]["relay_label"] = relay_label  # type: ignore[index]
+    if relays:
+        workflow_section["relays"] = dict(relays)
+    if relay_sources:
+        workflow_section["relay_sources"] = {
+            source: list(outcomes) for source, outcomes in relay_sources.items()
+        }
     prompts_section: dict[str, object] = {}
     for locator in sorted(texts.keys()):
         raw = texts[locator].encode("utf-8")

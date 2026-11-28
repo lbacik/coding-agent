@@ -477,6 +477,11 @@
                 "minLength": 1,
                 "type": "string"
               },
+              "relay-label": {
+                "description": "The Relay Label: opts the Workflow in to receive Relays from other issue Workflows of the file (issue inputs only). It has no default.",
+                "minLength": 1,
+                "type": "string"
+              },
               "require-all": {
                 "description": "Narrowing filter: all of these labels.",
                 "items": {
@@ -566,6 +571,11 @@
                     "type": "string"
                   },
                   "type": "array"
+                },
+                "relay": {
+                  "description": "The id of the issue Workflow that receives the Target Issue through its Relay Label (only on completed, blocked, unfinished and failed).",
+                  "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+                  "type": "string"
                 }
               },
               "required": [

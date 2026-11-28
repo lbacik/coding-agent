@@ -1246,6 +1246,25 @@ def validate_input(
             "`skip-open-agent-pr` applies only to issue inputs",
         )
         skip = None
+    relay_label = check_leaf(problems, mapping, input_where, descs["relay-label"])
+    if relay_label is not None and input_type is not None and input_type != "issue":
+        problems.add(
+            f"{workflow_where}.input.relay-label",
+            "`relay-label` applies only to issue inputs",
+        )
+        relay_label = None
+    if relay_label is not None and label is not None:
+        if relay_label == label:
+            problems.add(
+                f"{workflow_where}.input.relay-label",
+                f"the Relay Label {relay_label!r} equals the Selection Label",
+            )
+        for field_name in ("require-all", "require-any", "exclude"):
+            if relay_label in filters[field_name]:
+                problems.add(
+                    f"{workflow_where}.input.{field_name}",
+                    f"the Relay Label {relay_label!r} cannot also be a filter",
+                )
     if not isinstance(input_type, str):
         input_type = None
     if input_type is None or label is None:
@@ -1258,6 +1277,7 @@ def validate_input(
         exclude=filters["exclude"],
         drafts=drafts,
         skip_open_agent_pr=skip,
+        relay_label=relay_label,
     )
 
 
@@ -1298,13 +1318,20 @@ def validate_ceiling(
 
 def validate_outcomes(
     problems: Problems, workflow_where: str, raw: Any
-) -> dict[str, tuple[str, ...]]:
+) -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
+    """Parse ``outcomes`` into end labels and per-outcome Relay targets (§3, §19).
+
+    ``relay`` is shape-checked here (a Workflow id, only on a YAML-selectable
+    outcome); the cross-Workflow rules run over the typed file in
+    :func:`check_relays`.
+    """
     if raw is None:
-        return {}
+        return {}, {}
     mapping = mapping_at(raw, f"{workflow_where}.outcomes", problems, "'outcomes'")
     if mapping is None:
-        return {}
+        return {}, {}
     parsed: dict[str, tuple[str, ...]] = {}
+    relays: dict[str, str] = {}
     for outcome, entry in mapping.items():
         outcome_where = f"{workflow_where}.outcomes.{outcome}"
         if outcome not in ALL_OUTCOMES:
@@ -1315,17 +1342,36 @@ def validate_outcomes(
             )
             continue
         entry_mapping = check_keys(
-            problems, outcome_where, entry, frozenset({"labels"}), frozenset({"labels"})
+            problems,
+            outcome_where,
+            entry,
+            frozenset({"labels", "relay"}),
+            frozenset({"labels"}),
         )
         if entry_mapping is None:
             continue
+        if "relay" in entry_mapping:
+            target = entry_mapping["relay"]
+            if outcome not in YAML_ENDS:
+                problems.add(
+                    f"{outcome_where}.relay",
+                    f"`relay` is not allowed on the runtime-only outcome "
+                    f"{outcome!r}: only {', '.join(YAML_ENDS)} may relay",
+                )
+            elif not isinstance(target, str) or not target:
+                problems.add(
+                    f"{outcome_where}.relay",
+                    "`relay` must name a receiving workflow id",
+                )
+            else:
+                relays[str(outcome)] = target
         labels = str_list_at(
             entry_mapping.get("labels"), f"{outcome_where}.labels", problems, "'labels'"
         )
         if labels is None:
             continue
         parsed[str(outcome)] = tuple(labels)
-    return parsed
+    return parsed, relays
 
 
 def validate_instructions(
@@ -2195,7 +2241,7 @@ def validate_workflow(
         if isinstance(max_parallel_raw, int) and not isinstance(max_parallel_raw, bool)
         else DEFAULT_MAX_PARALLEL_SUBAGENTS
     )
-    outcomes = validate_outcomes(
+    outcomes, relays = validate_outcomes(
         problems, workflow_where, mapping.get("outcomes")
     )
     enabled: tuple[str, int] | None = None
@@ -2279,6 +2325,7 @@ def validate_workflow(
         ceiling=ceiling,
         max_parallel_subagents=max_parallel,
         outcomes=outcomes,
+        relays=relays,
         start=start,
         defaults_max_executions=(
             defaults_max
@@ -3222,6 +3269,128 @@ def check_round_handoff_enablement(
             )
 
 
+def _relay_cycle(relays: Mapping[str, set[str]]) -> list[str] | None:
+    """One Relay cycle as ``[a, b, ..., a]``, or ``None`` where acyclic (§19)."""
+    done: set[str] = set()
+
+    def visit(node: str, path: list[str]) -> list[str] | None:
+        if node in path:
+            return [*path[path.index(node):], node]
+        if node in done:
+            return None
+        for nxt in sorted(relays.get(node, ())):
+            found = visit(nxt, [*path, node])
+            if found is not None:
+                return found
+        done.add(node)
+        return None
+
+    for start in sorted(relays):
+        found = visit(start, [])
+        if found is not None:
+            return found
+    return None
+
+
+def check_relays(problems: Problems, workflows: Mapping[str, Workflow]) -> None:
+    """Prove the Relay declarations of one file (§3, §19).
+
+    Per declaration: the target exists, is not the sender, declares
+    ``input.relay-label``; both ends are ``issue`` Workflows;
+    ``relay`` on ``unfinished`` is refused under Round Handoff. Per file:
+    the Relay graph is acyclic and every Relay Label is distinct from every
+    Selection Label, end label, Pickup Label, other Relay Label and the
+    receiver's own filters.
+    """
+    graph: dict[str, set[str]] = {}
+    for wid, workflow in workflows.items():
+        for outcome, target in workflow.relays.items():
+            where = f"workflows.{wid}.outcomes.{outcome}.relay"
+            receiver = workflows.get(target)
+            if target == wid:
+                problems.add(
+                    where, f"workflow {wid!r} cannot relay to itself (cycle {wid} -> {wid})"
+                )
+                continue
+            if receiver is None:
+                problems.add(where, f"unknown relay target workflow {target!r}")
+                continue
+            if workflow.input.type != "issue":
+                problems.add(where, "`relay` applies only to issue Workflows (sender)")
+            if receiver.input.type != "issue":
+                problems.add(
+                    where,
+                    f"relay target {target!r} is not an issue Workflow",
+                )
+            if receiver.input.relay_label is None:
+                problems.add(
+                    where,
+                    f"relay target {target!r} declares no `input.relay-label`",
+                )
+            if outcome == "unfinished" and workflow.round_handoff is not None:
+                problems.add(
+                    where,
+                    "`relay` on `unfinished` is refused in a Workflow with "
+                    "Round Handoff enabled",
+                )
+            graph.setdefault(wid, set()).add(target)
+    cycle = _relay_cycle(graph)
+    if cycle is not None:
+        problems.add(
+            f"workflows.{cycle[0]}.outcomes",
+            "Relay cycle: " + " -> ".join(cycle),
+        )
+
+    relay_labels = {
+        wid: workflow.input.relay_label
+        for wid, workflow in workflows.items()
+        if workflow.input.relay_label is not None
+    }
+    if not relay_labels:
+        return
+    selection = {wid: w.input.label for wid, w in workflows.items()}
+    pickups = {
+        wid: w.round_handoff.pickup_label
+        for wid, w in workflows.items()
+        if w.round_handoff is not None
+    }
+    seen: dict[str, str] = {}
+    for wid, label in relay_labels.items():
+        where = f"workflows.{wid}.input.relay-label"
+        if label in seen:
+            problems.add(
+                where,
+                f"the Relay Label {label!r} equals the Relay Label of "
+                f"workflow {seen[label]!r}",
+            )
+        seen.setdefault(label, wid)
+        for owner, owned in selection.items():
+            if owned == label:
+                problems.add(
+                    where,
+                    f"the Relay Label {label!r} equals the Selection Label of "
+                    f"workflow {owner!r}",
+                )
+        for owner, owned in pickups.items():
+            if owned == label:
+                problems.add(
+                    where,
+                    f"the Relay Label {label!r} equals the Pickup Label of "
+                    f"workflow {owner!r}",
+                )
+    for wid, workflow in workflows.items():
+        for outcome, labels in workflow.outcomes.items():
+            for label in labels:
+                for owner, owned in relay_labels.items():
+                    if label == owned:
+                        problems.add(
+                            f"workflows.{wid}.outcomes.{outcome}",
+                            f"end label {label!r} equals the Relay Label of "
+                            f"workflow {owner!r}: only the runtime applies "
+                            "a Relay Label",
+                        )
+
+
 # --- `skills` declaration (one more phase, same orchestration) ---------------
 
 ROOT_FIELDS_V4 = frozenset({"version", "target", "models", "worker", "workflows", "skills"})
@@ -3451,6 +3620,8 @@ def validate_configuration_text(
                                 f"end label {label!r} equals the Pickup Label of "
                                 f"workflow {owner_id!r}",
                             )
+
+    check_relays(problems, typed_workflows)
 
     if problems or target is None or models is None or worker is None:
         return None, problems.items
