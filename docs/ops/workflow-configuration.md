@@ -406,8 +406,10 @@ input:
   any more: `ready-for-human`, `wontfix` or any other label is excluded only
   if `exclude` names it. The Selection Label cannot also appear in a filter.
 - **`skip-open-agent-pr`** (issues only): when `true`, skip an issue that
-  has an open pull request authored by the Agent Identity bearing that
-  issue's Attempt Marker.
+  has an open pull request authored by the Agent Identity bearing an
+  Attempt Marker of this Workflow for that issue. A pull request from
+  another Workflow's Attempt (for example a `triage` draft) does not
+  skip the issue.
 - **`drafts`** (pull requests only): whether draft pull requests are
   eligible; default `exclude`. A draft change during an Attempt is ignored.
 - **Mandatory guards** apply whatever the filters say: the input is open,

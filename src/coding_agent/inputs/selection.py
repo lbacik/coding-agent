@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
+from coding_agent.inputs.numbering import attempt_markers
 from coding_agent.inputs.port import InputType, TrackedInput
 
 DRAFT_POLICIES: tuple[str, ...] = ("include", "exclude")
@@ -103,26 +104,33 @@ def open_agent_pr_for_issue(
     pull_requests: Iterable[TrackedInput],
     issue_number: int,
     *,
+    workflow_id: str,
     agent_login: str,
     agent_id: int | None,
 ) -> TrackedInput | None:
-    """The Agent Identity's open pull request bearing an issue's marker (§5.3).
+    """The Agent Identity's open pull request bearing this Workflow's marker (§5.3).
 
     Only an open pull request authored by the Agent Identity — filtered by
     the numeric id where it is known, otherwise by login — whose body
-    carries that issue's Attempt Marker (``#<issue>/``) excludes the issue
-    under ``skip-open-agent-pr``. An open pull request merely containing an
-    Attempt-Marker substring, by another author, does not exclude (INP-11);
-    a pull-request Workflow inherits no such exclusion, so a pull request
-    an implementation Attempt opened stays eligible for review (INP-4).
+    carries an Attempt Marker of the selecting Workflow ``workflow_id`` for
+    this issue excludes the issue under ``skip-open-agent-pr``. Another
+    Workflow's marker never does, draft or not, so a ``triage`` pull request
+    does not hold an issue back from ``implement``. The Workflow id is
+    compared whole, never as a substring. An open pull request merely
+    mentioning the issue, or authored by another account, does not exclude
+    (INP-11); a pull-request Workflow inherits no such exclusion, so a pull
+    request an implementation Attempt opened stays eligible for review
+    (INP-4).
     """
-    needle = f"#{issue_number}/"
     for pull_request in pull_requests:
         if pull_request.input_type != "pull-request":
             continue
         if not pull_request.is_open:
             continue
-        if needle not in pull_request.body:
+        if not any(
+            marker.workflow == workflow_id and marker.input_number == issue_number
+            for marker in attempt_markers(pull_request.body)
+        ):
             continue
         if input_author_matches(
             pull_request, agent_login=agent_login, agent_id=agent_id

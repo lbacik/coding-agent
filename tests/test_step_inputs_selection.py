@@ -257,7 +257,11 @@ def test_open_agent_pr_lookup_needs_our_marker_and_author() -> None:
     own = _pr(body="implements <!-- coding-agent attempt=implement#42/1 -->")
     assert (
         open_agent_pr_for_issue(
-            [own], 42, agent_login="coding-agent", agent_id=1001
+            [own],
+            42,
+            workflow_id="implement",
+            agent_login="coding-agent",
+            agent_id=1001,
         )
         is own
     )
@@ -276,21 +280,33 @@ def test_open_agent_pr_lookup_needs_our_marker_and_author() -> None:
     )
     assert (
         open_agent_pr_for_issue(
-            [foreign], 42, agent_login="coding-agent", agent_id=1001
+            [foreign],
+            42,
+            workflow_id="implement",
+            agent_login="coding-agent",
+            agent_id=1001,
         )
         is None
     )
     other_issue = _pr(body="<!-- coding-agent attempt=implement#43/1 -->")
     assert (
         open_agent_pr_for_issue(
-            [other_issue], 42, agent_login="coding-agent", agent_id=1001
+            [other_issue],
+            42,
+            workflow_id="implement",
+            agent_login="coding-agent",
+            agent_id=1001,
         )
         is None
     )
     closed = _pr(body="<!-- coding-agent attempt=implement#42/1 -->", is_open=False)
     assert (
         open_agent_pr_for_issue(
-            [closed], 42, agent_login="coding-agent", agent_id=1001
+            [closed],
+            42,
+            workflow_id="implement",
+            agent_login="coding-agent",
+            agent_id=1001,
         )
         is None
     )
@@ -324,3 +340,62 @@ def test_order_is_created_at_then_number() -> None:
         same_time_high,
         late,
     ]
+
+
+def _agent_pr(body: str, *, draft: bool = False) -> TrackedInput:
+    return _candidate(
+        number=11,
+        input_type="pull-request",
+        body=body,
+        draft=draft,
+        author_login="coding-agent",
+        author_id=1001,
+    )
+
+
+def _lookup(
+    pull_requests: list[TrackedInput], workflow_id: str = "implement"
+) -> TrackedInput | None:
+    return open_agent_pr_for_issue(
+        pull_requests,
+        42,
+        workflow_id=workflow_id,
+        agent_login="coding-agent",
+        agent_id=1001,
+    )
+
+
+def test_open_agent_pr_lookup_matches_only_the_selecting_workflow() -> None:
+    """#717: another Workflow's Attempt Marker never excludes the issue."""
+    triage = _agent_pr("Part of #42 <!-- coding-agent attempt=triage#42/1 -->")
+    assert _lookup([triage]) is None
+    own = _agent_pr("<!-- coding-agent attempt=implement#42/2 -->")
+    assert _lookup([triage, own]) is own
+
+
+def test_open_agent_pr_lookup_matches_the_workflow_id_exactly() -> None:
+    """#717: a Workflow id that merely ends with the selecting id does not match."""
+    longer = _agent_pr("<!-- coding-agent attempt=pre-implement#42/1 -->")
+    assert _lookup([longer]) is None
+
+
+def test_open_agent_pr_lookup_requires_a_marker_not_a_bare_reference() -> None:
+    """#717: an issue reference without an Attempt Marker is not ours."""
+    bare = _agent_pr("Part of #42/1")
+    assert _lookup([bare]) is None
+
+
+def test_open_agent_pr_lookup_ignores_draft_state_of_the_own_marker() -> None:
+    """#717: draft and non-draft pull requests of the own Workflow both exclude."""
+    marker = "<!-- coding-agent attempt=implement#42/1 -->"
+    draft = _agent_pr(marker, draft=True)
+    ready = _agent_pr(marker, draft=False)
+    assert _lookup([draft]) is draft
+    assert _lookup([ready]) is ready
+
+
+def test_open_agent_pr_lookup_ignores_draft_state_of_another_workflow() -> None:
+    """#717: a foreign-Workflow pull request never excludes, draft or not."""
+    marker = "<!-- coding-agent attempt=triage#42/1 -->"
+    assert _lookup([_agent_pr(marker, draft=True)]) is None
+    assert _lookup([_agent_pr(marker, draft=False)]) is None

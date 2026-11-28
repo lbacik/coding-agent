@@ -22,6 +22,7 @@ dev = [
     "agent-operator-contract @ git+https://github.com/lbacik/agent-operator-contract@v1.2.0",
     "jsonschema==4.25.1",
     "mypy>=1.11",
+    "ruff>=0.8",
     "pytest>=8.3",
     "pytest-xdist>=3.8.0",
     "requests-mock>=1.12",

@@ -244,7 +244,7 @@ Table-driven: one test runs every fixture in `tests/fixtures/workflows/invalid/`
 | INP-8 | A fork pull request labelled for review | Never eligible | S6 | §5 | #286 scenario 8 |
 | INP-9 | Candidates failing each mandatory guard: closed, label absent, any assignee, an open native blocker | Each excluded; selection writes nothing | S6 | §5.2 | #286 |
 | INP-10 | `require-all`, `require-any`, `exclude` and `drafts` filters | Filters narrow, never authorise; drafts excluded by default | S6 | §5.3 | #286 |
-| INP-11 | An open pull request merely containing an Attempt-Marker substring, by another author | Does not exclude the issue under `skip-open-agent-pr`: only the Agent Identity's open pull request with that issue's marker does | S6 | §5.3 | #286 |
+| INP-11 | An open pull request merely containing an Attempt-Marker substring, by another author | Does not exclude the issue under `skip-open-agent-pr`: only the Agent Identity's open pull request with this Workflow's marker for that issue does; another Workflow's marker never does (#717) | S6 | §5.3 | #286 |
 | INP-12 | Several eligible inputs; `next issue N` | Ordered `(created_at, number)` ascending; the priority command passes the same guards | S6 | §5.4 | #286 |
 | INP-13 | Two Attempts of `implement` and one of `review` on input 42 | Ids `implement#42/1`, `implement#42/2`, `review#42/1`; the Workflow id appears in the marker, the commit trailer and the issue Attempt branch `agent/implement/42/<n>-<slug>` | S6 | §6.3 | #286 |
 | INP-14 | Claim of an issue whose body changes between listing and read-back | The Fingerprint is the read-back's title and body; the workspace is checked out exactly at the Base Revision pinned at Claim | S6 | §7.1 | #286 |

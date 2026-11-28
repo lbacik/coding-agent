@@ -275,6 +275,7 @@ def _pickup_guard_reason(
             open_agent_pr_for_issue(
                 code_host.list_open_pull_requests(),
                 candidate.number,
+                workflow_id=claim_config.workflow_id,
                 agent_login=claim_config.agent_login,
                 agent_id=claim_config.agent_id,
             )

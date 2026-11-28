@@ -325,7 +325,7 @@ Another Workflow's Claim in force on the input also excludes it (§6.1). Selecti
 - **`require-all`, `require-any` and `exclude` narrow, never authorise.** The Worker never writes a filter label. Filters are evaluated at selection and at the Claim read-back, never at later Gates.
 - **The MVP's fixed exclusions are YAML now:** `ready-for-human`, `wontfix` and `wayfinder:*` are excluded only when a Workflow lists them in `exclude`. A non-empty body is scenario readiness policy.
 - **`drafts`** (`pull-request` only): `exclude` by default; `include` makes draft pull requests eligible. A draft/ready change during an Attempt is ignored.
-- **`skip-open-agent-pr`** (`issue` only): skip an issue that has an open pull request **authored by the Agent Identity and bearing that issue's Attempt Marker**. A pull-request Workflow inherits no such exclusion, so a pull request an implementation Attempt opened stays eligible for review.
+- **`skip-open-agent-pr`** (`issue` only): skip an issue that has an open pull request **authored by the Agent Identity and bearing an Attempt Marker of this Workflow for that issue** (`attempt=<workflow>#<issue>/<n>`, the Workflow id matched whole). Another Workflow's pull request, a `triage` draft for instance, never excludes the issue, draft or not (#717). A pull-request Workflow inherits no such exclusion, so a pull request an implementation Attempt opened stays eligible for review.
 
 ### 5.4 Ordering and priority
 

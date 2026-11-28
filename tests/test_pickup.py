@@ -119,9 +119,12 @@ def _issue(
     )
 
 
-def _claim_config(tracker: FakeStepTracker) -> ClaimConfig:
+def _claim_config(
+    tracker: FakeStepTracker, *, skip_open_agent_pr: bool = False
+) -> ClaimConfig:
     effective: Mapping[str, object] = {"workflow": WORKFLOW}
     return ClaimConfig(
+        skip_open_agent_pr=skip_open_agent_pr,
         workflow_id=WORKFLOW,
         input_type="issue",
         selection_label=SELECTION_LABEL,
@@ -513,3 +516,51 @@ def test_pickup_priority_issue_still_confirms(
     assert isinstance(claimed, ConfirmedClaim)
     assert claimed.input_number == 9
     assert claimed.pickup_offer is not None
+
+
+def _agent_pull_request(tracker: FakeStepTracker, workflow: str) -> TrackedInput:
+    return TrackedInput(
+        number=21,
+        input_type="pull-request",
+        title="Part of #9",
+        body=f"Part of #9 <!-- coding-agent attempt={workflow}#9/1 -->",
+        is_open=True,
+        labels=(),
+        assignees=(),
+        created_at="2026-11-02T00:00:00Z",
+        author_login=tracker.agent_login,
+        author_id=tracker.agent_id,
+    )
+
+
+def test_pickup_lane_skip_open_agent_pr_is_scoped_to_the_workflow(
+    tracker: FakeStepTracker, ledger: RunLedger
+) -> None:
+    """#717: only this Workflow's open pull request holds a pickup back."""
+    _seed_offer(tracker, _offer())
+    tracker.open_pull_requests.append(_agent_pull_request(tracker, "triage"))
+    claimed = sweep_and_claim(
+        tracker,
+        tracker,
+        ledger,
+        _claim_config(tracker, skip_open_agent_pr=True),
+        pickup=_pickup_config(tracker),
+    )
+    assert isinstance(claimed, ConfirmedClaim)
+    assert claimed.pickup_offer is not None
+
+
+def test_pickup_lane_skip_open_agent_pr_still_skips_the_own_workflow(
+    tracker: FakeStepTracker, ledger: RunLedger
+) -> None:
+    """#717: an open pull request of this Workflow's own Attempt still excludes."""
+    _seed_offer(tracker, _offer())
+    tracker.open_pull_requests.append(_agent_pull_request(tracker, WORKFLOW))
+    claimed = sweep_and_claim(
+        tracker,
+        tracker,
+        ledger,
+        _claim_config(tracker, skip_open_agent_pr=True),
+        pickup=_pickup_config(tracker),
+    )
+    assert not isinstance(claimed, ConfirmedClaim)
