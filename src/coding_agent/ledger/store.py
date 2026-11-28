@@ -455,6 +455,13 @@ class AttemptPin:
     selection_actor_type: str | None = None
     selection_actor_at: str | None = None
     identity_mode: str | None = None
+    relay_source_attempt: str | None = None
+    """The source Attempt of the Relay this Claim consumed, if any (§19).
+
+    ``None`` for ordinary selection and pickup Claims. For a relayed Attempt
+    the ``selection_actor`` fields hold the originating human authorisation
+    carried unchanged from the chain's first Claim.
+    """
 
 
 @dataclass(frozen=True)
@@ -821,6 +828,17 @@ class RunLedger:
             )
             """
         )
+        # Additive: ledgers written before Relay (#716) hold no such column.
+        pin_columns = {
+            str(row[1])
+            for row in self._connection.execute(
+                "PRAGMA table_info(attempt_pins)"
+            ).fetchall()
+        }
+        if "relay_source_attempt" not in pin_columns:
+            self._connection.execute(
+                "ALTER TABLE attempt_pins ADD COLUMN relay_source_attempt TEXT"
+            )
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS attempt_merge_state (
@@ -1913,8 +1931,9 @@ class RunLedger:
                      title, body, fingerprint, base_revision,
                      base_tip, input_head, head_branch, base_branch,
                      selection_actor, selection_actor_id, selection_actor_type,
-                     selection_actor_at, identity_mode, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     selection_actor_at, identity_mode, created_at,
+                     relay_source_attempt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pin.attempt_id,
@@ -1935,6 +1954,7 @@ class RunLedger:
                     pin.selection_actor_at,
                     pin.identity_mode,
                     datetime.now(timezone.utc).isoformat(),
+                    pin.relay_source_attempt,
                 ),
             )
             self._connection.commit()
@@ -1951,7 +1971,7 @@ class RunLedger:
                        title, body, fingerprint, base_revision,
                        base_tip, input_head, head_branch, base_branch,
                        selection_actor, selection_actor_id, selection_actor_type,
-                       selection_actor_at, identity_mode
+                       selection_actor_at, identity_mode, relay_source_attempt
                 FROM attempt_pins WHERE attempt_id = ?
                 """,
                 (attempt_id,),
@@ -1977,6 +1997,7 @@ class RunLedger:
             selection_actor_type=str(row[14]) if row[14] is not None else None,
             selection_actor_at=str(row[15]) if row[15] is not None else None,
             identity_mode=str(row[16]) if row[16] is not None else None,
+            relay_source_attempt=str(row[17]) if row[17] is not None else None,
         )
 
     def record_pinned_comments(

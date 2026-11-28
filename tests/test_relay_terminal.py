@@ -272,3 +272,53 @@ def test_receiver_removes_its_relay_label_when_its_attempt_ends(
     _finish(tracker, ledger, RECEIVER_ATTEMPT, IMPLEMENT)
 
     assert tracker.inputs[NUMBER].labels == ()
+
+
+@pytest.mark.parametrize("identity", ["dedicated", "shared"])
+def test_triage_completion_is_claimed_by_implement_with_no_human_action(
+    ledger: RunLedger, identity: str
+) -> None:
+    """End to end (#716 acceptance): sender terminal write, receiver Claim."""
+    from coding_agent.inputs.claim import ClaimConfig, ConfirmedClaim, sweep_and_claim
+    from coding_agent.inputs.relay import RelayConfig
+
+    tracker = FakeStepTracker()
+    if identity == "shared":
+        tracker.owner_id = tracker.agent_id  # type: ignore[assignment]
+    tracker.inputs[NUMBER] = _issue("agent:triage")
+    _open(ledger, SENDER_ATTEMPT, TRIAGE, (IMPLEMENT,))
+    _finish(tracker, ledger, SENDER_ATTEMPT, TRIAGE)
+    # The sender's Worker releases the assignment as its last terminal write.
+    assert tracker.inputs[NUMBER].assignees == ()
+
+    receiver_record = full_effective_configuration(IMPLEMENT, other_workflows=(TRIAGE,))
+    claimed = sweep_and_claim(
+        tracker,
+        tracker,
+        ledger,
+        ClaimConfig(
+            skip_open_agent_pr=False,
+            workflow_id="implement",
+            input_type="issue",
+            selection_label="ready-for-agent",
+            base_branch="main",
+            agent_login=tracker.agent_login,
+            agent_id=tracker.agent_id,
+            effective_configuration=receiver_record,
+        ),
+        relay=RelayConfig(
+            workflow_id="implement",
+            relay_label="triaged",
+            agent_login=tracker.agent_login,
+            agent_id=tracker.agent_id,
+            base_branch="main",
+            effective_configuration=receiver_record,
+        ),
+    )
+
+    assert isinstance(claimed, ConfirmedClaim)
+    assert "ready-for-agent" not in tracker.inputs[NUMBER].labels
+    pin = ledger.get_attempt_pin(claimed.attempt_id)
+    assert pin is not None
+    assert pin.relay_source_attempt == SENDER_ATTEMPT
+    assert (pin.selection_actor, pin.selection_actor_id) == ("alice", 42)

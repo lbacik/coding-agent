@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from coding_agent.inputs.pickup import PickupConfig
+    from coding_agent.inputs.relay import RelayConfig
 
 from coding_agent.inputs.errors import (
     CredentialFailure,
@@ -271,6 +272,11 @@ class WorkerLoopConfig:
     takes a pull-request input: the sweep keeps its ordinary Selection
     Label path.
     """
+    relay_config: RelayConfig | None = None
+    """The Relay intake parameters, tried after pickup and ahead of selection (§19).
+
+    ``None`` where the running Workflow declares no ``input.relay-label``.
+    """
 
 
 @dataclass(frozen=True)
@@ -281,6 +287,19 @@ class StepRecoverySummary:
     """Attempt ids this pass settled: ``released`` or ``finished``."""
     pending: tuple[str, ...]
     """Unfinished Attempt ids left for a later sweep (another Workflow's)."""
+
+
+def _print_relay_diagnostic(issue: int, reason: str) -> None:
+    """Say why a Relay Label on ``issue`` authorises nothing (§19).
+
+    Diagnosed before model work: no Claim and no write; the label stays on
+    the issue and a human removes it.
+    """
+    print(
+        f"run: relay: #{issue} carries the Relay Label but is not "
+        f"authorised ({reason}); no Claim opened",
+        file=sys.stderr,
+    )
 
 
 def _pin_to_input(pin: AttemptPin) -> PinnedInput:
@@ -304,6 +323,7 @@ def _pin_to_input(pin: AttemptPin) -> PinnedInput:
         selection_actor_type=pin.selection_actor_type,
         selection_actor_at=pin.selection_actor_at,
         identity_mode=cast(IdentityMode | None, pin.identity_mode),
+        relay_source_attempt=pin.relay_source_attempt,
     )
 
 
@@ -793,6 +813,8 @@ def _poll_loop(
                 priority=priority,
                 merge_base_resolver=loop_config.merge_base_resolver,
                 pickup=loop_config.pickup_config,
+                relay=loop_config.relay_config,
+                relay_diagnose=_print_relay_diagnostic,
             )
         except CredentialFailure as exc:
             print(

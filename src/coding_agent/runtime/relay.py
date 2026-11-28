@@ -100,12 +100,16 @@ def render_relay_section(record: RelayRecord) -> str:
     """Render the operator-visible section plus the machine record (§19)."""
     return "\n".join(
         [
-            f"Relay: {record.source_attempt} passes #{record.issue} to workflow "
-            f"{record.target_workflow} under {record.relay_label} "
-            f"({record.outcome})",
-            f"Originating authorisation: {record.origin_actor} "
-            f"(id {record.origin_actor_id})"
-            + (f" at {record.origin_actor_at}" if record.origin_actor_at else ""),
+            (
+                f"Relay: {record.source_attempt} passes #{record.issue} to "
+                f"workflow {record.target_workflow} under "
+                f"{record.relay_label} ({record.outcome})"
+            ),
+            (
+                f"Originating authorisation: {record.origin_actor} "
+                f"(id {record.origin_actor_id})"
+                + (f" at {record.origin_actor_at}" if record.origin_actor_at else "")
+            ),
             render_relay_block(record),
         ]
     )

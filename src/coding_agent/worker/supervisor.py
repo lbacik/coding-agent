@@ -127,6 +127,7 @@ def run_worker(
                 live=ready.live,
                 merge_base_resolver=_merge_base_resolver(ready),
                 pickup_config=_verified_pickup_config(ready),
+                relay_config=ready.relay_config,
             ),
             run_one_attempt=run_one_attempt,
             sleep=sleep,
