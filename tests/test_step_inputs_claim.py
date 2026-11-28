@@ -432,6 +432,82 @@ def test_skip_open_agent_pr_skips_the_issue(
     assert isinstance(claimed, ConfirmedClaim)
 
 
+def test_skip_open_agent_pr_ignores_another_workflows_pull_request(
+    tracker: FakeStepTracker, ledger: RunLedger
+) -> None:
+    """#717: a ``triage`` draft pull request does not skip the issue for ``implement``."""
+    tracker.open_pull_requests.append(
+        TrackedInput(
+            number=11,
+            input_type="pull-request",
+            title="Triage #42",
+            body="Part of #42 <!-- coding-agent attempt=triage#42/1 -->",
+            is_open=True,
+            labels=(),
+            assignees=(),
+            created_at="2026-10-02T00:00:00Z",
+            author_login="coding-agent",
+            author_id=1001,
+        )
+    )
+    config = _config(tracker, skip_open_agent_pr=True)
+    claimed = sweep_and_claim(tracker, tracker, ledger, config)
+    assert isinstance(claimed, ConfirmedClaim)
+
+
+def _readback_pr_race(
+    tracker: FakeStepTracker, ledger: RunLedger, workflow: str
+) -> object:
+    """Claim one candidate whose agent pull request opens before the read-back."""
+    real_list = tracker.list_open_pull_requests
+
+    def _late_list() -> list[TrackedInput]:
+        tracker.open_pull_requests.append(
+            TrackedInput(
+                number=11,
+                input_type="pull-request",
+                title="Part of #42",
+                body=f"<!-- coding-agent attempt={workflow}#42/1 -->",
+                is_open=True,
+                labels=(),
+                assignees=(),
+                created_at="2026-10-02T00:00:00Z",
+                author_login="coding-agent",
+                author_id=1001,
+            )
+        )
+        return real_list()
+
+    tracker.list_open_pull_requests = _late_list  # type: ignore[method-assign]
+    try:
+        return attempt_claim(
+            tracker,
+            tracker,
+            ledger,
+            _config(tracker, skip_open_agent_pr=True),
+            tracker.inputs[42],
+            identity_mode="dedicated",
+        )
+    finally:
+        tracker.list_open_pull_requests = real_list  # type: ignore[method-assign]
+
+
+def test_readback_skip_open_agent_pr_ignores_another_workflows_pull_request(
+    tracker: FakeStepTracker, ledger: RunLedger
+) -> None:
+    """#717: the read-back scan is Workflow-scoped too."""
+    assert isinstance(_readback_pr_race(tracker, ledger, "triage"), ConfirmedClaim)
+
+
+def test_readback_skip_open_agent_pr_releases_for_the_own_workflow(
+    tracker: FakeStepTracker, ledger: RunLedger
+) -> None:
+    """#717: an own-Workflow pull request landing before read-back releases."""
+    result = _readback_pr_race(tracker, ledger, "implement")
+    assert isinstance(result, ReleasedClaim)
+    assert result.reason == "agent-pr"
+
+
 def test_priority_input_claimed_first_under_same_guards(
     tracker: FakeStepTracker, ledger: RunLedger
 ) -> None:

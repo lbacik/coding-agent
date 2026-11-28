@@ -390,6 +390,7 @@ def _guard_reason(
             open_agent_pr_for_issue(
                 code_host.list_open_pull_requests(),
                 candidate.number,
+                workflow_id=config.workflow_id,
                 agent_login=config.agent_login,
                 agent_id=config.agent_id,
             )
@@ -1037,6 +1038,7 @@ def _readback_failure(
             open_agent_pr_for_issue(
                 code_host.list_open_pull_requests(),
                 candidate.number,
+                workflow_id=config.workflow_id,
                 agent_login=config.agent_login,
                 agent_id=config.agent_id,
             )

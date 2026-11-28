@@ -257,7 +257,7 @@ def test_open_agent_pr_lookup_needs_our_marker_and_author() -> None:
     own = _pr(body="implements <!-- coding-agent attempt=implement#42/1 -->")
     assert (
         open_agent_pr_for_issue(
-            [own], 42, agent_login="coding-agent", agent_id=1001
+            [own], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
         )
         is own
     )
@@ -276,21 +276,21 @@ def test_open_agent_pr_lookup_needs_our_marker_and_author() -> None:
     )
     assert (
         open_agent_pr_for_issue(
-            [foreign], 42, agent_login="coding-agent", agent_id=1001
+            [foreign], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
         )
         is None
     )
     other_issue = _pr(body="<!-- coding-agent attempt=implement#43/1 -->")
     assert (
         open_agent_pr_for_issue(
-            [other_issue], 42, agent_login="coding-agent", agent_id=1001
+            [other_issue], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
         )
         is None
     )
     closed = _pr(body="<!-- coding-agent attempt=implement#42/1 -->", is_open=False)
     assert (
         open_agent_pr_for_issue(
-            [closed], 42, agent_login="coding-agent", agent_id=1001
+            [closed], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
         )
         is None
     )
@@ -324,3 +324,53 @@ def test_order_is_created_at_then_number() -> None:
         same_time_high,
         late,
     ]
+
+
+def _agent_pr(body: str) -> TrackedInput:
+    return _candidate(
+        number=11,
+        input_type="pull-request",
+        body=body,
+        author_login="coding-agent",
+        author_id=1001,
+    )
+
+
+def test_open_agent_pr_lookup_matches_only_the_selecting_workflow() -> None:
+    """#717: another Workflow's Attempt Marker never excludes the issue."""
+    triage = _agent_pr("Part of #42 <!-- coding-agent attempt=triage#42/1 -->")
+    assert (
+        open_agent_pr_for_issue(
+            [triage], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
+        )
+        is None
+    )
+    own = _agent_pr("<!-- coding-agent attempt=implement#42/2 -->")
+    assert (
+        open_agent_pr_for_issue(
+            [triage, own], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
+        )
+        is own
+    )
+
+
+def test_open_agent_pr_lookup_matches_the_workflow_id_exactly() -> None:
+    """#717: a Workflow id that merely ends with the selecting id does not match."""
+    longer = _agent_pr("<!-- coding-agent attempt=pre-implement#42/1 -->")
+    assert (
+        open_agent_pr_for_issue(
+            [longer], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
+        )
+        is None
+    )
+
+
+def test_open_agent_pr_lookup_requires_a_marker_not_a_bare_reference() -> None:
+    """#717: an issue reference without an Attempt Marker is not ours."""
+    bare = _agent_pr("Part of #42/1")
+    assert (
+        open_agent_pr_for_issue(
+            [bare], 42, workflow_id="implement", agent_login="coding-agent", agent_id=1001
+        )
+        is None
+    )

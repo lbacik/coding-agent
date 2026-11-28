@@ -78,6 +78,22 @@ def parse_attempt_marker(text: str) -> AttemptId | None:
     return AttemptId.try_parse(raw)
 
 
+def attempt_markers(text: str) -> list[AttemptId]:
+    """Every ``attempt=<workflow>#<N>/<n>`` Attempt Marker in ``text``, in order.
+
+    Unlike :func:`parse_attempt_marker`, which stops at the first marker, this
+    reads them all: a body may carry markers of more than one Attempt. A marker
+    whose parts are not an Attempt Id is skipped, so it is not ours.
+    """
+    markers: list[AttemptId] = []
+    for match in _MARKER_RE.finditer(text):
+        raw = f"{match.group('workflow')}#{match.group('number')}/{match.group('n')}"
+        parsed = AttemptId.try_parse(raw)
+        if parsed is not None:
+            markers.append(parsed)
+    return markers
+
+
 def highest_n(
     workflow_id: str,
     input_number: int,
