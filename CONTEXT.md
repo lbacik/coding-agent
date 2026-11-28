@@ -47,7 +47,7 @@ The GitHub label a Workflow names for a human to authorise a fresh Attempt on an
 _Avoid_: trigger label, agent label, ready label
 
 **Eligible Input**:
-An open input of the Workflow's type that passes its filters, has no assignee, open blocker or active Claim, and is authorised by its Selection Label or by a valid Round Handoff with its Pickup Label. A pull request is eligible only when its head branch lives in the Target Repository.
+An open input of the Workflow's type that passes its filters, has no assignee, open blocker or active Claim, and is authorised by its Selection Label, by a valid Round Handoff with its Pickup Label, or by a valid Relay with its Relay Label. A pull request is eligible only when its head branch lives in the Target Repository.
 _Avoid_: candidate, queued issue, Eligible Issue
 
 **Target Issue**:
@@ -321,6 +321,14 @@ _Avoid_: retry, conversation inheritance, round
 
 **Automatic Round Pickup Limit**:
 The maximum number of automatic Continuations an opted-in issue Workflow can open for a Target Issue under one human authorisation. The first human-authorised Attempt fixes the limit and starts the count at zero.
+
+**Relay**:
+The passing of a Target Issue from one Workflow to another Workflow declared in the same Workflow Configuration, when an Attempt ends with a Terminal Outcome whose configuration names that receiving Workflow. It carries the human authorisation that started the chain, never creates one, and the Workflows' Relays never form a cycle.
+_Avoid_: handoff, Workflow Handoff, chain, chaining
+
+**Relay Label**:
+The GitHub label a receiving Workflow names for Relays into it, distinct from its Selection Label. The Worker applies it only together with a matching Relay record, and the two together authorise an Attempt in the receiving Workflow.
+_Avoid_: handoff label, chain label
 
 **Attempt Marker**:
 The stamp the Worker puts on every artifact it writes, carried in whatever idiom the artifact allows: a machine-readable line in a comment or a pull request body, a trailer on a commit, a prefix on a branch name. It is what tells the Worker's own writing apart from a human's, and it reads in one direction only — an artifact without one was not written by the Worker. The converse is not guaranteed, because whoever holds the Agent Identity's credential can write one by hand.
