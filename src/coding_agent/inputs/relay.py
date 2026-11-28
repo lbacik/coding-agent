@@ -172,6 +172,9 @@ def relay_exclusion_reason(
     blocker_open: bool,
     claim_in_force: bool,
     agent_pr_open: bool = False,
+    require_all: Sequence[str] = (),
+    require_any: Sequence[str] = (),
+    exclude: Sequence[str] = (),
 ) -> str | None:
     """The reason ``candidate`` is ineligible for a Relay, or ``None`` (§22).
 
@@ -197,6 +200,13 @@ def relay_exclusion_reason(
         return "claim"
     if agent_pr_open:
         return "agent-pr"
+    labels = set(candidate.labels)
+    if any(required not in labels for required in require_all):
+        return "require-all"
+    if require_any and not any(required in labels for required in require_any):
+        return "require-any"
+    if any(excluded in labels for excluded in exclude):
+        return "exclude"
     return None
 
 
@@ -249,6 +259,9 @@ def _relay_guard_reason(
         blocker_open=inputs.has_open_blocker(candidate.number, candidate.input_type),
         claim_in_force=bool(in_force),
         agent_pr_open=agent_pr_open,
+        require_all=claim_config.require_all,
+        require_any=claim_config.require_any,
+        exclude=claim_config.exclude,
     )
 
 
@@ -315,7 +328,7 @@ def _relay_readback_failure(
         agent_id=agent_id,
         exclude_comment_id=own_comment_id,
     )
-    if guard in ("blocker", "claim", "agent-pr"):
+    if guard in ("blocker", "claim", "agent-pr", "require-all", "require-any", "exclude"):
         return guard
     return None
 

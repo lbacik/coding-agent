@@ -1274,12 +1274,8 @@ def finish_attempt(
     relay_section, live_relay_label = _prepare_relay(
         ledger, attempt_id, resolved.outcome
     )
-    if relay_section:
-        handoff_section = (
-            handoff_section + "\n\n" + relay_section
-            if handoff_section
-            else relay_section
-        )
+    section_parts = [part for part in (handoff_section, relay_section) if part]
+    handoff_section = "\n\n".join(section_parts)
     comments_section = ""
     try:
         late = late_trusted_comments(

@@ -359,3 +359,20 @@ def test_exclusion_reason_order(kwargs: dict[str, object], expected: str | None)
         _issue(RELAY_LABEL, assignees=("x",)), **params  # type: ignore[arg-type]
     )
     assert assigned in ("assigned", "relay-replaced", "relay-undeclared")
+
+
+def test_receiver_filters_apply_in_the_relay_lane(
+    tracker: FakeStepTracker, ledger: RunLedger
+) -> None:
+    from dataclasses import replace
+
+    tracker.inputs[NUMBER] = _issue(RELAY_LABEL, "ready-for-human")
+    _post(tracker, SOURCE_ATTEMPT, _record())
+    claim = replace(_claim_config(tracker), exclude=("ready-for-human",))
+
+    claimed = sweep_and_claim(
+        tracker, tracker, ledger, claim, relay=_relay_config(tracker)
+    )
+
+    assert claimed is None
+    _no_writes(tracker)
