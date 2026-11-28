@@ -314,8 +314,18 @@ def _workflow_record(
     if workflow.input.relay_label is not None:
         assert isinstance(record["input"], dict)
         record["input"]["relay_label"] = workflow.input.relay_label
-    if workflow.relays:
-        record["relays"] = dict(sorted(workflow.relays.items()))
+    if workflow.relays and config is not None and all(
+        target in config.workflows for target in workflow.relays.values()
+    ):
+        # Each entry names the receiving Workflow and its Relay Label, so the
+        # terminal writes apply the receiver's label from the pinned record.
+        record["relays"] = {
+            outcome: {
+                "workflow": target,
+                "label": config.workflows[target].input.relay_label,
+            }
+            for outcome, target in sorted(workflow.relays.items())
+        }
     if config is not None and workflow.input.relay_label is not None:
         sources: dict[str, list[str]] = {}
         for source_id, source in sorted(config.workflows.items()):
@@ -1159,13 +1169,27 @@ def effective_relay_label(record: Mapping[str, Any]) -> str | None:
     return label if isinstance(label, str) and label else None
 
 
-def effective_relay_target(record: Mapping[str, Any], outcome: str) -> str | None:
-    """The Workflow id a Terminal Outcome relays to, from the pinned record (§19)."""
+def effective_relay_target(
+    record: Mapping[str, Any], outcome: str
+) -> tuple[str, str] | None:
+    """The ``(Workflow id, Relay Label)`` a Terminal Outcome relays to (§19).
+
+    Read from the pinned record, never the loaded file. ``None`` where the
+    outcome declares no Relay or the entry is malformed.
+    """
     relays = _workflow_section(record).get("relays")
     if not isinstance(relays, Mapping):
         return None
-    target = relays.get(outcome)
-    return target if isinstance(target, str) and target else None
+    entry = relays.get(outcome)
+    if not isinstance(entry, Mapping):
+        return None
+    workflow = entry.get("workflow")
+    label = entry.get("label")
+    if not isinstance(workflow, str) or not workflow:
+        return None
+    if not isinstance(label, str) or not label:
+        return None
+    return workflow, label
 
 
 def effective_relay_declared(
@@ -1698,7 +1722,7 @@ def make_test_record(
     max_parallel_subagents_value: int = 2,
     round_handoff: Mapping[str, object] | None = None,
     relay_label: str | None = None,
-    relays: Mapping[str, str] | None = None,
+    relays: Mapping[str, Mapping[str, str]] | None = None,
     relay_sources: Mapping[str, Sequence[str]] | None = None,
     project_profile: Mapping[str, object] | None = None,
     pin: Mapping[str, object] | None = None,
@@ -1778,7 +1802,9 @@ def make_test_record(
     if relay_label is not None:
         workflow_section["input"]["relay_label"] = relay_label  # type: ignore[index]
     if relays:
-        workflow_section["relays"] = dict(relays)
+        workflow_section["relays"] = {
+            outcome: dict(entry) for outcome, entry in relays.items()
+        }
     if relay_sources:
         workflow_section["relay_sources"] = {
             source: list(outcomes) for source, outcomes in relay_sources.items()

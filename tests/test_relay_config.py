@@ -69,7 +69,9 @@ def test_triage_to_implement_relay_validates(tmp_path: Path) -> None:
 
 
 def test_effective_record_readers() -> None:
-    sender = make_test_record(relays={"completed": "implement"})
+    sender = make_test_record(
+        relays={"completed": {"workflow": "implement", "label": "triaged"}}
+    )
     receiver = make_test_record(
         workflow_id="implement",
         relay_label="triaged",
@@ -77,7 +79,7 @@ def test_effective_record_readers() -> None:
     )
     plain = make_test_record()
 
-    assert effective_relay_target(sender, "completed") == "implement"
+    assert effective_relay_target(sender, "completed") == ("implement", "triaged")
     assert effective_relay_target(sender, "failed") is None
     assert effective_relay_target(plain, "completed") is None
     assert effective_relay_label(receiver) == "triaged"
@@ -99,7 +101,7 @@ def test_pinned_workflow_record_carries_both_ends_of_a_relay(tmp_path: Path) -> 
     sender = {"workflow": _workflow_record(config.workflows["triage"], config)}
     receiver = {"workflow": _workflow_record(config.workflows["implement"], config)}
 
-    assert effective_relay_target(sender, "completed") == "implement"
+    assert effective_relay_target(sender, "completed") == ("implement", "triaged")
     assert effective_relay_label(receiver) == "triaged"
     assert effective_relay_declared(receiver, "triage", "completed")
     assert effective_relay_label(sender) is None

@@ -9,6 +9,7 @@ guessing from the current configuration.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 
 from coding_agent.provider.pinned_model import PinnedModel
@@ -123,6 +124,7 @@ def full_effective_configuration(
     api_key_env: str = "ANTHROPIC_API_KEY",
     gateway_url_env: str | None = None,
     gateway_url_source: str | None = None,
+    other_workflows: Sequence[Workflow] = (),
 ) -> dict[str, object]:
     """A full-shape pinned record for ``workflow`` (CFG-41, v4).
 
@@ -168,7 +170,10 @@ def full_effective_configuration(
             )
         },
         worker=WorkerSettings(),
-        workflows={workflow.id: workflow},
+        workflows={
+            workflow.id: workflow,
+            **{other.id: other for other in other_workflows},
+        },
         skills=(),
         source=Path("workflows.yaml"),
     )
